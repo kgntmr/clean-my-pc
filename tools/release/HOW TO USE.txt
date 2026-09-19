@@ -38,9 +38,14 @@ WHY DOES WINDOWS SAY "UNKNOWN PUBLISHER"?
    read exactly what it does.
 
 WANT TO REMOVE CLEAN MY PC?
-   Just delete the CleanMyPC folder. Nothing is installed.
-   Your undo history stays in C:\ProgramData\CleanMyPC - delete that
-   folder too once you are sure you won't need to undo anything.
+   Removing it does not undo its changes. If you want your PC back
+   exactly as it was, click "Undo" first. Then delete the CleanMyPC
+   folder (and any CleanMyPC-Report files on your Desktop).
+   Nothing is installed, so that is all.
+
+   Your undo history stays in C:\ProgramData\CleanMyPC. If you change
+   your mind later, download Clean My PC again and use the Undo tab.
+   Delete that folder too once you are sure you won't need it.
 
 
 Questions:       info@komodoworks.com

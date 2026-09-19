@@ -177,7 +177,8 @@ That service, task or program doesn't exist on your Windows version, or has alre
 Yes. Each PC keeps its own restore points.
 
 **How do I remove Clean My PC?**
-Delete the CleanMyPC folder. Nothing is installed. Your undo history stays in `C:\ProgramData\CleanMyPC`, so you can still undo later. Delete that folder too once you're sure you won't need it.
+Removing Clean My PC doesn't undo its changes. If you want your PC back exactly as it was, click **Undo** first, then delete the CleanMyPC folder (and any CleanMyPC-Report files on your Desktop). Nothing is installed, so that's all.
+Your undo history stays in `C:\ProgramData\CleanMyPC`. If you change your mind later, download Clean My PC again and use the Undo tab. Delete that folder too once you're sure you won't need it.
 
 ---
 
