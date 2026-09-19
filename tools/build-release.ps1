@@ -2,12 +2,13 @@
 <#
     Builds the user-friendly download: dist\CleanMyPC.zip
 
-    Layout inside the zip (only three things at the top, so nobody gets lost):
+    Layout inside the zip (only four things at the top, so nobody gets lost):
         CleanMyPC\
             Start Clean My PC.cmd
             Safety scan only.cmd
             HOW TO USE.txt
-            app\    (the app itself, its policies and license - plain text, readable)
+            App files - no need to open\    (the app, its policies and license - plain text, readable;
+                                             it has its own working start files in case someone opens it)
 
     The zip contains exactly the files in this repository - nothing is compiled or added.
     Prints the SHA256 checksum to publish with the release.
@@ -18,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $work = Join-Path $env:TEMP ('cmp-build-' + (Get-Date -Format 'yyyyMMddHHmmss'))
 $stage = Join-Path $work 'CleanMyPC'
-$app = Join-Path $stage 'app'
+$app = Join-Path $stage 'App files - no need to open'
 New-Item -ItemType Directory -Force -Path $app | Out-Null
 
 # Top level: only what a person needs to see
@@ -26,8 +27,8 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'release\Start Clean My PC.cmd')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'release\Safety scan only.cmd') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'release\HOW TO USE.txt') -Destination $stage
 
-# app\ : the program and its documents
-foreach ($f in 'CleanMyPC.ps1', 'README.md', 'PRIVACY.md', 'TERMS.md', 'SECURITY.md', 'LICENSE') {
+# App files folder: the program, its own start files and its documents
+foreach ($f in 'Start Clean My PC.cmd', 'Safety scan only.cmd', 'CleanMyPC.ps1', 'README.md', 'PRIVACY.md', 'TERMS.md', 'SECURITY.md', 'LICENSE') {
     Copy-Item -LiteralPath (Join-Path $repo $f) -Destination $app
 }
 foreach ($d in 'src', 'assets', 'docs') {

@@ -2,26 +2,23 @@ CLEAN MY PC - HOW TO USE
 Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
 
 
-1. UNZIP FIRST
-   If you are looking at this inside the zip file:
-   right-click CleanMyPC.zip  >  Extract All  >  Extract.
+STEP 1 - UNZIP IT (important)
+   Clean My PC cannot start from inside the zip file.
+   Right-click CleanMyPC.zip  >  Extract All  >  Extract.
+   A new CleanMyPC folder opens.
 
-2. START IT
-   Double-click "Start Clean My PC".
+STEP 2 - START IT
+   In the new folder, double-click "Start Clean My PC".
+   (You never need to open the "App files" folder.)
 
-   Windows may ask a few questions first:
+   Windows may ask a few questions first. This is normal:
    - "Windows protected your PC"          -> click "More info", then "Run anyway"
    - "Do you want to run this file?"      -> click "Run"
    - "Allow this app to make changes?"    -> click "Yes"
 
-   Why? Clean My PC is free and new, so it is not signed with a paid
-   certificate yet. Every file is plain text - you can open them in
-   Notepad and read exactly what they do.
-
-3. CLICK ONE BUTTON
-   Click the big "Clean my PC now" button.
-   It tells you what it will do, you click Yes, and it is done
-   in about a minute. Restart your PC when it says "All done!".
+STEP 3 - CLICK ONE BUTTON
+   Click the big "Clean my PC now" button, then "Yes".
+   It takes about a minute. Restart your PC when it says "All done!".
 
 
 CHANGED YOUR MIND?
@@ -30,6 +27,20 @@ CHANGED YOUR MIND?
 
 JUST WANT A CHECK-UP THAT CHANGES NOTHING?
    Double-click "Safety scan only".
+
+A WINDOW FULL OF CODE OPENED, OR WINDOWS ASKED "HOW DO YOU WANT TO OPEN THIS FILE?"
+   You opened one of the app's own files. Close it (pick nothing) and
+   double-click "Start Clean My PC" instead.
+
+WHY DOES WINDOWS SAY "UNKNOWN PUBLISHER"?
+   Clean My PC is free and new, and is not digitally signed yet (we have
+   applied for free code signing). Every file is plain text, so anyone can
+   read exactly what it does.
+
+WANT TO REMOVE CLEAN MY PC?
+   Just delete the CleanMyPC folder. Nothing is installed.
+   Your undo history stays in C:\ProgramData\CleanMyPC - delete that
+   folder too once you are sure you won't need to undo anything.
 
 
 Questions:       info@komodoworks.com

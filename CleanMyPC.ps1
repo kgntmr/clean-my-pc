@@ -1,3 +1,7 @@
+# ============================================================================
+#  LOOKING FOR HOW TO START CLEAN MY PC?  This file is the app's code.
+#  Close this window, then double-click "Start Clean My PC" instead.
+# ============================================================================
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -5,7 +9,7 @@
     Developed by KomodoWorks - https://www.komodoworks.com - free and open source (MIT).
 
 .DESCRIPTION
-    Double-click CleanMyPC.cmd to open the app. From PowerShell:
+    Double-click "Start Clean My PC" to open the app. From PowerShell:
         .\CleanMyPC.ps1                          open the app (asks for administrator rights)
         .\CleanMyPC.ps1 -Scan                    run only the read-only scan and open the HTML report
         .\CleanMyPC.ps1 -SelfTest                build the window without showing it (used for testing)
@@ -466,7 +470,7 @@ foreach ($line in @(
         'Connects to nothing: the app makes no network requests. Links only open when you click them.',
         'Changes nothing without you: every change is previewed, confirmed, recorded and can be undone.',
         'Deletes nothing permanently: files go to your Recycle Bin, scheduled tasks are disabled, not deleted.',
-        'Hides nothing: plain-text PowerShell you can read line by line. We never ship .exe files.',
+        'Hides nothing: plain-text PowerShell you can read line by line. No installer, nothing hidden.',
         'Free and open source under the MIT License. Not affiliated with Microsoft, NVIDIA, Intel or Google.')) {
     [void]$aboutPanel.Children.Add((New-Text ('-  ' + $line) 13 'Normal' '#0F1B1C' '4,4,0,0'))
 }

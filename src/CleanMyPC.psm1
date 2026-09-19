@@ -1,3 +1,7 @@
+# ============================================================================
+#  LOOKING FOR HOW TO START CLEAN MY PC?  This file is the app's code.
+#  Close this window, then double-click "Start Clean My PC" instead.
+# ============================================================================
 #Requires -Version 5.1
 <#
     Clean My PC - core engine.
@@ -12,7 +16,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.1.0'
+$script:AppVersion  = '1.1.1'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/clean-my-pc' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null

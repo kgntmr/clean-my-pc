@@ -19,10 +19,10 @@
 ## Get started in 3 steps
 
 1. **[Download Clean My PC](https://github.com/kgntmr/clean-my-pc/releases/latest/download/CleanMyPC.zip)**.
-2. Right-click the downloaded **CleanMyPC.zip** → **Extract All** → **Extract**.
-3. Open the new **CleanMyPC** folder, double-click **Start Clean My PC**, and click the big **Clean my PC now** button.
+2. **Unzip it:** right-click the downloaded **CleanMyPC.zip** → **Extract All** → **Extract**. *It can't start from inside the ZIP.*
+3. In the new **CleanMyPC** folder, double-click **Start Clean My PC**, then click the big **Clean my PC now** button.
 
-That's it. It tells you what it will do before it does anything, finishes in about a minute, and has an **Undo everything** button.
+That's it. It tells you what it will do before it does anything, finishes in about a minute, and has an **Undo everything** button. You never need to open the *App files* folder.
 
 <p align="center"><img src="docs/screenshot-home.png" width="820" alt="Clean My PC home screen with one big 'Clean my PC now' button"></p>
 
@@ -34,9 +34,11 @@ That's it. It tells you what it will do before it does anything, finishes in abo
 | "Do you want to run this file?" | **Run** |
 | "Do you want to allow this app to make changes?" | **Yes** |
 
-Why? Clean My PC isn't signed with a paid code-signing certificate yet, so Windows doesn't recognise the publisher. Every file is plain text, so you can open any of them in Notepad and read exactly what it does.
+Why? Clean My PC isn't digitally signed yet, so Windows says the publisher is unknown. We've applied for free code signing (see [Code Signing Policy](#code-signing-policy)). Meanwhile, every file is plain text, so you can open any of them in Notepad and read exactly what it does.
 
-Just want a check-up that changes nothing? Double-click **Safety scan only** instead.
+**Windows asked "How do you want to open this file?" or a window full of code opened?** You opened one of the app's own files. Close it (pick nothing) and double-click **Start Clean My PC** instead.
+
+Just want a check-up that changes nothing? Double-click **Safety scan only** instead. Want to make sure your download is genuine? [Here's how](SECURITY.md#check-that-your-download-is-genuine).
 
 **Requirements:** Windows 10 or 11 and an administrator account. Nothing needs to be installed.
 
@@ -103,7 +105,7 @@ Privacy Policy, Terms of Use, License and Security policy, readable offline insi
 
 Every claim above can be checked in a few minutes.
 
-**1. Read it.** Three places hold the whole app: `CleanMyPC.ps1` (the window), `src/CleanMyPC.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps and folders). `tools/` only contains the start files and the script that builds the download ZIP. In the download, the app is in the `app` folder.
+**1. Read it.** Three places hold the whole app: `CleanMyPC.ps1` (the window), `src/CleanMyPC.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps and folders). `tools/` only contains the download's start files and the script that builds the download ZIP. In the download, the app is in the *App files - no need to open* folder.
 
 **2. Search for network code.** Open PowerShell in the folder and run:
 ```powershell
@@ -137,10 +139,29 @@ Windows Home/Pro treat "diagnostic data = 0" as "Required". The effective switch
 
 - **[Privacy Policy](PRIVACY.md):** the app collects no personal data and makes no network connections.
 - **[Terms of Use](TERMS.md):** free, open source, provided as is. Irish law applies, and consumer rights are unaffected.
-- **[Security Policy](SECURITY.md):** how to report a vulnerability, and how to tell a genuine copy from a fake. **We never distribute `.exe` files.**
+- **[Security Policy](SECURITY.md):** how to report a vulnerability, and how to tell a genuine copy from a fake. **Only download it from this repository's [Releases](https://github.com/kgntmr/clean-my-pc/releases) page.**
 - **[License](LICENSE):** MIT.
 
 Clean My PC is independent and not affiliated with or endorsed by Microsoft, NVIDIA, Intel or Google. All trademarks belong to their owners.
+
+---
+
+## Code Signing Policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+> **Status:** applied for in September 2026, waiting for approval. Until it's approved, releases are **not signed yet** and Windows shows "Unknown publisher". This section will say when signed releases start.
+
+**What gets signed:** only files built from this repository's source code by GitHub Actions and published on this repository's [Releases](https://github.com/kgntmr/clean-my-pc/releases) page. Every signing request is approved by hand.
+
+**Team roles**
+
+| Role | Members |
+|---|---|
+| Committers and reviewers | [kgntmr](https://github.com/kgntmr) (KomodoWorks) |
+| Approvers | [kgntmr](https://github.com/kgntmr) (KomodoWorks) |
+
+**Privacy:** This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. Details: [Privacy Policy](PRIVACY.md).
 
 ---
 
@@ -155,12 +176,15 @@ That service, task or program doesn't exist on your Windows version, or has alre
 **Does it work on several PCs?**
 Yes. Each PC keeps its own restore points.
 
+**How do I remove Clean My PC?**
+Delete the CleanMyPC folder. Nothing is installed. Your undo history stays in `C:\ProgramData\CleanMyPC`, so you can still undo later. Delete that folder too once you're sure you won't need it.
+
 ---
 
 ## For developers
 
-- **Run from source:** clone the repo and double-click `CleanMyPC.cmd` (or `CleanMyPC-ScanOnly.cmd`).
-- **Build the download ZIP:** `powershell -ExecutionPolicy Bypass -File tools\build-release.ps1`. This creates `dist\CleanMyPC.zip` with the friendly layout (`Start Clean My PC`, `Safety scan only`, `HOW TO USE.txt`, and everything else in `app\`) and prints its SHA256 checksum. The ZIP contains exactly the files in this repo, and nothing is compiled.
+- **Run from source:** clone the repo and double-click `Start Clean My PC.cmd` (or `Safety scan only.cmd`).
+- **Build the download ZIP:** `powershell -ExecutionPolicy Bypass -File tools\build-release.ps1`. This creates `dist\CleanMyPC.zip` with the friendly layout (`Start Clean My PC`, `Safety scan only` and `HOW TO USE.txt` from `tools\release\`, and everything else in `App files - no need to open\`) and prints its SHA256 checksum. The ZIP contains exactly the files in this repo, and nothing is compiled.
 - **Test without changing anything:** `.\CleanMyPC.ps1 -SelfTest` builds the window without showing it, and `-Snapshot file.png -SnapshotTab 0` renders it to an image.
 
 ## Contributing

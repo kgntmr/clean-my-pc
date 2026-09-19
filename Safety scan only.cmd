@@ -1,8 +1,7 @@
 @echo off
 rem Clean My PC - safety scan only. Changes nothing and opens a report when finished.
-set "APPDIR=%~dp0App files - no need to open"
-if not exist "%APPDIR%\src\CleanMyPC.psm1" goto notextracted
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%APPDIR%\CleanMyPC.ps1" -Scan
+if not exist "%~dp0src\CleanMyPC.psm1" goto notextracted
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0CleanMyPC.ps1" -Scan
 exit /b
 
 :notextracted

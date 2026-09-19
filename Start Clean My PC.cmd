@@ -1,9 +1,8 @@
 @echo off
 rem Clean My PC - double-click to start. Windows will ask for administrator rights.
 rem Developed by KomodoWorks.com - free, open source, collects nothing.
-set "APPDIR=%~dp0App files - no need to open"
-if not exist "%APPDIR%\src\CleanMyPC.psm1" goto notextracted
-start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%APPDIR%\CleanMyPC.ps1"
+if not exist "%~dp0src\CleanMyPC.psm1" goto notextracted
+start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%~dp0CleanMyPC.ps1"
 exit /b
 
 :notextracted
