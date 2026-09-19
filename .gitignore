@@ -1,0 +1,3 @@
+# Scan reports and local test output - never commit these, they describe a real PC
+CleanMyPC-Report-*.html
+*.log

@@ -1,0 +1,908 @@
+#Requires -Version 5.1
+<#
+    Clean My PC - core engine.
+    Developed by KomodoWorks - https://www.komodoworks.com - MIT License.
+
+    Principles
+      * Scan is read-only.
+      * Every change is recorded in a restore point (%ProgramData%\CleanMyPC\restore\...) and can be undone.
+      * Files are only ever moved to the Recycle Bin - never permanently deleted.
+      * Scheduled tasks are disabled, never deleted.
+      * Security (Defender, SmartScreen, firewall) and Windows Update are never touched.
+      * No network requests, no telemetry, no data collection. Everything stays on this PC.
+#>
+
+$script:AppVersion  = '1.0.0'
+$script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/clean-my-pc' }
+$script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
+$script:LogSink     = $null
+$script:LogFile     = $null
+$script:Session     = $null
+$script:CatalogRoot = Join-Path $PSScriptRoot 'catalog'
+$script:DataRoot    = Join-Path $env:ProgramData 'CleanMyPC'
+$script:HostsPath   = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
+
+# Apps that are never removed, even if someone adds them to the catalog.
+$script:ProtectedAppPattern = '^(Microsoft\.WindowsStore|Microsoft\.StorePurchaseApp|Microsoft\.DesktopAppInstaller|Microsoft\.SecHealthUI|Microsoft\.Windows\.Photos|Microsoft\.WindowsCamera|Microsoft\.WindowsCalculator|Microsoft\.WindowsNotepad|Microsoft\.Paint|Microsoft\.ScreenSketch|Microsoft\.WindowsTerminal|Microsoft\.Winget\.Source|Microsoft\.VCLibs.*|Microsoft\.NET\..*|Microsoft\.UI\.Xaml.*|Microsoft\.WindowsAppRuntime.*|MicrosoftCorporationII\.WinAppRuntime.*|Microsoft\.Services\.Store.*|Microsoft\..*Extension[s]?|Microsoft\.LanguageExperiencePack.*|NVIDIACorp\..*|RealtekSemiconductorCorp\..*|AppUp\.Intel.*|Microsoft\.MicrosoftEdge\.Stable|Microsoft\.MicrosoftEdgeDevToolsClient)$'
+
+#region ---------------------------------------------------------------- helpers
+
+function Get-CmpInfo {
+    [pscustomobject]@{
+        Version    = $script:AppVersion
+        BrandName  = $script:Brand.Name
+        BrandUrl   = $script:Brand.Url
+        BrandEmail = $script:Brand.Email
+        RepoUrl    = $script:Brand.Repo
+        LogoPath   = Join-Path $script:AssetsRoot 'komodoworks-logo.png'
+        DataRoot   = $script:DataRoot
+    }
+}
+
+function Set-CmpLogSink {
+    param([scriptblock]$Sink)
+    $script:LogSink = $Sink
+}
+
+function Write-CmpLog {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Message,
+        [ValidateSet('INFO', 'OK', 'WARN', 'ERROR', 'PREVIEW', 'SKIP', 'STEP')][string]$Level = 'INFO'
+    )
+    $line = '[{0}] {1,-7} {2}' -f (Get-Date -Format 'HH:mm:ss'), $Level, $Message
+    if ($script:LogFile) { try { Add-Content -Path $script:LogFile -Value $line -Encoding UTF8 } catch { } }
+    if ($script:LogSink) { & $script:LogSink $line } else { Write-Host $line }
+}
+
+function Test-CmpAdmin {
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-CmpCatalog {
+    param([ValidateSet('privacy', 'apps', 'cleanup', 'nvidia')][string]$Name)
+    Import-PowerShellDataFile -Path (Join-Path $script:CatalogRoot "$Name.psd1")
+}
+
+function Format-CmpBytes {
+    param([double]$Bytes)
+    if ($Bytes -ge 1GB) { return '{0:N2} GB' -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return '{0:N1} MB' -f ($Bytes / 1MB) }
+    return '{0:N0} KB' -f ($Bytes / 1KB)
+}
+
+function Get-CmpSize {
+    param([string[]]$Paths)
+    $sum = 0
+    foreach ($p in $Paths) {
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        $m = Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum
+        if ($m.Sum) { $sum += $m.Sum }
+    }
+    return $sum
+}
+
+function Move-CmpToRecycleBin {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    try {
+        $item = Get-Item -LiteralPath $Path -Force
+        if ($item.PSIsContainer) {
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
+        } else {
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-CmpRegValue {
+    param([string]$Path, [string]$Name)
+    try {
+        $p = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+        return @{ Exists = $true; Value = $p.$Name }
+    } catch {
+        return @{ Exists = $false; Value = $null }
+    }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- restore points
+
+function Start-CmpSession {
+    param([string]$Name)
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $path = Join-Path $script:DataRoot "restore\$stamp-$Name"
+    New-Item -ItemType Directory -Path $path -Force | Out-Null
+    $script:Session = @{ Name = $Name; Path = $path; Started = (Get-Date).ToString('s'); Entries = New-Object System.Collections.ArrayList }
+    $script:LogFile = Join-Path $path 'log.txt'
+    Write-CmpLog "Restore point: $path" 'STEP'
+}
+
+function Save-CmpSession {
+    if (-not $script:Session) { return }
+    $data = @{ Name = $script:Session.Name; Started = $script:Session.Started; Entries = @($script:Session.Entries) }
+    $data | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $script:Session.Path 'state.json') -Encoding UTF8
+}
+
+function Add-CmpUndo {
+    param([hashtable]$Entry)
+    if (-not $script:Session) { return }
+    [void]$script:Session.Entries.Add($Entry)
+    Save-CmpSession
+}
+
+function Stop-CmpSession {
+    if (-not $script:Session) { return }
+    Save-CmpSession
+    Write-CmpLog ("Finished. {0} change(s) recorded - they can be undone from the Undo tab." -f $script:Session.Entries.Count) 'OK'
+    $script:Session = $null
+    $script:LogFile = $null
+}
+
+function Get-CmpRestorePoints {
+    $root = Join-Path $script:DataRoot 'restore'
+    if (-not (Test-Path $root)) { return @() }
+    Get-ChildItem -Path $root -Directory | Sort-Object Name -Descending | ForEach-Object {
+        $count = 0
+        $state = Join-Path $_.FullName 'state.json'
+        if (Test-Path $state) { try { $count = @((Get-Content $state -Raw | ConvertFrom-Json).Entries).Count } catch { } }
+        [pscustomobject]@{
+            Name    = $_.Name
+            Path    = $_.FullName
+            Changes = $count
+            Undone  = (Test-Path (Join-Path $_.FullName 'undone.txt'))
+        }
+    }
+}
+
+function Invoke-CmpUndo {
+    param([Parameter(Mandatory)][string]$Path)
+    $stateFile = Join-Path $Path 'state.json'
+    if (-not (Test-Path $stateFile)) { Write-CmpLog "No state.json in $Path" 'ERROR'; return }
+    $state = Get-Content $stateFile -Raw | ConvertFrom-Json
+    $entries = @($state.Entries)
+    [array]::Reverse($entries)
+    Write-CmpLog "Undoing $($entries.Count) change(s) from $(Split-Path $Path -Leaf)" 'STEP'
+    foreach ($e in $entries) {
+        try {
+            switch ($e.Type) {
+                'Service' {
+                    try { Set-Service -Name $e.Name -StartupType $e.StartType -ErrorAction Stop }
+                    catch {
+                        $map = @{ Disabled = 'disabled'; Manual = 'demand'; Automatic = 'auto' }
+                        & sc.exe config $e.Name start= $map[[string]$e.StartType] | Out-Null
+                    }
+                    if ($e.WasRunning) { Start-Service -Name $e.Name -ErrorAction SilentlyContinue }
+                    Write-CmpLog "Service $($e.Name) restored to $($e.StartType)" 'OK'
+                }
+                'Task' {
+                    Enable-ScheduledTask -TaskPath $e.Path -TaskName $e.Name -ErrorAction Stop | Out-Null
+                    Write-CmpLog "Task $($e.Path)$($e.Name) re-enabled" 'OK'
+                }
+                'Reg' {
+                    if ($e.Existed) {
+                        Set-ItemProperty -Path $e.Path -Name $e.Name -Value $e.OldValue -Type $e.Kind -ErrorAction Stop
+                        Write-CmpLog "$($e.Path)\$($e.Name) restored to $($e.OldValue)" 'OK'
+                    } else {
+                        Remove-ItemProperty -Path $e.Path -Name $e.Name -ErrorAction SilentlyContinue
+                        Write-CmpLog "$($e.Path)\$($e.Name) removed (was not set before)" 'OK'
+                    }
+                }
+                'Env' {
+                    [Environment]::SetEnvironmentVariable($e.Name, $e.OldValue, 'Machine')
+                    Write-CmpLog "Environment variable $($e.Name) restored" 'OK'
+                }
+                'FileRestore' {
+                    Copy-Item -LiteralPath $e.Backup -Destination $e.Path -Force
+                    Write-CmpLog "Restored $($e.Path) from backup" 'OK'
+                }
+                'FileCreated' {
+                    if (Move-CmpToRecycleBin $e.Path) { Write-CmpLog "Moved created file $($e.Path) to the Recycle Bin" 'OK' }
+                }
+                'Hosts' {
+                    Remove-CmpHostsBlock -Tag $e.Tag
+                }
+                'Recycled' {
+                    Write-CmpLog "Files from $($e.Path) are in the Recycle Bin - restore them there if you need them" 'INFO'
+                }
+                'Appx' {
+                    Write-CmpLog "App $($e.Name) was removed - reinstall it from the Microsoft Store if you want it back" 'INFO'
+                }
+                default { Write-CmpLog "Unknown undo entry type: $($e.Type)" 'WARN' }
+            }
+        } catch {
+            Write-CmpLog "Could not undo $($e.Type) $($e.Name)$($e.Path): $($_.Exception.Message)" 'WARN'
+        }
+    }
+    Set-Content -Path (Join-Path $Path 'undone.txt') -Value (Get-Date).ToString('s')
+    Write-CmpLog 'Undo finished. Restart the PC to make sure everything is back in effect.' 'OK'
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- change engine
+
+function Invoke-CmpServiceAction {
+    param($Action, [switch]$Preview)
+    $svc = Get-Service -Name $Action.Name -ErrorAction SilentlyContinue
+    if (-not $svc) { Write-CmpLog "Service $($Action.Name) is not on this PC - skipped" 'SKIP'; return }
+    $current = [string]$svc.StartType
+    $target = [string]$Action.StartType
+    if ($current -eq $target) { Write-CmpLog "Service $($Action.Name) is already $target" 'OK'; return }
+    if ($Preview) { Write-CmpLog "Would change service $($Action.Name): $current -> $target" 'PREVIEW'; return }
+    Add-CmpUndo @{ Type = 'Service'; Name = $Action.Name; StartType = $current; WasRunning = ($svc.Status -eq 'Running') }
+    if ($target -eq 'Disabled') { Stop-Service -Name $Action.Name -Force -ErrorAction SilentlyContinue }
+    try {
+        Set-Service -Name $Action.Name -StartupType $target -ErrorAction Stop
+    } catch {
+        $map = @{ Disabled = 'disabled'; Manual = 'demand'; Automatic = 'auto' }
+        & sc.exe config $Action.Name start= $map[$target] | Out-Null
+    }
+    $after = [string](Get-Service -Name $Action.Name).StartType
+    if ($after -eq $target) { Write-CmpLog "Service $($Action.Name) -> $target" 'OK' }
+    else { Write-CmpLog "Service $($Action.Name) is protected by Windows and could not be changed" 'WARN' }
+}
+
+function Invoke-CmpTaskAction {
+    param($Action, [switch]$Preview)
+    $tasks = @(Get-ScheduledTask -TaskPath $Action.Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like $Action.Name })
+    if ($tasks.Count -eq 0) { Write-CmpLog "Task $($Action.Path)$($Action.Name) is not on this PC - skipped" 'SKIP'; return }
+    foreach ($t in $tasks) {
+        $id = "$($t.TaskPath)$($t.TaskName)"
+        if ($t.State -eq 'Disabled') { Write-CmpLog "Task $id is already disabled" 'OK'; continue }
+        if ($Preview) { Write-CmpLog "Would disable task $id" 'PREVIEW'; continue }
+        try {
+            Disable-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -ErrorAction Stop | Out-Null
+            Add-CmpUndo @{ Type = 'Task'; Path = $t.TaskPath; Name = $t.TaskName }
+            Write-CmpLog "Task $id disabled" 'OK'
+        } catch {
+            Write-CmpLog "Task $id is protected by Windows - left as is" 'WARN'
+        }
+    }
+}
+
+function Invoke-CmpRegAction {
+    param($Action, [switch]$Preview)
+    $kind = if ($Action.Kind) { $Action.Kind } else { 'DWord' }
+    $label = "$($Action.Path)\$($Action.Name)"
+    $cur = Get-CmpRegValue -Path $Action.Path -Name $Action.Name
+    if ($cur.Exists -and ("$($cur.Value)" -eq "$($Action.Value)")) { Write-CmpLog "$label is already $($Action.Value)" 'OK'; return }
+    if ($Preview) {
+        $from = if ($cur.Exists) { $cur.Value } else { '(not set)' }
+        Write-CmpLog "Would set $label : $from -> $($Action.Value)" 'PREVIEW'
+        return
+    }
+    Add-CmpUndo @{ Type = 'Reg'; Path = $Action.Path; Name = $Action.Name; Existed = $cur.Exists; OldValue = $cur.Value; Kind = $kind }
+    try {
+        if (-not (Test-Path -Path $Action.Path)) { New-Item -Path $Action.Path -Force | Out-Null }
+        Set-ItemProperty -Path $Action.Path -Name $Action.Name -Value $Action.Value -Type $kind -ErrorAction Stop
+        Write-CmpLog "$label = $($Action.Value)" 'OK'
+    } catch {
+        Write-CmpLog "Could not set $label : $($_.Exception.Message)" 'ERROR'
+    }
+}
+
+function Invoke-CmpEnvAction {
+    param($Action, [switch]$Preview)
+    $cur = [Environment]::GetEnvironmentVariable($Action.Name, 'Machine')
+    if ($cur -eq $Action.Value) { Write-CmpLog "$($Action.Name) is already $($Action.Value)" 'OK'; return }
+    if ($Preview) { Write-CmpLog "Would set environment variable $($Action.Name)=$($Action.Value)" 'PREVIEW'; return }
+    Add-CmpUndo @{ Type = 'Env'; Name = $Action.Name; OldValue = $cur }
+    [Environment]::SetEnvironmentVariable($Action.Name, $Action.Value, 'Machine')
+    Write-CmpLog "Environment variable $($Action.Name)=$($Action.Value)" 'OK'
+}
+
+function Invoke-CmpVSCodeTelemetry {
+    param([switch]$Preview)
+    $codeRoot = Join-Path $env:APPDATA 'Code'
+    if (-not (Test-Path $codeRoot)) { Write-CmpLog 'VS Code is not installed for this user - skipped' 'SKIP'; return }
+    $userDir = Join-Path $codeRoot 'User'
+    $file = Join-Path $userDir 'settings.json'
+    $setting = '"telemetry.telemetryLevel": "off"'
+    if (Test-Path $file) {
+        $raw = Get-Content -LiteralPath $file -Raw
+        if ($raw -match '"telemetry\.telemetryLevel"\s*:\s*"off"') { Write-CmpLog 'VS Code telemetry is already off' 'OK'; return }
+        if ($raw -match '"telemetry\.telemetryLevel"') { Write-CmpLog 'VS Code has telemetry.telemetryLevel set to another value - set it to "off" in VS Code settings' 'WARN'; return }
+        if ($Preview) { Write-CmpLog "Would add $setting to $file" 'PREVIEW'; return }
+        $backup = Join-Path $script:Session.Path 'vscode-settings.json.bak'
+        Copy-Item -LiteralPath $file -Destination $backup -Force
+        Add-CmpUndo @{ Type = 'FileRestore'; Path = $file; Backup = $backup }
+        $new = ([regex]'\{').Replace($raw, "{`r`n    $setting,", 1)
+        Set-Content -LiteralPath $file -Value $new -Encoding UTF8
+    } else {
+        if ($Preview) { Write-CmpLog "Would create $file with $setting" 'PREVIEW'; return }
+        New-Item -ItemType Directory -Path $userDir -Force | Out-Null
+        Set-Content -LiteralPath $file -Value "{`r`n    $setting`r`n}" -Encoding UTF8
+        Add-CmpUndo @{ Type = 'FileCreated'; Path = $file }
+    }
+    Write-CmpLog 'VS Code telemetry turned off' 'OK'
+}
+
+function Invoke-CmpAction {
+    param($Action, [switch]$Preview)
+    switch ($Action.Type) {
+        'Service'         { Invoke-CmpServiceAction -Action $Action -Preview:$Preview }
+        'Task'            { Invoke-CmpTaskAction -Action $Action -Preview:$Preview }
+        'Reg'             { Invoke-CmpRegAction -Action $Action -Preview:$Preview }
+        'Env'             { Invoke-CmpEnvAction -Action $Action -Preview:$Preview }
+        'VSCodeTelemetry' { Invoke-CmpVSCodeTelemetry -Preview:$Preview }
+        default           { Write-CmpLog "Unknown action type '$($Action.Type)'" 'WARN' }
+    }
+}
+
+function Test-CmpActionApplied {
+    # Returns $true (done), $false (not done) or $null (not applicable on this PC).
+    param($Action)
+    switch ($Action.Type) {
+        'Service' {
+            $svc = Get-Service -Name $Action.Name -ErrorAction SilentlyContinue
+            if (-not $svc) { return $null }
+            return ([string]$svc.StartType -eq [string]$Action.StartType)
+        }
+        'Task' {
+            $tasks = @(Get-ScheduledTask -TaskPath $Action.Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like $Action.Name })
+            if ($tasks.Count -eq 0) { return $null }
+            return (@($tasks | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0)
+        }
+        'Reg' {
+            $cur = Get-CmpRegValue -Path $Action.Path -Name $Action.Name
+            return ($cur.Exists -and ("$($cur.Value)" -eq "$($Action.Value)"))
+        }
+        'Env' { return ([Environment]::GetEnvironmentVariable($Action.Name, 'Machine') -eq $Action.Value) }
+        'VSCodeTelemetry' {
+            $file = Join-Path $env:APPDATA 'Code\User\settings.json'
+            if (-not (Test-Path (Join-Path $env:APPDATA 'Code'))) { return $null }
+            if (-not (Test-Path $file)) { return $false }
+            return ((Get-Content -LiteralPath $file -Raw) -match '"telemetry\.telemetryLevel"\s*:\s*"off"')
+        }
+    }
+    return $null
+}
+
+function Get-CmpPrivacyStatus {
+    # Returns a hashtable Id -> 'Applied' | 'Partial' | 'NotApplied' | 'NotApplicable'
+    $result = @{}
+    foreach ($item in (Get-CmpCatalog privacy).Items) {
+        $states = @($item.Actions | ForEach-Object { Test-CmpActionApplied $_ })
+        $relevant = @($states | Where-Object { $null -ne $_ })
+        if ($relevant.Count -eq 0) { $result[$item.Id] = 'NotApplicable'; continue }
+        $done = @($relevant | Where-Object { $_ }).Count
+        if ($done -eq $relevant.Count) { $result[$item.Id] = 'Applied' }
+        elseif ($done -gt 0) { $result[$item.Id] = 'Partial' }
+        else { $result[$item.Id] = 'NotApplied' }
+    }
+    return $result
+}
+
+function Invoke-CmpPrivacy {
+    param([string[]]$Ids, [switch]$Preview)
+    $items = @((Get-CmpCatalog privacy).Items | Where-Object { $Ids -contains $_.Id })
+    if ($items.Count -eq 0) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
+    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } else { Start-CmpSession 'privacy' }
+    foreach ($item in $items) {
+        Write-CmpLog $item.Title 'STEP'
+        foreach ($a in $item.Actions) { Invoke-CmpAction -Action $a -Preview:$Preview }
+    }
+    if ($Preview) { Write-CmpLog 'Preview finished. Nothing was changed.' 'OK' } else { Stop-CmpSession }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- apps
+
+function Test-CmpProtectedApp {
+    param([string]$Name)
+    return ($Name -match $script:ProtectedAppPattern)
+}
+
+function Get-CmpBloatApps {
+    $installed = @(Get-AppxPackage -ErrorAction SilentlyContinue)
+    foreach ($item in (Get-CmpCatalog apps).Items) {
+        $pkg = $installed | Where-Object { $_.Name -like $item.Name } | Select-Object -First 1
+        if ($pkg -and -not (Test-CmpProtectedApp $pkg.Name)) {
+            [pscustomobject]@{
+                Name        = $pkg.Name
+                Title       = $item.Title
+                Description = $item.Description
+                Recommended = [bool]$item.Recommended
+            }
+        }
+    }
+}
+
+function Invoke-CmpRemoveApps {
+    param([string[]]$Names, [switch]$Deprovision, [switch]$Preview)
+    if (-not $Names) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
+    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } else { Start-CmpSession 'apps' }
+    foreach ($n in $Names) {
+        if (Test-CmpProtectedApp $n) { Write-CmpLog "$n is protected and will not be removed" 'WARN'; continue }
+        $pkgs = @(Get-AppxPackage -Name $n -ErrorAction SilentlyContinue)
+        if ($pkgs.Count -eq 0) { Write-CmpLog "$n is not installed - skipped" 'SKIP'; continue }
+        if ($Preview) { Write-CmpLog "Would remove $n" 'PREVIEW'; continue }
+        foreach ($p in $pkgs) {
+            try {
+                Remove-AppxPackage -Package $p.PackageFullName -ErrorAction Stop
+                Add-CmpUndo @{ Type = 'Appx'; Name = $n }
+                Write-CmpLog "Removed $n" 'OK'
+            } catch {
+                Write-CmpLog "Could not remove $n : $($_.Exception.Message)" 'WARN'
+            }
+        }
+        if ($Deprovision) {
+            Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object DisplayName -eq $n | ForEach-Object {
+                try {
+                    Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction Stop | Out-Null
+                    Write-CmpLog "$n will not be reinstalled for new user accounts" 'OK'
+                } catch { }
+            }
+        }
+    }
+    if ($Preview) { Write-CmpLog 'Preview finished. Nothing was changed.' 'OK' } else { Stop-CmpSession }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- clean-up
+
+function Resolve-CmpPaths {
+    param([string[]]$Patterns)
+    foreach ($pat in $Patterns) {
+        $expanded = [Environment]::ExpandEnvironmentVariables($pat)
+        Get-Item -Path $expanded -Force -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer } | ForEach-Object { $_.FullName }
+    }
+}
+
+function Get-CmpCleanupTargets {
+    foreach ($item in (Get-CmpCatalog cleanup).Items) {
+        $paths = @(Resolve-CmpPaths $item.Paths)
+        [pscustomobject]@{
+            Id          = $item.Id
+            Title       = $item.Title
+            Description = $item.Description
+            Recommended = [bool]$item.Recommended
+            Paths       = $paths
+            SizeBytes   = if ($paths.Count) { Get-CmpSize $paths } else { 0 }
+        }
+    }
+}
+
+function Invoke-CmpCleanup {
+    param([string[]]$Ids, [switch]$Preview)
+    $items = @((Get-CmpCatalog cleanup).Items | Where-Object { $Ids -contains $_.Id })
+    if ($items.Count -eq 0) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
+    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be moved.' 'STEP' } else { Start-CmpSession 'cleanup' }
+    $total = 0
+    foreach ($item in $items) {
+        Write-CmpLog $item.Title 'STEP'
+        if ($item.RequiresClosed -and (Get-Process -Name $item.RequiresClosed -ErrorAction SilentlyContinue)) {
+            Write-CmpLog "Close $($item.RequiresClosed) first - skipped" 'WARN'
+            continue
+        }
+        $cutoff = if ($item.MinAgeHours) { (Get-Date).AddHours(-[double]$item.MinAgeHours) } else { $null }
+        foreach ($root in @(Resolve-CmpPaths $item.Paths)) {
+            $children = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)
+            if ($cutoff) { $children = @($children | Where-Object { $_.LastWriteTime -lt $cutoff }) }
+            $moved = 0; $bytes = 0
+            foreach ($c in $children) {
+                $size = if ($c.PSIsContainer) { Get-CmpSize @($c.FullName) } else { $c.Length }
+                if ($Preview) { $moved++; $bytes += $size; continue }
+                if (Move-CmpToRecycleBin $c.FullName) { $moved++; $bytes += $size }
+            }
+            $total += $bytes
+            if ($Preview) {
+                Write-CmpLog ("Would move {0} item(s), {1}, from {2}" -f $moved, (Format-CmpBytes $bytes), $root) 'PREVIEW'
+            } else {
+                Write-CmpLog ("Moved {0} item(s), {1}, from {2} to the Recycle Bin (items in use were skipped)" -f $moved, (Format-CmpBytes $bytes), $root) 'OK'
+                if ($moved) { Add-CmpUndo @{ Type = 'Recycled'; Path = $root; Items = $moved } }
+            }
+        }
+    }
+    if ($Preview) {
+        Write-CmpLog ("Preview finished. About {0} could be freed." -f (Format-CmpBytes $total)) 'OK'
+    } else {
+        Write-CmpLog ("About {0} moved to the Recycle Bin. Empty the Recycle Bin yourself when you are happy - this tool never permanently deletes." -f (Format-CmpBytes $total)) 'OK'
+        Stop-CmpSession
+    }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- NVIDIA
+
+function Test-CmpHostBlocked {
+    param([string[]]$Lines, [string]$HostName)
+    return [bool]($Lines | Where-Object { $_ -match "^\s*0\.0\.0\.0\s+$([regex]::Escape($HostName))(\s|$)" })
+}
+
+function Add-CmpHostsBlock {
+    param([string[]]$HostNames, [string]$Tag, [switch]$Preview)
+    $lines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
+    $missing = @($HostNames | Where-Object { -not (Test-CmpHostBlocked -Lines $lines -HostName $_) })
+    if ($missing.Count -eq 0) { Write-CmpLog 'All listed servers are already blocked' 'OK'; return }
+    if ($Preview) { foreach ($m in $missing) { Write-CmpLog "Would block $m" 'PREVIEW' }; return }
+    Copy-Item -Path $script:HostsPath -Destination (Join-Path $script:Session.Path 'hosts.bak') -Force
+    Add-CmpUndo @{ Type = 'Hosts'; Tag = $Tag }
+    $add = @('') + @($missing | ForEach-Object { "0.0.0.0 $_  # $Tag" })
+    Add-Content -Path $script:HostsPath -Value $add -Encoding ASCII
+    foreach ($m in $missing) { Write-CmpLog "Blocked $m" 'OK' }
+}
+
+function Remove-CmpHostsBlock {
+    param([string]$Tag)
+    $lines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
+    $keep = @($lines | Where-Object { $_ -notmatch [regex]::Escape("# $Tag") })
+    Set-Content -Path $script:HostsPath -Value $keep -Encoding ASCII
+    & ipconfig.exe /flushdns | Out-Null
+    Write-CmpLog "Removed hosts entries tagged '$Tag'" 'OK'
+}
+
+function Get-CmpNvidiaStatus {
+    $cat = Get-CmpCatalog nvidia
+    $lines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
+    [pscustomobject]@{
+        NvidiaAppInstalled = (Test-Path (Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVIDIA App'))
+        NvidiaGpu          = [bool](Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object Name -match 'NVIDIA')
+        HostsBlocked       = @($cat.Hosts | Where-Object { Test-CmpHostBlocked -Lines $lines -HostName $_ }).Count
+        HostsTotal         = @($cat.Hosts).Count
+        FlagsSet           = @($cat.Flags | Where-Object { "$((Get-CmpRegValue -Path $_.Path -Name $_.Name).Value)" -eq "$($_.Value)" }).Count
+        FlagsTotal         = @($cat.Flags).Count
+        TelemetryPlugin    = (Test-Path (Join-Path $env:ProgramFiles 'NVIDIA Corporation\NvTelemetry\plugin\NvTelemetry64.dll'))
+    }
+}
+
+function Invoke-CmpNvidia {
+    param([string[]]$Ids, [switch]$Preview)
+    if (-not $Ids) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
+    $cat = Get-CmpCatalog nvidia
+    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } else { Start-CmpSession 'nvidia' }
+    if ($Ids -contains 'nv.hosts') {
+        Write-CmpLog 'Block NVIDIA telemetry servers (hosts file)' 'STEP'
+        Add-CmpHostsBlock -HostNames $cat.Hosts -Tag 'CleanMyPC-NVIDIA' -Preview:$Preview
+    }
+    if ($Ids -contains 'nv.flags') {
+        Write-CmpLog "Set NVIDIA's own telemetry opt-out flags" 'STEP'
+        foreach ($f in $cat.Flags) {
+            Invoke-CmpRegAction -Action @{ Path = $f.Path; Name = $f.Name; Value = $f.Value; Kind = 'DWord' } -Preview:$Preview
+        }
+    }
+    if ($Preview) {
+        Write-CmpLog 'Preview finished. Nothing was changed.' 'OK'
+    } else {
+        & ipconfig.exe /flushdns | Out-Null
+        Write-CmpLog 'NVIDIA App, driver updates and game optimization are unaffected. Re-run this after NVIDIA App updates.' 'INFO'
+        Stop-CmpSession
+    }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- scan (read-only)
+
+function Invoke-CmpAudit {
+    <#
+        Read-only health, privacy and malware check. Writes an HTML report and returns a summary.
+        Nothing on the PC is changed.
+    #>
+    param([string]$OutFile = (Join-Path ([Environment]::GetFolderPath('Desktop')) ("CleanMyPC-Report-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmm'))))
+
+    $findings = New-Object System.Collections.ArrayList
+    $isAdmin = Test-CmpAdmin
+    function Add-Finding([string]$Section, [string]$Severity, [string]$Title, [string]$Detail = '') {
+        [void]$findings.Add([pscustomobject]@{ Section = $Section; Severity = $Severity; Title = $Title; Detail = $Detail })
+    }
+
+    $suspiciousCmd = '(?i)(cmd(\.exe)?\s+/c\s+start\s+\S*(https?:|www\.))|(\bstart\s+(https?://|www\.))|\bmshta\b|\bwscript\b|\bcscript\b|powershell[^;|]*\s-(e|enc|encodedcommand)\s|-w(indowstyle)?\s+hidden|downloadstring|\\AppData\\Local\\Temp\\|\\Users\\Public\\'
+    $suspiciousTask = '(?i)reg(\.exe)?\s+add\s+\S*\\CurrentVersion\\Run|\bstart\s+\S*(https?://|www\.)|\bmshta\b|\bwscript\b|\bcscript\b|powershell[^;]*\s-(e|enc|encodedcommand)\s|downloadstring|invoke-webrequest|\\AppData\\Local\\Temp\\|\\Users\\Public\\'
+    $correlationRoots = @($env:LOCALAPPDATA, $env:APPDATA, (Join-Path $env:USERPROFILE 'AppData\LocalLow'), $env:ProgramData,
+        $env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:USERPROFILE 'Downloads'), ([Environment]::GetFolderPath('Desktop')), 'C:\Games') |
+        Where-Object { $_ -and (Test-Path $_) }
+
+    function Get-NearbyFolders([datetime]$When) {
+        # Folders created within 3 minutes of $When - the likely source of a malicious entry.
+        $hits = foreach ($r in $correlationRoots) {
+            Get-ChildItem -Path $r -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { [math]::Abs(($_.CreationTime - $When).TotalMinutes) -le 3 } |
+                ForEach-Object { '{0}  (created {1:yyyy-MM-dd HH:mm:ss})' -f $_.FullName, $_.CreationTime }
+        }
+        return @($hits)
+    }
+
+    Write-CmpLog 'Scan started (read-only - nothing will be changed)' 'STEP'
+
+    # ---- 1. Startup entries
+    Write-CmpLog 'Checking startup entries...' 'INFO'
+    $runKeys = @(
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
+        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce',
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run')
+    $approved = @{}
+    foreach ($ak in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32') {
+        $p = Get-ItemProperty -Path $ak -ErrorAction SilentlyContinue
+        if ($p) { $p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { if ($_.Value -is [byte[]] -and $_.Value.Length) { $approved[$_.Name] = ($_.Value[0] -eq 3) } } }
+    }
+    $startupCount = 0
+    foreach ($k in $runKeys) {
+        $p = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' })) {
+            $startupCount++
+            $state = if ($approved.ContainsKey($prop.Name) -and $approved[$prop.Name]) { ' (disabled in Task Manager)' } else { '' }
+            $detail = "$k`n$($prop.Name) = $($prop.Value)"
+            if ("$($prop.Value)" -match $suspiciousCmd) { Add-Finding 'Startup & persistence' 'High' "Suspicious startup entry: $($prop.Name)$state" "$detail`nThis launches a website, script or hidden command at login - typical adware/browser-hijacker behaviour." }
+            else { Add-Finding 'Startup & persistence' 'Info' "Startup entry: $($prop.Name)$state" $detail }
+        }
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($folder in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('CommonStartup'))) {
+        Get-ChildItem -Path $folder -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' } | ForEach-Object {
+            $startupCount++
+            $target = if ($_.Extension -eq '.lnk') { $s = $shell.CreateShortcut($_.FullName); "$($s.TargetPath) $($s.Arguments)" } else { $_.FullName }
+            if ($target -match $suspiciousCmd -or $_.Extension -match '\.(bat|cmd|vbs|js|ps1|hta)$') { Add-Finding 'Startup & persistence' 'High' "Suspicious item in Startup folder: $($_.Name)" "$($_.FullName)`n-> $target" }
+            else { Add-Finding 'Startup & persistence' 'Info' "Startup folder item: $($_.Name)" "$($_.FullName)`n-> $target" }
+        }
+    }
+
+    # ---- 2. Scheduled tasks
+    Write-CmpLog 'Checking scheduled tasks...' 'INFO'
+    foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+        $actions = (@($t.Actions) | ForEach-Object { ("{0} {1}" -f $_.Execute, $_.Arguments).Trim() }) -join ' ; '
+        $id = "$($t.TaskPath)$($t.TaskName)"
+        if ($actions -match $suspiciousTask) {
+            $detail = "Action: $actions`nState: $($t.State)"
+            $taskFile = Join-Path $env:WINDIR ("System32\Tasks\" + $t.TaskPath.TrimStart('\') + $t.TaskName)
+            if (Test-Path $taskFile) {
+                $created = (Get-Item $taskFile -Force).CreationTime
+                $detail += "`nTask created: $($created.ToString('yyyy-MM-dd HH:mm:ss'))"
+                $near = Get-NearbyFolders $created
+                if ($near.Count) { $detail += "`nFolders created within 3 minutes of this task (likely source):`n  " + ($near -join "`n  ") }
+            } elseif (-not $isAdmin) { $detail += "`n(Run as administrator to see when it was created and what was installed at the same time.)" }
+            Add-Finding 'Scheduled tasks' 'High' "Suspicious scheduled task: $id" $detail
+        } elseif ($t.TaskPath -notlike '\Microsoft\*') {
+            Add-Finding 'Scheduled tasks' 'Info' "Third-party task: $id" "Action: $actions`nState: $($t.State)"
+        }
+    }
+
+    # ---- 3. Other persistence tricks
+    Write-CmpLog 'Checking other persistence locations...' 'INFO'
+    foreach ($cls in 'CommandLineEventConsumer', 'ActiveScriptEventConsumer') {
+        Get-CimInstance -Namespace root\subscription -ClassName $cls -ErrorAction SilentlyContinue | ForEach-Object {
+            Add-Finding 'Startup & persistence' 'High' "WMI event consumer: $($_.Name)" ("{0}{1}" -f $_.CommandLineTemplate, $_.ScriptText)
+        }
+    }
+    Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options' -ErrorAction SilentlyContinue | ForEach-Object {
+        $dbg = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).Debugger
+        if ($dbg) { Add-Finding 'Startup & persistence' 'Medium' "Program hijack (IFEO debugger) on $($_.PSChildName)" "Runs instead: $dbg" }
+    }
+    $wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue
+    if ($wl.Shell -and $wl.Shell -notmatch '^\s*explorer\.exe\s*$') { Add-Finding 'Startup & persistence' 'High' 'Winlogon shell has been changed' "Shell = $($wl.Shell)" }
+    if ($wl.Userinit -and $wl.Userinit -notmatch '^\s*C:\\Windows\\system32\\userinit\.exe,?\s*$') { Add-Finding 'Startup & persistence' 'High' 'Winlogon Userinit has been changed' "Userinit = $($wl.Userinit)" }
+    $appinit = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows' -ErrorAction SilentlyContinue
+    if ($appinit.AppInit_DLLs -and $appinit.LoadAppInit_DLLs -eq 1) { Add-Finding 'Startup & persistence' 'High' 'AppInit_DLLs is loading extra DLLs into every program' $appinit.AppInit_DLLs }
+
+    # ---- 4. Network hijacks
+    Write-CmpLog 'Checking hosts file, proxy and DNS...' 'INFO'
+    $blockedHosts = New-Object System.Collections.ArrayList
+    foreach ($line in @(Get-Content $script:HostsPath -ErrorAction SilentlyContinue)) {
+        $l = $line.Trim()
+        if (-not $l -or $l.StartsWith('#')) { continue }
+        $parts = $l -split '\s+'
+        if ($parts[0] -in '0.0.0.0', '127.0.0.1', '::1', '::') { [void]$blockedHosts.Add($parts[1]) }
+        else { Add-Finding 'Network' 'High' "Hosts file redirects $($parts[1]) to $($parts[0])" "$l`nRedirecting real websites to other addresses is a classic phishing/hijack trick unless you set it up yourself." }
+    }
+    if ($blockedHosts.Count) { Add-Finding 'Network' 'Info' "Hosts file blocks $($blockedHosts.Count) domain(s)" ($blockedHosts -join "`n") }
+    $inet = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+    if ($inet.ProxyEnable -eq 1 -or $inet.AutoConfigURL) { Add-Finding 'Network' 'Medium' 'A proxy is configured' "ProxyServer = $($inet.ProxyServer)`nAutoConfigURL = $($inet.AutoConfigURL)`nIf you did not set this up (VPN, work, school), it may be intercepting your traffic." }
+    $dns = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object ServerAddresses | ForEach-Object { "$($_.InterfaceAlias): $($_.ServerAddresses -join ', ')" })
+    if ($dns) { Add-Finding 'Network' 'Info' 'DNS servers in use' ($dns -join "`n") }
+
+    # ---- 5. Services running from unusual places
+    Write-CmpLog 'Checking services...' 'INFO'
+    Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { $_.PathName } | ForEach-Object {
+        # Only look at the executable itself, not its arguments (arguments often mention AppData legitimately).
+        $exePath = if ($_.PathName -match '^\s*"([^"]+)"') { $matches[1] } elseif ($_.PathName -match '^\s*(\S+?\.exe)\b') { $matches[1] } else { $_.PathName }
+        if ($exePath -match '(?i)\\AppData\\|\\Temp\\|\\Users\\Public\\') {
+            Add-Finding 'Services' 'Medium' "Service runs from a user folder: $($_.DisplayName)" "$($_.Name)`n$($_.PathName)`nState: $($_.State), start: $($_.StartMode)"
+        }
+    }
+
+    # ---- 6. Unsigned programs in user-writable folders
+    Write-CmpLog 'Checking programs in user folders for missing/invalid signatures (this can take a minute)...' 'INFO'
+    $skip = '(?i)\\node_modules\\|\\npm-cache\\|\\\.vscode\\|\\Programs\\Python\\|\\go\\pkg\\|\\Android\\Sdk\\|\\\.gradle\\|\\\.m2\\|\\\.cargo\\|\\\.rustup\\|\\WindowsApps\\|\\Packages\\|\\Microsoft\\WindowsApps\\'
+    $scanRoots = @($env:LOCALAPPDATA, $env:APPDATA, (Join-Path $env:USERPROFILE 'AppData\LocalLow'), (Join-Path $env:USERPROFILE 'Downloads'), $env:PUBLIC, $env:TEMP) | Where-Object { $_ -and (Test-Path $_) }
+    $exe = foreach ($r in $scanRoots) { Get-ChildItem -Path $r -Recurse -Force -File -Include *.exe, *.scr -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch $skip } }
+    $exe = @($exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1500)
+    $unsigned = foreach ($f in $exe) {
+        $sig = Get-AuthenticodeSignature -FilePath $f.FullName -ErrorAction SilentlyContinue
+        if ($sig -and $sig.Status -ne 'Valid') { [pscustomobject]@{ File = $f.FullName; Status = [string]$sig.Status; Date = $f.LastWriteTime } }
+    }
+    foreach ($u in @($unsigned | Where-Object Status -eq 'HashMismatch')) { Add-Finding 'Files' 'High' "Modified signed program (signature broken): $(Split-Path $u.File -Leaf)" "$($u.File)`nThe file was signed by its publisher but has been altered since - typical of cracks or infected files." }
+    $plain = @($unsigned | Where-Object Status -ne 'HashMismatch' | Select-Object -First 40)
+    if ($plain.Count) { Add-Finding 'Files' 'Medium' "$($plain.Count) unsigned program(s) in user folders (newest first)" (($plain | ForEach-Object { '{0:yyyy-MM-dd}  {1}' -f $_.Date, $_.File }) -join "`n") }
+
+    # ---- 7. Unofficial / cracked software indicators
+    Write-CmpLog 'Looking for signs of cracked/unofficial software...' 'INFO'
+    # Only unambiguous names - generic words (codex, rune, plaza, reloaded...) collide with legitimate software.
+    $crackNames = '(?i)^(nodvd|crack|cracked|codex-rune|empress|skidrow|fitgirl|fitgirl repacks|dodi|dodi repacks|anadius|goldberg|goldberg_emu|steam_emu|smartsteamemu|creamapi|cream_api|tenoke)$'
+    $crackFiles = '(?i)^(steam_emu\.ini|cream_api\.ini|codex\.ini|rune\.ini|steam_api64\.cdx|smartsteamemu\.ini|onlinefix\.ini|cpy\.ini)$'
+    $gameRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, 'C:\Games', (Join-Path $env:USERPROFILE 'Downloads'), ([Environment]::GetFolderPath('Desktop')), $env:LOCALAPPDATA, $env:APPDATA) | Where-Object { $_ -and (Test-Path $_) }
+    $indicators = foreach ($r in $gameRoots) {
+        Get-ChildItem -Path $r -Recurse -Depth 4 -Force -ErrorAction SilentlyContinue |
+            Where-Object { ($_.PSIsContainer -and $_.Name -match $crackNames) -or (-not $_.PSIsContainer -and $_.Name -match $crackFiles) } |
+            Select-Object -ExpandProperty FullName
+    }
+    foreach ($i in @($indicators | Select-Object -Unique -First 25)) {
+        Add-Finding 'Files' 'Medium' 'Cracked/unofficial software indicator' "$i`nCracked games and software are one of the most common ways adware and password stealers get onto PCs."
+    }
+
+    # ---- 8. Browsers
+    Write-CmpLog 'Checking browser extensions and notification permissions...' 'INFO'
+    $browsers = @{ 'Chrome' = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'; 'Edge' = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'; 'Brave' = Join-Path $env:LOCALAPPDATA 'BraveSoftware\Brave-Browser\User Data' }
+    foreach ($b in $browsers.Keys) {
+        $root = $browsers[$b]
+        if (-not (Test-Path $root)) { continue }
+        foreach ($prof in @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' })) {
+            foreach ($ext in @(Get-ChildItem (Join-Path $prof.FullName 'Extensions') -Directory -ErrorAction SilentlyContinue)) {
+                $manifest = Get-ChildItem $ext.FullName -Recurse -Depth 1 -Filter manifest.json -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $manifest) { continue }
+                try { $j = Get-Content $manifest.FullName -Raw | ConvertFrom-Json } catch { continue }
+                $name = [string]$j.name
+                if ($name -like '__MSG_*') {
+                    $key = $name.Trim('_').Substring(4)
+                    foreach ($loc in 'en', 'en_US', 'en_GB') {
+                        $mf = Join-Path $manifest.DirectoryName "_locales\$loc\messages.json"
+                        if (Test-Path $mf) { try { $msgs = Get-Content $mf -Raw | ConvertFrom-Json; $hit = $msgs.PSObject.Properties | Where-Object { $_.Name -ieq $key } | Select-Object -First 1; if ($hit) { $name = $hit.Value.message; break } } catch { } }
+                    }
+                }
+                $perms = @($j.permissions) + @($j.host_permissions) | Where-Object { $_ -is [string] }
+                $broad = @($perms | Where-Object { $_ -in '<all_urls>', '*://*/*', 'http://*/*', 'https://*/*' }).Count -gt 0
+                $sev = if ($broad -and ($perms -contains 'webRequest' -or $perms -contains 'scripting' -or $perms -contains 'tabs')) { 'Medium' } else { 'Info' }
+                Add-Finding 'Browsers' $sev "$b extension: $name" ("Profile: {0}`nID: {1}`nPermissions: {2}{3}" -f $prof.Name, $ext.Name, ($perms -join ', '), $(if ($sev -eq 'Medium') { "`nCan read and change every website you visit - keep it only if you trust it." } else { '' }))
+            }
+            $prefs = Join-Path $prof.FullName 'Preferences'
+            if (Test-Path $prefs) {
+                try {
+                    $pj = Get-Content $prefs -Raw | ConvertFrom-Json
+                    $n = $pj.profile.content_settings.exceptions.notifications
+                    if ($n) {
+                        $allowed = @($n.PSObject.Properties | Where-Object { $_.Value.setting -eq 1 } | ForEach-Object { $_.Name })
+                        if ($allowed.Count) { Add-Finding 'Browsers' 'Medium' "$b ($($prof.Name)): sites allowed to show notifications" (($allowed -join "`n") + "`nNotification spam from sites like these is a common adware trick. Remove any you do not recognise in the browser's site settings.") }
+                    }
+                } catch { }
+            }
+        }
+    }
+
+    # ---- 9. Security basics
+    Write-CmpLog 'Checking Microsoft Defender and firewall...' 'INFO'
+    $mp = Get-MpComputerStatus -ErrorAction SilentlyContinue
+    if ($mp) {
+        if (-not $mp.RealTimeProtectionEnabled) { Add-Finding 'Security' 'High' 'Defender real-time protection is OFF' 'Turn it back on in Windows Security unless another antivirus is installed.' }
+        $age = ((Get-Date) - $mp.AntivirusSignatureLastUpdated).Days
+        if ($age -gt 7) { Add-Finding 'Security' 'Medium' "Defender virus definitions are $age days old" 'Run Windows Update or open Windows Security > Protection updates.' }
+        $lastFull = if ($mp.FullScanEndTime) { $mp.FullScanEndTime.ToString('yyyy-MM-dd') } else { 'never' }
+        Add-Finding 'Security' 'Info' 'Microsoft Defender status' ("Real-time protection: {0}`nDefinitions updated: {1:yyyy-MM-dd}`nLast full scan: {2}" -f $mp.RealTimeProtectionEnabled, $mp.AntivirusSignatureLastUpdated, $lastFull)
+    }
+    if ($isAdmin) {
+        $pref = Get-MpPreference -ErrorAction SilentlyContinue
+        foreach ($x in @($pref.ExclusionPath) | Where-Object { $_ }) {
+            $sev = if ($x -match '(?i)\\AppData\\|\\Temp\\|\\Users\\Public\\|^[A-Z]:\\?$') { 'High' } else { 'Info' }
+            Add-Finding 'Security' $sev "Defender exclusion: $x" 'Files here are not scanned. Malware sometimes adds exclusions for itself.'
+        }
+    }
+    Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { -not $_.Enabled } | ForEach-Object { Add-Finding 'Security' 'High' "Windows Firewall is off for the $($_.Name) profile" '' }
+
+    # ---- 10. Telemetry status
+    Write-CmpLog 'Checking telemetry status...' 'INFO'
+    $status = Get-CmpPrivacyStatus
+    $open = @((Get-CmpCatalog privacy).Items | Where-Object { $status[$_.Id] -in 'NotApplied', 'Partial' -and $_.Recommended })
+    if ($open.Count) { Add-Finding 'Privacy & telemetry' 'Medium' "$($open.Count) recommended privacy setting(s) are not applied yet" (($open | ForEach-Object { "- $($_.Title)" }) -join "`n") }
+    else { Add-Finding 'Privacy & telemetry' 'Info' 'All recommended privacy settings are applied' '' }
+    $nv = Get-CmpNvidiaStatus
+    if ($nv.NvidiaAppInstalled -and $nv.HostsBlocked -lt $nv.HostsTotal) { Add-Finding 'Privacy & telemetry' 'Medium' "NVIDIA telemetry is not blocked ($($nv.HostsBlocked)/$($nv.HostsTotal) servers)" 'Use the NVIDIA tab. Do NOT delete NVIDIA''s telemetry plugin - that breaks NVIDIA App.' }
+
+    # ---- 11. Performance snapshot
+    Write-CmpLog 'Taking a performance snapshot...' 'INFO'
+    $os = Get-CimInstance Win32_OperatingSystem
+    $usedGB = ($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1MB
+    $top = Get-Process | Group-Object ProcessName | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Count = $_.Count; MB = [math]::Round((($_.Group | Measure-Object WorkingSet64 -Sum).Sum) / 1MB) } } | Sort-Object MB -Descending | Select-Object -First 12
+    Add-Finding 'Performance' 'Info' ("RAM in use: {0:N1} of {1:N1} GB, {2} processes, {3} startup entries" -f $usedGB, ($os.TotalVisibleMemorySize / 1MB), @(Get-Process).Count, $startupCount) (($top | ForEach-Object { '{0,6} MB  {1} (x{2})' -f $_.MB, $_.Name, $_.Count }) -join "`n")
+
+    # ---- 12. Disk space
+    Write-CmpLog 'Measuring reclaimable space...' 'INFO'
+    $targets = @(Get-CmpCleanupTargets | Where-Object SizeBytes -gt 0)
+    if ($targets.Count) { Add-Finding 'Disk space' 'Info' ("Reclaimable with the Clean-up tab: about {0}" -f (Format-CmpBytes (($targets | Measure-Object SizeBytes -Sum).Sum))) (($targets | ForEach-Object { '{0,10}  {1}' -f (Format-CmpBytes $_.SizeBytes), $_.Title }) -join "`n") }
+    if (Test-Path 'C:\Windows.old') { Add-Finding 'Disk space' 'Info' 'C:\Windows.old exists (previous Windows version)' 'Remove it with Settings > System > Storage > Temporary files > "Previous Windows installation(s)".' }
+
+    # ---- 13. Possibly leftover folders
+    Write-CmpLog 'Looking for folders left behind by uninstalled programs...' 'INFO'
+    $cutoff = (Get-Date).AddDays(-180)
+    $old = foreach ($r in @($env:LOCALAPPDATA, $env:APPDATA, (Join-Path $env:USERPROFILE 'AppData\LocalLow'), $env:ProgramData)) {
+        Get-ChildItem -Path $r -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt $cutoff -and $_.Name -notmatch '^(Microsoft|Packages|Temp|Comms|ConnectedDevicesPlatform|Programs|Application Data|History|Temporary Internet Files|Package Cache|USOPrivate|USOShared|ssh|regid\..*|Desktop|Documents|Start Menu|Templates|Favorites|VirtualStore|Publishers|PlaceholderTileLogoFolder)$' } |
+            ForEach-Object { [pscustomobject]@{ Path = $_.FullName; Last = $_.LastWriteTime; Size = (Get-CmpSize @($_.FullName)) } }
+    }
+    $old = @($old | Sort-Object Size -Descending | Select-Object -First 30)
+    if ($old.Count) { Add-Finding 'Disk space' 'Info' 'Folders not used for 6+ months (review - may belong to uninstalled programs)' (($old | ForEach-Object { '{0,10}  {1:yyyy-MM-dd}  {2}' -f (Format-CmpBytes $_.Size), $_.Last, $_.Path }) -join "`n") }
+
+    # ---- Report
+    $high = @($findings | Where-Object Severity -eq 'High').Count
+    $med = @($findings | Where-Object Severity -eq 'Medium').Count
+    $html = New-CmpReportHtml -Findings $findings -High $high -Medium $med -IsAdmin $isAdmin
+    try {
+        $dir = Split-Path -Path $OutFile -Parent
+        if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Set-Content -Path $OutFile -Value $html -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        $OutFile = Join-Path $env:TEMP ("CleanMyPC-Report-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmm'))
+        Set-Content -Path $OutFile -Value $html -Encoding UTF8
+        Write-CmpLog "Could not save the report to the chosen location - saved to $OutFile instead" 'WARN'
+    }
+    Write-CmpLog ("Scan finished: {0} high, {1} medium, {2} info. Report: {3}" -f $high, $med, (@($findings).Count - $high - $med), $OutFile) 'OK'
+    [pscustomobject]@{ High = $high; Medium = $med; Info = (@($findings).Count - $high - $med); Report = $OutFile }
+}
+
+function New-CmpReportHtml {
+    param($Findings, [int]$High, [int]$Medium, [bool]$IsAdmin)
+    $enc = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
+    # The logo is embedded as a data URI so the report makes no network requests at all
+    # (no web fonts, no CDNs, no images from the internet).
+    $logoPath = Join-Path $script:AssetsRoot 'komodoworks-logo.png'
+    $logo = if (Test-Path $logoPath) { 'data:image/png;base64,' + [Convert]::ToBase64String([IO.File]::ReadAllBytes($logoPath)) } else { '' }
+    $brandUrl = $script:Brand.Url
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append(@"
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Clean My PC report</title>
+<style>
+:root{--bg:#faf6ec;--card:#fffdf8;--text:#0f1b1c;--muted:#4b5b5c;--line:#e6dfcc;--anchor:#0f1b1c;--accent:#ffb627;--teal:#117a68;--high:#a83232;--med:#9a6700;--info:#117a68}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1b1c;--card:#162627;--text:#faf6ec;--muted:#a9b5b3;--line:#22393a;--teal:#1fa187;--high:#e06666;--med:#ffb627;--info:#1fa187}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 "Sora","Segoe UI",system-ui,sans-serif}
+header.brand{background:var(--anchor);color:#faf6ec;padding:18px 16px}
+.wrap{max-width:980px;margin:0 auto}.row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.row img{width:48px;height:48px;display:block}
+h1{font:600 26px/1.2 "Fraunces",Georgia,"Times New Roman",serif;margin:0}
+.by{margin:2px 0 0;font-size:13px;color:#d9d3c4}.by a{color:var(--accent);text-decoration:none;font-weight:600}.by a:hover{text-decoration:underline}
+main{padding:24px 16px}p.meta{color:var(--muted);margin:0 0 20px}
+.sum{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:24px}.pill{background:var(--card);border:1px solid var(--line);padding:10px 16px;min-width:110px}
+.pill b{font:600 24px/1.2 "Fraunces",Georgia,serif;display:block}
+h2{font:600 19px/1.3 "Fraunces",Georgia,serif;margin:28px 0 8px;color:var(--teal)}
+.f{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--info);padding:10px 14px;margin:8px 0}
+.f.High{border-left-color:var(--high)}.f.Medium{border-left-color:var(--med)}
+.sev{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-right:8px}.High .sev{color:var(--high)}.Medium .sev{color:var(--med)}.Info .sev{color:var(--info)}
+pre{white-space:pre-wrap;word-break:break-all;margin:6px 0 0;color:var(--muted);font:13px/1.45 Consolas,monospace}
+footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var(--muted);font-size:13px}footer a{color:var(--teal)}
+</style></head><body>
+<header class="brand"><div class="wrap row">
+"@)
+    if ($logo) { [void]$sb.Append(('<img src="{0}" alt="KomodoWorks emblem">' -f $logo)) }
+    [void]$sb.Append(('<div><h1>Clean My PC &ndash; scan report</h1><p class="by">Developed by <a href="{0}" rel="noopener noreferrer">KomodoWorks.com</a></p></div></div></header><main><div class="wrap">' -f $brandUrl))
+    $adminNote = if (-not $IsAdmin) { ' &middot; run as administrator for the full scan' } else { '' }
+    [void]$sb.Append(('<p class="meta">{0} &middot; version {1} &middot; read-only scan, nothing was changed{2}</p>' -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $script:AppVersion, $adminNote))
+    [void]$sb.Append(('<div class="sum"><div class="pill"><b style="color:var(--high)">{0}</b>high</div><div class="pill"><b style="color:var(--med)">{1}</b>medium</div><div class="pill"><b style="color:var(--info)">{2}</b>info</div></div>' -f $High, $Medium, (@($Findings).Count - $High - $Medium)))
+    $order = @{ High = 0; Medium = 1; Info = 2 }
+    foreach ($g in ($Findings | Group-Object Section)) {
+        [void]$sb.Append("<h2>$(& $enc $g.Name)</h2>")
+        foreach ($f in ($g.Group | Sort-Object { $order[$_.Severity] })) {
+            [void]$sb.Append(('<div class="f {0}"><span class="sev">{0}</span>{1}{2}</div>' -f $f.Severity, (& $enc $f.Title), $(if ($f.Detail) { '<pre>' + (& $enc $f.Detail) + '</pre>' } else { '' })))
+        }
+    }
+    [void]$sb.Append(('<footer>High = act on it &middot; Medium = review it &middot; Info = for your information.<br>This report was created on this PC and was not sent anywhere. It describes your PC, so review it before sharing it with anyone.<br>Clean My PC {0} &middot; free and open source (MIT) &middot; Developed by <a href="{1}" rel="noopener noreferrer">KomodoWorks.com</a> &middot; <a href="mailto:{2}">{2}</a></footer></div></main></body></html>' -f $script:AppVersion, $brandUrl, $script:Brand.Email))
+    return $sb.ToString()
+}
+
+#endregion
+
+Export-ModuleMember -Function Get-CmpInfo, Set-CmpLogSink, Write-CmpLog, Test-CmpAdmin, Get-CmpCatalog, Format-CmpBytes,
+    Get-CmpRestorePoints, Invoke-CmpUndo,
+    Get-CmpPrivacyStatus, Invoke-CmpPrivacy,
+    Get-CmpBloatApps, Invoke-CmpRemoveApps,
+    Get-CmpCleanupTargets, Invoke-CmpCleanup,
+    Get-CmpNvidiaStatus, Invoke-CmpNvidia,
+    Invoke-CmpAudit
