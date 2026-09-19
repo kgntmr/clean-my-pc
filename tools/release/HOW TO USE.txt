@@ -1,14 +1,14 @@
-CLEAN MY PC - HOW TO USE
+Quietpane - HOW TO USE
 Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
 
 
 STEP 1 - UNZIP IT (important)
-   Clean My PC cannot start from inside the zip file.
-   Right-click CleanMyPC.zip  >  Extract All  >  Extract.
-   A new CleanMyPC folder opens.
+   Quietpane cannot start from inside the zip file.
+   Right-click Quietpane.zip  >  Extract All  >  Extract.
+   A new Quietpane folder opens.
 
 STEP 2 - START IT
-   In the new folder, double-click "Start Clean My PC".
+   In the new folder, double-click "Start Quietpane".
    (You never need to open the "App files" folder.)
 
    Windows may ask a few questions first. This is normal:
@@ -17,12 +17,12 @@ STEP 2 - START IT
    - "Allow this app to make changes?"    -> click "Yes"
 
 STEP 3 - CLICK ONE BUTTON
-   Click the big "Clean my PC now" button, then "Yes".
+   Click the big "Quiet my PC now" button, then "Yes".
    It takes about a minute. Restart your PC when it says "All done!".
 
 
 CHANGED YOUR MIND?
-   Click "Undo everything" straight away, or open Clean My PC again later
+   Click "Undo everything" straight away, or open Quietpane again later
    and use the Undo tab. Files it cleaned are in your Recycle Bin.
 
 JUST WANT A CHECK-UP THAT CHANGES NOTHING?
@@ -30,24 +30,24 @@ JUST WANT A CHECK-UP THAT CHANGES NOTHING?
 
 A WINDOW FULL OF CODE OPENED, OR WINDOWS ASKED "HOW DO YOU WANT TO OPEN THIS FILE?"
    You opened one of the app's own files. Close it (pick nothing) and
-   double-click "Start Clean My PC" instead.
+   double-click "Start Quietpane" instead.
 
 WHY DOES WINDOWS SAY "UNKNOWN PUBLISHER"?
-   Clean My PC is free and new, and is not digitally signed yet (we have
+   Quietpane is free and new, and is not digitally signed yet (we have
    applied for free code signing). Every file is plain text, so anyone can
    read exactly what it does.
 
-WANT TO REMOVE CLEAN MY PC?
+WANT TO REMOVE QUIETPANE?
    Removing it does not undo its changes. If you want your PC back
-   exactly as it was, click "Undo" first. Then delete the CleanMyPC
-   folder (and any CleanMyPC-Report files on your Desktop).
+   exactly as it was, click "Undo" first. Then delete the Quietpane
+   folder (and any Quietpane-Report files on your Desktop).
    Nothing is installed, so that is all.
 
-   Your undo history stays in C:\ProgramData\CleanMyPC. If you change
-   your mind later, download Clean My PC again and use the Undo tab.
+   Your undo history stays in C:\ProgramData\Quietpane. If you change
+   your mind later, download Quietpane again and use the Undo tab.
    Delete that folder too once you are sure you won't need it.
 
 
 Questions:       info@komodoworks.com
 Website:         https://www.komodoworks.com
-Source, privacy policy and terms:  https://github.com/kgntmr/clean-my-pc
+Source, privacy policy and terms:  https://github.com/kgntmr/quietpane

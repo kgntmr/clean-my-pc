@@ -1,13 +1,13 @@
-# Privacy Policy: Clean My PC
+# Privacy Policy: Quietpane
 
 **Last updated: 19 September 2026**
 
-Clean My PC is free, open-source software developed by **KomodoWorks**, an independent technology studio in Dublin, Ireland ([komodoworks.com](https://www.komodoworks.com)).
+Quietpane is free, open-source software developed by **KomodoWorks**, an independent technology studio in Dublin, Ireland ([komodoworks.com](https://www.komodoworks.com)).
 Contact: **info@komodoworks.com**
 
 ## The short version
 
-- **Clean My PC collects no personal data.** It has no accounts, analytics, telemetry, crash reporting, advertising, tracking, cookies or fingerprinting.
+- **Quietpane collects no personal data.** It has no accounts, analytics, telemetry, crash reporting, advertising, tracking, cookies or fingerprinting.
 - **It makes no network connections.** It never "phones home", checks for updates in the background, downloads anything or uploads anything.
 - **Everything it reads stays on your PC.** KomodoWorks never receives it and has no way to see it.
 - **Nothing is sold or shared**, because nothing is collected.
@@ -21,7 +21,7 @@ The app runs only on your PC, only when you start it, and only does what you cli
 | Feature | What it reads or changes | Where results are kept |
 |---|---|---|
 | **Scan** (read-only) | Startup entries, scheduled tasks, services, selected registry values, the hosts file, proxy and DNS settings, names and digital signatures of program files in user folders, browser **extension manifests** and **notification permission lists**, Microsoft Defender and firewall status, the running-process list, folder sizes | An HTML report saved on **your** Desktop |
-| **Privacy, NVIDIA, Apps** (only when you click Apply) | The settings, services, tasks, apps and hosts-file entries you ticked | Restore points and logs in `%ProgramData%\CleanMyPC\restore\` on your PC. These hold the previous values, so Undo can put them back. |
+| **Privacy, NVIDIA, Apps** (only when you click Apply) | The settings, services, tasks, apps and hosts-file entries you ticked | Restore points and logs in `%ProgramData%\Quietpane\restore\` on your PC. These hold the previous values, so Undo can put them back. |
 | **Clean up space** (only when you click Apply) | The folders you ticked | Files are moved to **your Recycle Bin** |
 
 **What the scan does not read:** your browsing history, passwords, cookies, emails, messages, documents or the contents of web pages.
@@ -33,8 +33,8 @@ The app runs only on your PC, only when you start it, and only does what you cli
 All processing happens locally on your own device, under your control, for your own purposes, and none of it is transmitted to us. KomodoWorks therefore does **not** act as a data controller or processor for anything the app reads on your computer. We can't access, view, copy or delete data on your PC.
 
 You can remove everything the app has stored at any time:
-- **Scan reports:** delete `CleanMyPC-Report-*.html` from your Desktop.
-- **Restore points and logs:** delete the folder `%ProgramData%\CleanMyPC`. Do this after you're sure you won't need Undo.
+- **Scan reports:** delete `Quietpane-Report-*.html` from your Desktop.
+- **Restore points and logs:** delete the folder `%ProgramData%\Quietpane`, and `%ProgramData%\CleanMyPC` if you used the app under its former name. Do this after you're sure you won't need Undo.
 - **The app itself:** delete the folder you extracted it to. There is no installer and nothing else to remove.
 
 ## When you leave the app

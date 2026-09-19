@@ -1,29 +1,32 @@
 # ============================================================================
-#  LOOKING FOR HOW TO START CLEAN MY PC?  This file is the app's code.
-#  Close this window, then double-click "Start Clean My PC" instead.
+#  LOOKING FOR HOW TO START Quietpane?  This file is the app's code.
+#  Close this window, then double-click "Start Quietpane" instead.
 # ============================================================================
 #Requires -Version 5.1
 <#
-    Clean My PC - core engine.
+    Quietpane - core engine.
     Developed by KomodoWorks - https://www.komodoworks.com - MIT License.
 
     Principles
       * Scan is read-only.
-      * Every change is recorded in a restore point (%ProgramData%\CleanMyPC\restore\...) and can be undone.
+      * Every change is recorded in a restore point (%ProgramData%\Quietpane\restore\...) and can be undone.
       * Files are only ever moved to the Recycle Bin - never permanently deleted.
       * Scheduled tasks are disabled, never deleted.
       * Security (Defender, SmartScreen, firewall) and Windows Update are never touched.
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.1.2'
-$script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/clean-my-pc' }
+$script:AppVersion  = '1.2.0'
+$script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
 $script:LogFile     = $null
 $script:Session     = $null
 $script:CatalogRoot = Join-Path $PSScriptRoot 'catalog'
-$script:DataRoot    = Join-Path $env:ProgramData 'CleanMyPC'
+$script:DataRoot    = Join-Path $env:ProgramData 'Quietpane'
+# Restore points made before the app was renamed (it used to be called Clean My PC).
+# New ones go to the folder above; old ones stay readable so Undo keeps working.
+$script:LegacyDataRoot = Join-Path $env:ProgramData 'CleanMyPC'
 $script:HostsPath   = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
 
 # Apps that are never removed, even if someone adds them to the catalog.
@@ -31,7 +34,7 @@ $script:ProtectedAppPattern = '^(Microsoft\.WindowsStore|Microsoft\.StorePurchas
 
 #region ---------------------------------------------------------------- helpers
 
-function Get-CmpInfo {
+function Get-QpInfo {
     [pscustomobject]@{
         Version    = $script:AppVersion
         BrandName  = $script:Brand.Name
@@ -43,12 +46,12 @@ function Get-CmpInfo {
     }
 }
 
-function Set-CmpLogSink {
+function Set-QpLogSink {
     param([scriptblock]$Sink)
     $script:LogSink = $Sink
 }
 
-function Write-CmpLog {
+function Write-QpLog {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Message,
         [ValidateSet('INFO', 'OK', 'WARN', 'ERROR', 'PREVIEW', 'SKIP', 'STEP')][string]$Level = 'INFO'
@@ -58,24 +61,24 @@ function Write-CmpLog {
     if ($script:LogSink) { & $script:LogSink $line } else { Write-Host $line }
 }
 
-function Test-CmpAdmin {
+function Test-QpAdmin {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Get-CmpCatalog {
+function Get-QpCatalog {
     param([ValidateSet('privacy', 'apps', 'cleanup', 'nvidia')][string]$Name)
     Import-PowerShellDataFile -Path (Join-Path $script:CatalogRoot "$Name.psd1")
 }
 
-function Format-CmpBytes {
+function Format-QpBytes {
     param([double]$Bytes)
     if ($Bytes -ge 1GB) { return '{0:N2} GB' -f ($Bytes / 1GB) }
     if ($Bytes -ge 1MB) { return '{0:N1} MB' -f ($Bytes / 1MB) }
     return '{0:N0} KB' -f ($Bytes / 1KB)
 }
 
-function Get-CmpSize {
+function Get-QpSize {
     param([string[]]$Paths)
     $sum = 0
     foreach ($p in $Paths) {
@@ -86,7 +89,7 @@ function Get-CmpSize {
     return $sum
 }
 
-function Move-CmpToRecycleBin {
+function Move-QpToRecycleBin {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
     Add-Type -AssemblyName Microsoft.VisualBasic
@@ -103,7 +106,7 @@ function Move-CmpToRecycleBin {
     }
 }
 
-function Get-CmpRegValue {
+function Get-QpRegValue {
     param([string]$Path, [string]$Name)
     try {
         $p = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
@@ -117,41 +120,41 @@ function Get-CmpRegValue {
 
 #region ---------------------------------------------------------------- restore points
 
-function Start-CmpSession {
+function Start-QpSession {
     param([string]$Name)
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $path = Join-Path $script:DataRoot "restore\$stamp-$Name"
     New-Item -ItemType Directory -Path $path -Force | Out-Null
     $script:Session = @{ Name = $Name; Path = $path; Started = (Get-Date).ToString('s'); Entries = New-Object System.Collections.ArrayList }
     $script:LogFile = Join-Path $path 'log.txt'
-    Write-CmpLog "Restore point: $path" 'STEP'
+    Write-QpLog "Restore point: $path" 'STEP'
 }
 
-function Save-CmpSession {
+function Save-QpSession {
     if (-not $script:Session) { return }
     $data = @{ Name = $script:Session.Name; Started = $script:Session.Started; Entries = @($script:Session.Entries) }
     $data | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $script:Session.Path 'state.json') -Encoding UTF8
 }
 
-function Add-CmpUndo {
+function Add-QpUndo {
     param([hashtable]$Entry)
     if (-not $script:Session) { return }
     [void]$script:Session.Entries.Add($Entry)
-    Save-CmpSession
+    Save-QpSession
 }
 
-function Stop-CmpSession {
+function Stop-QpSession {
     if (-not $script:Session) { return }
-    Save-CmpSession
-    Write-CmpLog ("Finished. {0} change(s) recorded - they can be undone from the Undo tab." -f $script:Session.Entries.Count) 'OK'
+    Save-QpSession
+    Write-QpLog ("Finished. {0} change(s) recorded - they can be undone from the Undo tab." -f $script:Session.Entries.Count) 'OK'
     $script:Session = $null
     $script:LogFile = $null
 }
 
-function Get-CmpRestorePoints {
-    $root = Join-Path $script:DataRoot 'restore'
-    if (-not (Test-Path $root)) { return @() }
-    Get-ChildItem -Path $root -Directory | Sort-Object Name -Descending | ForEach-Object {
+function Get-QpRestorePoints {
+    $roots = @((Join-Path $script:DataRoot 'restore'), (Join-Path $script:LegacyDataRoot 'restore')) | Where-Object { Test-Path $_ }
+    if (-not $roots.Count) { return @() }
+    Get-ChildItem -Path $roots -Directory | Sort-Object Name -Descending | ForEach-Object {
         $count = 0
         $state = Join-Path $_.FullName 'state.json'
         if (Test-Path $state) { try { $count = @((Get-Content $state -Raw | ConvertFrom-Json).Entries).Count } catch { } }
@@ -164,14 +167,14 @@ function Get-CmpRestorePoints {
     }
 }
 
-function Invoke-CmpUndo {
+function Invoke-QpUndo {
     param([Parameter(Mandatory)][string]$Path)
     $stateFile = Join-Path $Path 'state.json'
-    if (-not (Test-Path $stateFile)) { Write-CmpLog "No state.json in $Path" 'ERROR'; return }
+    if (-not (Test-Path $stateFile)) { Write-QpLog "No state.json in $Path" 'ERROR'; return }
     $state = Get-Content $stateFile -Raw | ConvertFrom-Json
     $entries = @($state.Entries)
     [array]::Reverse($entries)
-    Write-CmpLog "Undoing $($entries.Count) change(s) from $(Split-Path $Path -Leaf)" 'STEP'
+    Write-QpLog "Undoing $($entries.Count) change(s) from $(Split-Path $Path -Leaf)" 'STEP'
     foreach ($e in $entries) {
         try {
             switch ($e.Type) {
@@ -182,64 +185,64 @@ function Invoke-CmpUndo {
                         & sc.exe config $e.Name start= $map[[string]$e.StartType] | Out-Null
                     }
                     if ($e.WasRunning) { Start-Service -Name $e.Name -ErrorAction SilentlyContinue }
-                    Write-CmpLog "Service $($e.Name) restored to $($e.StartType)" 'OK'
+                    Write-QpLog "Service $($e.Name) restored to $($e.StartType)" 'OK'
                 }
                 'Task' {
                     Enable-ScheduledTask -TaskPath $e.Path -TaskName $e.Name -ErrorAction Stop | Out-Null
-                    Write-CmpLog "Task $($e.Path)$($e.Name) re-enabled" 'OK'
+                    Write-QpLog "Task $($e.Path)$($e.Name) re-enabled" 'OK'
                 }
                 'Reg' {
                     if ($e.Existed) {
                         Set-ItemProperty -Path $e.Path -Name $e.Name -Value $e.OldValue -Type $e.Kind -ErrorAction Stop
-                        Write-CmpLog "$($e.Path)\$($e.Name) restored to $($e.OldValue)" 'OK'
+                        Write-QpLog "$($e.Path)\$($e.Name) restored to $($e.OldValue)" 'OK'
                     } else {
                         Remove-ItemProperty -Path $e.Path -Name $e.Name -ErrorAction SilentlyContinue
-                        Write-CmpLog "$($e.Path)\$($e.Name) removed (was not set before)" 'OK'
+                        Write-QpLog "$($e.Path)\$($e.Name) removed (was not set before)" 'OK'
                     }
                 }
                 'Env' {
                     [Environment]::SetEnvironmentVariable($e.Name, $e.OldValue, 'Machine')
-                    Write-CmpLog "Environment variable $($e.Name) restored" 'OK'
+                    Write-QpLog "Environment variable $($e.Name) restored" 'OK'
                 }
                 'FileRestore' {
                     Copy-Item -LiteralPath $e.Backup -Destination $e.Path -Force
-                    Write-CmpLog "Restored $($e.Path) from backup" 'OK'
+                    Write-QpLog "Restored $($e.Path) from backup" 'OK'
                 }
                 'FileCreated' {
-                    if (Move-CmpToRecycleBin $e.Path) { Write-CmpLog "Moved created file $($e.Path) to the Recycle Bin" 'OK' }
+                    if (Move-QpToRecycleBin $e.Path) { Write-QpLog "Moved created file $($e.Path) to the Recycle Bin" 'OK' }
                 }
                 'Hosts' {
-                    Remove-CmpHostsBlock -Tag $e.Tag
+                    Remove-QpHostsBlock -Tag $e.Tag
                 }
                 'Recycled' {
-                    Write-CmpLog "Files from $($e.Path) are in the Recycle Bin - restore them there if you need them" 'INFO'
+                    Write-QpLog "Files from $($e.Path) are in the Recycle Bin - restore them there if you need them" 'INFO'
                 }
                 'Appx' {
-                    Write-CmpLog "App $($e.Name) was removed - reinstall it from the Microsoft Store if you want it back" 'INFO'
+                    Write-QpLog "App $($e.Name) was removed - reinstall it from the Microsoft Store if you want it back" 'INFO'
                 }
-                default { Write-CmpLog "Unknown undo entry type: $($e.Type)" 'WARN' }
+                default { Write-QpLog "Unknown undo entry type: $($e.Type)" 'WARN' }
             }
         } catch {
-            Write-CmpLog "Could not undo $($e.Type) $($e.Name)$($e.Path): $($_.Exception.Message)" 'WARN'
+            Write-QpLog "Could not undo $($e.Type) $($e.Name)$($e.Path): $($_.Exception.Message)" 'WARN'
         }
     }
     Set-Content -Path (Join-Path $Path 'undone.txt') -Value (Get-Date).ToString('s')
-    Write-CmpLog 'Undo finished. Restart the PC to make sure everything is back in effect.' 'OK'
+    Write-QpLog 'Undo finished. Restart the PC to make sure everything is back in effect.' 'OK'
 }
 
 #endregion
 
 #region ---------------------------------------------------------------- change engine
 
-function Invoke-CmpServiceAction {
+function Invoke-QpServiceAction {
     param($Action, [switch]$Preview)
     $svc = Get-Service -Name $Action.Name -ErrorAction SilentlyContinue
-    if (-not $svc) { Write-CmpLog "Service $($Action.Name) is not on this PC - skipped" 'SKIP'; return }
+    if (-not $svc) { Write-QpLog "Service $($Action.Name) is not on this PC - skipped" 'SKIP'; return }
     $current = [string]$svc.StartType
     $target = [string]$Action.StartType
-    if ($current -eq $target) { Write-CmpLog "Service $($Action.Name) is already $target" 'OK'; return }
-    if ($Preview) { Write-CmpLog "Would change service $($Action.Name): $current -> $target" 'PREVIEW'; return }
-    Add-CmpUndo @{ Type = 'Service'; Name = $Action.Name; StartType = $current; WasRunning = ($svc.Status -eq 'Running') }
+    if ($current -eq $target) { Write-QpLog "Service $($Action.Name) is already $target" 'OK'; return }
+    if ($Preview) { Write-QpLog "Would change service $($Action.Name): $current -> $target" 'PREVIEW'; return }
+    Add-QpUndo @{ Type = 'Service'; Name = $Action.Name; StartType = $current; WasRunning = ($svc.Status -eq 'Running') }
     if ($target -eq 'Disabled') { Stop-Service -Name $Action.Name -Force -ErrorAction SilentlyContinue }
     try {
         Set-Service -Name $Action.Name -StartupType $target -ErrorAction Stop
@@ -248,98 +251,98 @@ function Invoke-CmpServiceAction {
         & sc.exe config $Action.Name start= $map[$target] | Out-Null
     }
     $after = [string](Get-Service -Name $Action.Name).StartType
-    if ($after -eq $target) { Write-CmpLog "Service $($Action.Name) -> $target" 'OK' }
-    else { Write-CmpLog "Service $($Action.Name) is protected by Windows and could not be changed" 'WARN' }
+    if ($after -eq $target) { Write-QpLog "Service $($Action.Name) -> $target" 'OK' }
+    else { Write-QpLog "Service $($Action.Name) is protected by Windows and could not be changed" 'WARN' }
 }
 
-function Invoke-CmpTaskAction {
+function Invoke-QpTaskAction {
     param($Action, [switch]$Preview)
     $tasks = @(Get-ScheduledTask -TaskPath $Action.Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like $Action.Name })
-    if ($tasks.Count -eq 0) { Write-CmpLog "Task $($Action.Path)$($Action.Name) is not on this PC - skipped" 'SKIP'; return }
+    if ($tasks.Count -eq 0) { Write-QpLog "Task $($Action.Path)$($Action.Name) is not on this PC - skipped" 'SKIP'; return }
     foreach ($t in $tasks) {
         $id = "$($t.TaskPath)$($t.TaskName)"
-        if ($t.State -eq 'Disabled') { Write-CmpLog "Task $id is already disabled" 'OK'; continue }
-        if ($Preview) { Write-CmpLog "Would disable task $id" 'PREVIEW'; continue }
+        if ($t.State -eq 'Disabled') { Write-QpLog "Task $id is already disabled" 'OK'; continue }
+        if ($Preview) { Write-QpLog "Would disable task $id" 'PREVIEW'; continue }
         try {
             Disable-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -ErrorAction Stop | Out-Null
-            Add-CmpUndo @{ Type = 'Task'; Path = $t.TaskPath; Name = $t.TaskName }
-            Write-CmpLog "Task $id disabled" 'OK'
+            Add-QpUndo @{ Type = 'Task'; Path = $t.TaskPath; Name = $t.TaskName }
+            Write-QpLog "Task $id disabled" 'OK'
         } catch {
-            Write-CmpLog "Task $id is protected by Windows - left as is" 'WARN'
+            Write-QpLog "Task $id is protected by Windows - left as is" 'WARN'
         }
     }
 }
 
-function Invoke-CmpRegAction {
+function Invoke-QpRegAction {
     param($Action, [switch]$Preview)
     $kind = if ($Action.Kind) { $Action.Kind } else { 'DWord' }
     $label = "$($Action.Path)\$($Action.Name)"
-    $cur = Get-CmpRegValue -Path $Action.Path -Name $Action.Name
-    if ($cur.Exists -and ("$($cur.Value)" -eq "$($Action.Value)")) { Write-CmpLog "$label is already $($Action.Value)" 'OK'; return }
+    $cur = Get-QpRegValue -Path $Action.Path -Name $Action.Name
+    if ($cur.Exists -and ("$($cur.Value)" -eq "$($Action.Value)")) { Write-QpLog "$label is already $($Action.Value)" 'OK'; return }
     if ($Preview) {
         $from = if ($cur.Exists) { $cur.Value } else { '(not set)' }
-        Write-CmpLog "Would set $label : $from -> $($Action.Value)" 'PREVIEW'
+        Write-QpLog "Would set $label : $from -> $($Action.Value)" 'PREVIEW'
         return
     }
-    Add-CmpUndo @{ Type = 'Reg'; Path = $Action.Path; Name = $Action.Name; Existed = $cur.Exists; OldValue = $cur.Value; Kind = $kind }
+    Add-QpUndo @{ Type = 'Reg'; Path = $Action.Path; Name = $Action.Name; Existed = $cur.Exists; OldValue = $cur.Value; Kind = $kind }
     try {
         if (-not (Test-Path -Path $Action.Path)) { New-Item -Path $Action.Path -Force | Out-Null }
         Set-ItemProperty -Path $Action.Path -Name $Action.Name -Value $Action.Value -Type $kind -ErrorAction Stop
-        Write-CmpLog "$label = $($Action.Value)" 'OK'
+        Write-QpLog "$label = $($Action.Value)" 'OK'
     } catch {
-        Write-CmpLog "Could not set $label : $($_.Exception.Message)" 'ERROR'
+        Write-QpLog "Could not set $label : $($_.Exception.Message)" 'ERROR'
     }
 }
 
-function Invoke-CmpEnvAction {
+function Invoke-QpEnvAction {
     param($Action, [switch]$Preview)
     $cur = [Environment]::GetEnvironmentVariable($Action.Name, 'Machine')
-    if ($cur -eq $Action.Value) { Write-CmpLog "$($Action.Name) is already $($Action.Value)" 'OK'; return }
-    if ($Preview) { Write-CmpLog "Would set environment variable $($Action.Name)=$($Action.Value)" 'PREVIEW'; return }
-    Add-CmpUndo @{ Type = 'Env'; Name = $Action.Name; OldValue = $cur }
+    if ($cur -eq $Action.Value) { Write-QpLog "$($Action.Name) is already $($Action.Value)" 'OK'; return }
+    if ($Preview) { Write-QpLog "Would set environment variable $($Action.Name)=$($Action.Value)" 'PREVIEW'; return }
+    Add-QpUndo @{ Type = 'Env'; Name = $Action.Name; OldValue = $cur }
     [Environment]::SetEnvironmentVariable($Action.Name, $Action.Value, 'Machine')
-    Write-CmpLog "Environment variable $($Action.Name)=$($Action.Value)" 'OK'
+    Write-QpLog "Environment variable $($Action.Name)=$($Action.Value)" 'OK'
 }
 
-function Invoke-CmpVSCodeTelemetry {
+function Invoke-QpVSCodeTelemetry {
     param([switch]$Preview)
     $codeRoot = Join-Path $env:APPDATA 'Code'
-    if (-not (Test-Path $codeRoot)) { Write-CmpLog 'VS Code is not installed for this user - skipped' 'SKIP'; return }
+    if (-not (Test-Path $codeRoot)) { Write-QpLog 'VS Code is not installed for this user - skipped' 'SKIP'; return }
     $userDir = Join-Path $codeRoot 'User'
     $file = Join-Path $userDir 'settings.json'
     $setting = '"telemetry.telemetryLevel": "off"'
     if (Test-Path $file) {
         $raw = Get-Content -LiteralPath $file -Raw
-        if ($raw -match '"telemetry\.telemetryLevel"\s*:\s*"off"') { Write-CmpLog 'VS Code telemetry is already off' 'OK'; return }
-        if ($raw -match '"telemetry\.telemetryLevel"') { Write-CmpLog 'VS Code has telemetry.telemetryLevel set to another value - set it to "off" in VS Code settings' 'WARN'; return }
-        if ($Preview) { Write-CmpLog "Would add $setting to $file" 'PREVIEW'; return }
+        if ($raw -match '"telemetry\.telemetryLevel"\s*:\s*"off"') { Write-QpLog 'VS Code telemetry is already off' 'OK'; return }
+        if ($raw -match '"telemetry\.telemetryLevel"') { Write-QpLog 'VS Code has telemetry.telemetryLevel set to another value - set it to "off" in VS Code settings' 'WARN'; return }
+        if ($Preview) { Write-QpLog "Would add $setting to $file" 'PREVIEW'; return }
         $backup = Join-Path $script:Session.Path 'vscode-settings.json.bak'
         Copy-Item -LiteralPath $file -Destination $backup -Force
-        Add-CmpUndo @{ Type = 'FileRestore'; Path = $file; Backup = $backup }
+        Add-QpUndo @{ Type = 'FileRestore'; Path = $file; Backup = $backup }
         $new = ([regex]'\{').Replace($raw, "{`r`n    $setting,", 1)
         Set-Content -LiteralPath $file -Value $new -Encoding UTF8
     } else {
-        if ($Preview) { Write-CmpLog "Would create $file with $setting" 'PREVIEW'; return }
+        if ($Preview) { Write-QpLog "Would create $file with $setting" 'PREVIEW'; return }
         New-Item -ItemType Directory -Path $userDir -Force | Out-Null
         Set-Content -LiteralPath $file -Value "{`r`n    $setting`r`n}" -Encoding UTF8
-        Add-CmpUndo @{ Type = 'FileCreated'; Path = $file }
+        Add-QpUndo @{ Type = 'FileCreated'; Path = $file }
     }
-    Write-CmpLog 'VS Code telemetry turned off' 'OK'
+    Write-QpLog 'VS Code telemetry turned off' 'OK'
 }
 
-function Invoke-CmpAction {
+function Invoke-QpAction {
     param($Action, [switch]$Preview)
     switch ($Action.Type) {
-        'Service'         { Invoke-CmpServiceAction -Action $Action -Preview:$Preview }
-        'Task'            { Invoke-CmpTaskAction -Action $Action -Preview:$Preview }
-        'Reg'             { Invoke-CmpRegAction -Action $Action -Preview:$Preview }
-        'Env'             { Invoke-CmpEnvAction -Action $Action -Preview:$Preview }
-        'VSCodeTelemetry' { Invoke-CmpVSCodeTelemetry -Preview:$Preview }
-        default           { Write-CmpLog "Unknown action type '$($Action.Type)'" 'WARN' }
+        'Service'         { Invoke-QpServiceAction -Action $Action -Preview:$Preview }
+        'Task'            { Invoke-QpTaskAction -Action $Action -Preview:$Preview }
+        'Reg'             { Invoke-QpRegAction -Action $Action -Preview:$Preview }
+        'Env'             { Invoke-QpEnvAction -Action $Action -Preview:$Preview }
+        'VSCodeTelemetry' { Invoke-QpVSCodeTelemetry -Preview:$Preview }
+        default           { Write-QpLog "Unknown action type '$($Action.Type)'" 'WARN' }
     }
 }
 
-function Test-CmpActionApplied {
+function Test-QpActionApplied {
     # Returns $true (done), $false (not done) or $null (not applicable on this PC).
     param($Action)
     switch ($Action.Type) {
@@ -354,7 +357,7 @@ function Test-CmpActionApplied {
             return (@($tasks | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0)
         }
         'Reg' {
-            $cur = Get-CmpRegValue -Path $Action.Path -Name $Action.Name
+            $cur = Get-QpRegValue -Path $Action.Path -Name $Action.Name
             return ($cur.Exists -and ("$($cur.Value)" -eq "$($Action.Value)"))
         }
         'Env' { return ([Environment]::GetEnvironmentVariable($Action.Name, 'Machine') -eq $Action.Value) }
@@ -368,11 +371,11 @@ function Test-CmpActionApplied {
     return $null
 }
 
-function Get-CmpPrivacyStatus {
+function Get-QpPrivacyStatus {
     # Returns a hashtable Id -> 'Applied' | 'Partial' | 'NotApplied' | 'NotApplicable'
     $result = @{}
-    foreach ($item in (Get-CmpCatalog privacy).Items) {
-        $states = @($item.Actions | ForEach-Object { Test-CmpActionApplied $_ })
+    foreach ($item in (Get-QpCatalog privacy).Items) {
+        $states = @($item.Actions | ForEach-Object { Test-QpActionApplied $_ })
         $relevant = @($states | Where-Object { $null -ne $_ })
         if ($relevant.Count -eq 0) { $result[$item.Id] = 'NotApplicable'; continue }
         $done = @($relevant | Where-Object { $_ }).Count
@@ -383,33 +386,33 @@ function Get-CmpPrivacyStatus {
     return $result
 }
 
-function Invoke-CmpPrivacy {
+function Invoke-QpPrivacy {
     param([string[]]$Ids, [switch]$Preview)
-    $items = @((Get-CmpCatalog privacy).Items | Where-Object { $Ids -contains $_.Id })
-    if ($items.Count -eq 0) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
+    $items = @((Get-QpCatalog privacy).Items | Where-Object { $Ids -contains $_.Id })
+    if ($items.Count -eq 0) { Write-QpLog 'Nothing selected.' 'WARN'; return }
     $own = (-not $Preview) -and (-not $script:Session)   # join an existing restore point (one-click) if there is one
-    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-CmpSession 'privacy' }
+    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'privacy' }
     foreach ($item in $items) {
-        Write-CmpLog $item.Title 'STEP'
-        foreach ($a in $item.Actions) { Invoke-CmpAction -Action $a -Preview:$Preview }
+        Write-QpLog $item.Title 'STEP'
+        foreach ($a in $item.Actions) { Invoke-QpAction -Action $a -Preview:$Preview }
     }
-    if ($Preview) { Write-CmpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-CmpSession }
+    if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-QpSession }
 }
 
 #endregion
 
 #region ---------------------------------------------------------------- apps
 
-function Test-CmpProtectedApp {
+function Test-QpProtectedApp {
     param([string]$Name)
     return ($Name -match $script:ProtectedAppPattern)
 }
 
-function Get-CmpBloatApps {
+function Get-QpBloatApps {
     $installed = @(Get-AppxPackage -ErrorAction SilentlyContinue)
-    foreach ($item in (Get-CmpCatalog apps).Items) {
+    foreach ($item in (Get-QpCatalog apps).Items) {
         $pkg = $installed | Where-Object { $_.Name -like $item.Name } | Select-Object -First 1
-        if ($pkg -and -not (Test-CmpProtectedApp $pkg.Name)) {
+        if ($pkg -and -not (Test-QpProtectedApp $pkg.Name)) {
             [pscustomobject]@{
                 Name        = $pkg.Name
                 Title       = $item.Title
@@ -420,42 +423,42 @@ function Get-CmpBloatApps {
     }
 }
 
-function Invoke-CmpRemoveApps {
+function Invoke-QpRemoveApps {
     param([string[]]$Names, [switch]$Deprovision, [switch]$Preview)
-    if (-not $Names) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
+    if (-not $Names) { Write-QpLog 'Nothing selected.' 'WARN'; return }
     $own = (-not $Preview) -and (-not $script:Session)
-    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-CmpSession 'apps' }
+    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'apps' }
     foreach ($n in $Names) {
-        if (Test-CmpProtectedApp $n) { Write-CmpLog "$n is protected and will not be removed" 'WARN'; continue }
+        if (Test-QpProtectedApp $n) { Write-QpLog "$n is protected and will not be removed" 'WARN'; continue }
         $pkgs = @(Get-AppxPackage -Name $n -ErrorAction SilentlyContinue)
-        if ($pkgs.Count -eq 0) { Write-CmpLog "$n is not installed - skipped" 'SKIP'; continue }
-        if ($Preview) { Write-CmpLog "Would remove $n" 'PREVIEW'; continue }
+        if ($pkgs.Count -eq 0) { Write-QpLog "$n is not installed - skipped" 'SKIP'; continue }
+        if ($Preview) { Write-QpLog "Would remove $n" 'PREVIEW'; continue }
         foreach ($p in $pkgs) {
             try {
                 Remove-AppxPackage -Package $p.PackageFullName -ErrorAction Stop
-                Add-CmpUndo @{ Type = 'Appx'; Name = $n }
-                Write-CmpLog "Removed $n" 'OK'
+                Add-QpUndo @{ Type = 'Appx'; Name = $n }
+                Write-QpLog "Removed $n" 'OK'
             } catch {
-                Write-CmpLog "Could not remove $n : $($_.Exception.Message)" 'WARN'
+                Write-QpLog "Could not remove $n : $($_.Exception.Message)" 'WARN'
             }
         }
         if ($Deprovision) {
             Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object DisplayName -eq $n | ForEach-Object {
                 try {
                     Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction Stop | Out-Null
-                    Write-CmpLog "$n will not be reinstalled for new user accounts" 'OK'
+                    Write-QpLog "$n will not be reinstalled for new user accounts" 'OK'
                 } catch { }
             }
         }
     }
-    if ($Preview) { Write-CmpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-CmpSession }
+    if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-QpSession }
 }
 
 #endregion
 
 #region ---------------------------------------------------------------- clean-up
 
-function Resolve-CmpPaths {
+function Resolve-QpPaths {
     param([string[]]$Patterns)
     foreach ($pat in $Patterns) {
         $expanded = [Environment]::ExpandEnvironmentVariables($pat)
@@ -463,19 +466,19 @@ function Resolve-CmpPaths {
     }
 }
 
-function Get-CmpCleanupTargets {
-    foreach ($item in (Get-CmpCatalog cleanup).Items) {
-        $paths = @(Resolve-CmpPaths $item.Paths)
+function Get-QpCleanupTargets {
+    foreach ($item in (Get-QpCatalog cleanup).Items) {
+        $paths = @(Resolve-QpPaths $item.Paths)
         # Only count what Clean-up would actually move (respects the MinAgeHours safety rule).
         $cutoff = if ($item.MinAgeHours) { (Get-Date).AddHours(-[double]$item.MinAgeHours) } else { $null }
         $size = 0
         foreach ($p in $paths) {
             if ($cutoff) {
                 foreach ($c in @(Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff })) {
-                    $size += if ($c.PSIsContainer) { Get-CmpSize @($c.FullName) } else { $c.Length }
+                    $size += if ($c.PSIsContainer) { Get-QpSize @($c.FullName) } else { $c.Length }
                 }
             } else {
-                $size += Get-CmpSize @($p)
+                $size += Get-QpSize @($p)
             }
         }
         [pscustomobject]@{
@@ -489,43 +492,43 @@ function Get-CmpCleanupTargets {
     }
 }
 
-function Invoke-CmpCleanup {
+function Invoke-QpCleanup {
     param([string[]]$Ids, [switch]$Preview)
-    $items = @((Get-CmpCatalog cleanup).Items | Where-Object { $Ids -contains $_.Id })
-    if ($items.Count -eq 0) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
+    $items = @((Get-QpCatalog cleanup).Items | Where-Object { $Ids -contains $_.Id })
+    if ($items.Count -eq 0) { Write-QpLog 'Nothing selected.' 'WARN'; return }
     $own = (-not $Preview) -and (-not $script:Session)
-    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be moved.' 'STEP' } elseif ($own) { Start-CmpSession 'cleanup' }
+    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be moved.' 'STEP' } elseif ($own) { Start-QpSession 'cleanup' }
     $total = 0
     foreach ($item in $items) {
-        Write-CmpLog $item.Title 'STEP'
+        Write-QpLog $item.Title 'STEP'
         if ($item.RequiresClosed -and (Get-Process -Name $item.RequiresClosed -ErrorAction SilentlyContinue)) {
-            Write-CmpLog "Close $($item.RequiresClosed) first - skipped" 'WARN'
+            Write-QpLog "Close $($item.RequiresClosed) first - skipped" 'WARN'
             continue
         }
         $cutoff = if ($item.MinAgeHours) { (Get-Date).AddHours(-[double]$item.MinAgeHours) } else { $null }
-        foreach ($root in @(Resolve-CmpPaths $item.Paths)) {
+        foreach ($root in @(Resolve-QpPaths $item.Paths)) {
             $children = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)
             if ($cutoff) { $children = @($children | Where-Object { $_.LastWriteTime -lt $cutoff }) }
             $moved = 0; $bytes = 0
             foreach ($c in $children) {
-                $size = if ($c.PSIsContainer) { Get-CmpSize @($c.FullName) } else { $c.Length }
+                $size = if ($c.PSIsContainer) { Get-QpSize @($c.FullName) } else { $c.Length }
                 if ($Preview) { $moved++; $bytes += $size; continue }
-                if (Move-CmpToRecycleBin $c.FullName) { $moved++; $bytes += $size }
+                if (Move-QpToRecycleBin $c.FullName) { $moved++; $bytes += $size }
             }
             $total += $bytes
             if ($Preview) {
-                Write-CmpLog ("Would move {0} item(s), {1}, from {2}" -f $moved, (Format-CmpBytes $bytes), $root) 'PREVIEW'
+                Write-QpLog ("Would move {0} item(s), {1}, from {2}" -f $moved, (Format-QpBytes $bytes), $root) 'PREVIEW'
             } else {
-                Write-CmpLog ("Moved {0} item(s), {1}, from {2} to the Recycle Bin (items in use were skipped)" -f $moved, (Format-CmpBytes $bytes), $root) 'OK'
-                if ($moved) { Add-CmpUndo @{ Type = 'Recycled'; Path = $root; Items = $moved } }
+                Write-QpLog ("Moved {0} item(s), {1}, from {2} to the Recycle Bin (items in use were skipped)" -f $moved, (Format-QpBytes $bytes), $root) 'OK'
+                if ($moved) { Add-QpUndo @{ Type = 'Recycled'; Path = $root; Items = $moved } }
             }
         }
     }
     if ($Preview) {
-        Write-CmpLog ("Preview finished. About {0} could be freed." -f (Format-CmpBytes $total)) 'OK'
+        Write-QpLog ("Preview finished. About {0} could be freed." -f (Format-QpBytes $total)) 'OK'
     } else {
-        Write-CmpLog ("About {0} moved to the Recycle Bin. Empty the Recycle Bin yourself when you are happy - this tool never permanently deletes." -f (Format-CmpBytes $total)) 'OK'
-        if ($own) { Stop-CmpSession }
+        Write-QpLog ("About {0} moved to the Recycle Bin. Empty the Recycle Bin yourself when you are happy - this tool never permanently deletes." -f (Format-QpBytes $total)) 'OK'
+        if ($own) { Stop-QpSession }
     }
     [pscustomobject]@{ BytesFreed = [int64]$total }
 }
@@ -534,69 +537,69 @@ function Invoke-CmpCleanup {
 
 #region ---------------------------------------------------------------- NVIDIA
 
-function Test-CmpHostBlocked {
+function Test-QpHostBlocked {
     param([string[]]$Lines, [string]$HostName)
     return [bool]($Lines | Where-Object { $_ -match "^\s*0\.0\.0\.0\s+$([regex]::Escape($HostName))(\s|$)" })
 }
 
-function Add-CmpHostsBlock {
+function Add-QpHostsBlock {
     param([string[]]$HostNames, [string]$Tag, [switch]$Preview)
     $lines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
-    $missing = @($HostNames | Where-Object { -not (Test-CmpHostBlocked -Lines $lines -HostName $_) })
-    if ($missing.Count -eq 0) { Write-CmpLog 'All listed servers are already blocked' 'OK'; return }
-    if ($Preview) { foreach ($m in $missing) { Write-CmpLog "Would block $m" 'PREVIEW' }; return }
+    $missing = @($HostNames | Where-Object { -not (Test-QpHostBlocked -Lines $lines -HostName $_) })
+    if ($missing.Count -eq 0) { Write-QpLog 'All listed servers are already blocked' 'OK'; return }
+    if ($Preview) { foreach ($m in $missing) { Write-QpLog "Would block $m" 'PREVIEW' }; return }
     Copy-Item -Path $script:HostsPath -Destination (Join-Path $script:Session.Path 'hosts.bak') -Force
-    Add-CmpUndo @{ Type = 'Hosts'; Tag = $Tag }
+    Add-QpUndo @{ Type = 'Hosts'; Tag = $Tag }
     $add = @('') + @($missing | ForEach-Object { "0.0.0.0 $_  # $Tag" })
     Add-Content -Path $script:HostsPath -Value $add -Encoding ASCII
-    foreach ($m in $missing) { Write-CmpLog "Blocked $m" 'OK' }
+    foreach ($m in $missing) { Write-QpLog "Blocked $m" 'OK' }
 }
 
-function Remove-CmpHostsBlock {
+function Remove-QpHostsBlock {
     param([string]$Tag)
     $lines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
     $keep = @($lines | Where-Object { $_ -notmatch [regex]::Escape("# $Tag") })
     Set-Content -Path $script:HostsPath -Value $keep -Encoding ASCII
     & ipconfig.exe /flushdns | Out-Null
-    Write-CmpLog "Removed hosts entries tagged '$Tag'" 'OK'
+    Write-QpLog "Removed hosts entries tagged '$Tag'" 'OK'
 }
 
-function Get-CmpNvidiaStatus {
-    $cat = Get-CmpCatalog nvidia
+function Get-QpNvidiaStatus {
+    $cat = Get-QpCatalog nvidia
     $lines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
     [pscustomobject]@{
         NvidiaAppInstalled = (Test-Path (Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVIDIA App'))
         NvidiaGpu          = [bool](Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object Name -match 'NVIDIA')
-        HostsBlocked       = @($cat.Hosts | Where-Object { Test-CmpHostBlocked -Lines $lines -HostName $_ }).Count
+        HostsBlocked       = @($cat.Hosts | Where-Object { Test-QpHostBlocked -Lines $lines -HostName $_ }).Count
         HostsTotal         = @($cat.Hosts).Count
-        FlagsSet           = @($cat.Flags | Where-Object { "$((Get-CmpRegValue -Path $_.Path -Name $_.Name).Value)" -eq "$($_.Value)" }).Count
+        FlagsSet           = @($cat.Flags | Where-Object { "$((Get-QpRegValue -Path $_.Path -Name $_.Name).Value)" -eq "$($_.Value)" }).Count
         FlagsTotal         = @($cat.Flags).Count
         TelemetryPlugin    = (Test-Path (Join-Path $env:ProgramFiles 'NVIDIA Corporation\NvTelemetry\plugin\NvTelemetry64.dll'))
     }
 }
 
-function Invoke-CmpNvidia {
+function Invoke-QpNvidia {
     param([string[]]$Ids, [switch]$Preview)
-    if (-not $Ids) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
-    $cat = Get-CmpCatalog nvidia
+    if (-not $Ids) { Write-QpLog 'Nothing selected.' 'WARN'; return }
+    $cat = Get-QpCatalog nvidia
     $own = (-not $Preview) -and (-not $script:Session)
-    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-CmpSession 'nvidia' }
+    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'nvidia' }
     if ($Ids -contains 'nv.hosts') {
-        Write-CmpLog 'Block NVIDIA telemetry servers (hosts file)' 'STEP'
-        Add-CmpHostsBlock -HostNames $cat.Hosts -Tag 'CleanMyPC-NVIDIA' -Preview:$Preview
+        Write-QpLog 'Block NVIDIA telemetry servers (hosts file)' 'STEP'
+        Add-QpHostsBlock -HostNames $cat.Hosts -Tag 'Quietpane-NVIDIA' -Preview:$Preview
     }
     if ($Ids -contains 'nv.flags') {
-        Write-CmpLog "Set NVIDIA's own telemetry opt-out flags" 'STEP'
+        Write-QpLog "Set NVIDIA's own telemetry opt-out flags" 'STEP'
         foreach ($f in $cat.Flags) {
-            Invoke-CmpRegAction -Action @{ Path = $f.Path; Name = $f.Name; Value = $f.Value; Kind = 'DWord' } -Preview:$Preview
+            Invoke-QpRegAction -Action @{ Path = $f.Path; Name = $f.Name; Value = $f.Value; Kind = 'DWord' } -Preview:$Preview
         }
     }
     if ($Preview) {
-        Write-CmpLog 'Preview finished. Nothing was changed.' 'OK'
+        Write-QpLog 'Preview finished. Nothing was changed.' 'OK'
     } else {
         & ipconfig.exe /flushdns | Out-Null
-        Write-CmpLog 'NVIDIA App, driver updates and game optimization are unaffected. Re-run this after NVIDIA App updates.' 'INFO'
-        if ($own) { Stop-CmpSession }
+        Write-QpLog 'NVIDIA App, driver updates and game optimization are unaffected. Re-run this after NVIDIA App updates.' 'INFO'
+        if ($own) { Stop-QpSession }
     }
 }
 
@@ -604,18 +607,18 @@ function Invoke-CmpNvidia {
 
 #region ---------------------------------------------------------------- one-click
 
-function Get-CmpRecommendedPlan {
-    <# What "Clean my PC now" would do on this PC: only recommended items that are not done yet. Read-only. #>
-    $status = Get-CmpPrivacyStatus
-    $privacy = @((Get-CmpCatalog privacy).Items | Where-Object { $_.Recommended -and $status[$_.Id] -in 'NotApplied', 'Partial' })
-    $nv = Get-CmpNvidiaStatus
+function Get-QpRecommendedPlan {
+    <# What "Quiet my PC now" would do on this PC: only recommended items that are not done yet. Read-only. #>
+    $status = Get-QpPrivacyStatus
+    $privacy = @((Get-QpCatalog privacy).Items | Where-Object { $_.Recommended -and $status[$_.Id] -in 'NotApplied', 'Partial' })
+    $nv = Get-QpNvidiaStatus
     $nvIds = @()
     if ($nv.NvidiaGpu) {
         if ($nv.HostsBlocked -lt $nv.HostsTotal) { $nvIds += 'nv.hosts' }
         if ($nv.FlagsSet -lt $nv.FlagsTotal) { $nvIds += 'nv.flags' }
     }
-    $apps = @(Get-CmpBloatApps | Where-Object { $_.Recommended })
-    $clean = @(Get-CmpCleanupTargets | Where-Object { $_.Recommended -and $_.SizeBytes -gt 0 })
+    $apps = @(Get-QpBloatApps | Where-Object { $_.Recommended })
+    $clean = @(Get-QpCleanupTargets | Where-Object { $_.Recommended -and $_.SizeBytes -gt 0 })
     [pscustomobject]@{
         PrivacyIds    = @($privacy | ForEach-Object { $_.Id })
         PrivacyTitles = @($privacy | ForEach-Object { $_.Title })
@@ -629,24 +632,24 @@ function Get-CmpRecommendedPlan {
     }
 }
 
-function Invoke-CmpRecommended {
+function Invoke-QpRecommended {
     <#
-        "Clean my PC now": applies every recommended item that is not done yet, all inside ONE restore point,
+        "Quiet my PC now": applies every recommended item that is not done yet, all inside ONE restore point,
         so "Undo everything" really undoes everything. Returns a plain summary for the Home screen.
     #>
-    $plan = Get-CmpRecommendedPlan
+    $plan = Get-QpRecommendedPlan
     if ($plan.IsEmpty) {
-        Write-CmpLog 'Nothing to do - this PC already has every recommended setting.' 'OK'
+        Write-QpLog 'Nothing to do - this PC already has every recommended setting.' 'OK'
         return [pscustomobject]@{ Nothing = $true }
     }
-    Start-CmpSession 'one-click'
+    Start-QpSession 'one-click'
     $restore = $script:Session.Path
-    if ($plan.PrivacyIds.Count) { Invoke-CmpPrivacy -Ids $plan.PrivacyIds }
-    if ($plan.NvidiaIds.Count)  { Invoke-CmpNvidia -Ids $plan.NvidiaIds }
-    if ($plan.AppNames.Count)   { Invoke-CmpRemoveApps -Names $plan.AppNames -Deprovision }
+    if ($plan.PrivacyIds.Count) { Invoke-QpPrivacy -Ids $plan.PrivacyIds }
+    if ($plan.NvidiaIds.Count)  { Invoke-QpNvidia -Ids $plan.NvidiaIds }
+    if ($plan.AppNames.Count)   { Invoke-QpRemoveApps -Names $plan.AppNames -Deprovision }
     $freed = 0
     if ($plan.CleanupIds.Count) {
-        $r = @(Invoke-CmpCleanup -Ids $plan.CleanupIds) | Where-Object { $_ -and $_.PSObject.Properties['BytesFreed'] } | Select-Object -Last 1
+        $r = @(Invoke-QpCleanup -Ids $plan.CleanupIds) | Where-Object { $_ -and $_.PSObject.Properties['BytesFreed'] } | Select-Object -Last 1
         if ($r) { $freed = $r.BytesFreed }
     }
     $entries = @($script:Session.Entries)
@@ -658,7 +661,7 @@ function Invoke-CmpRecommended {
         BytesFreed    = [int64]$freed
         RestorePoint  = $restore
     }
-    Stop-CmpSession
+    Stop-QpSession
     return $summary
 }
 
@@ -666,15 +669,15 @@ function Invoke-CmpRecommended {
 
 #region ---------------------------------------------------------------- scan (read-only)
 
-function Invoke-CmpAudit {
+function Invoke-QpAudit {
     <#
         Read-only health, privacy and malware check. Writes an HTML report and returns a summary.
         Nothing on the PC is changed.
     #>
-    param([string]$OutFile = (Join-Path ([Environment]::GetFolderPath('Desktop')) ("CleanMyPC-Report-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmm'))))
+    param([string]$OutFile = (Join-Path ([Environment]::GetFolderPath('Desktop')) ("Quietpane-Report-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmm'))))
 
     $findings = New-Object System.Collections.ArrayList
-    $isAdmin = Test-CmpAdmin
+    $isAdmin = Test-QpAdmin
     function Add-Finding([string]$Section, [string]$Severity, [string]$Title, [string]$Detail = '') {
         [void]$findings.Add([pscustomobject]@{ Section = $Section; Severity = $Severity; Title = $Title; Detail = $Detail })
     }
@@ -695,10 +698,10 @@ function Invoke-CmpAudit {
         return @($hits)
     }
 
-    Write-CmpLog 'Scan started (read-only - nothing will be changed)' 'STEP'
+    Write-QpLog 'Scan started (read-only - nothing will be changed)' 'STEP'
 
     # ---- 1. Startup entries
-    Write-CmpLog 'Checking startup entries...' 'INFO'
+    Write-QpLog 'Checking startup entries...' 'INFO'
     # Each Run key is paired with the key where Task Manager records whether that entry is switched off.
     $sa = 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved'
     $runKeys = @(
@@ -769,7 +772,7 @@ function Invoke-CmpAudit {
     }
 
     # ---- 2. Scheduled tasks
-    Write-CmpLog 'Checking scheduled tasks...' 'INFO'
+    Write-QpLog 'Checking scheduled tasks...' 'INFO'
     foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue)) {
         $actions = (@($t.Actions) | ForEach-Object { ("{0} {1}" -f $_.Execute, $_.Arguments).Trim() }) -join ' ; '
         $id = "$($t.TaskPath)$($t.TaskName)"
@@ -789,7 +792,7 @@ function Invoke-CmpAudit {
     }
 
     # ---- 3. Other persistence tricks
-    Write-CmpLog 'Checking other persistence locations...' 'INFO'
+    Write-QpLog 'Checking other persistence locations...' 'INFO'
     foreach ($cls in 'CommandLineEventConsumer', 'ActiveScriptEventConsumer') {
         Get-CimInstance -Namespace root\subscription -ClassName $cls -ErrorAction SilentlyContinue | ForEach-Object {
             Add-Finding 'Startup & persistence' 'High' "WMI event consumer: $($_.Name)" ("{0}{1}" -f $_.CommandLineTemplate, $_.ScriptText)
@@ -806,7 +809,7 @@ function Invoke-CmpAudit {
     if ($appinit.AppInit_DLLs -and $appinit.LoadAppInit_DLLs -eq 1) { Add-Finding 'Startup & persistence' 'High' 'AppInit_DLLs is loading extra DLLs into every program' $appinit.AppInit_DLLs }
 
     # ---- 4. Network hijacks
-    Write-CmpLog 'Checking hosts file, proxy and DNS...' 'INFO'
+    Write-QpLog 'Checking hosts file, proxy and DNS...' 'INFO'
     $blockedHosts = New-Object System.Collections.ArrayList
     foreach ($line in @(Get-Content $script:HostsPath -ErrorAction SilentlyContinue)) {
         $l = $line.Trim()
@@ -822,7 +825,7 @@ function Invoke-CmpAudit {
     if ($dns) { Add-Finding 'Network' 'Info' 'DNS servers in use' ($dns -join "`n") }
 
     # ---- 5. Services running from unusual places
-    Write-CmpLog 'Checking services...' 'INFO'
+    Write-QpLog 'Checking services...' 'INFO'
     Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { $_.PathName } | ForEach-Object {
         # Only look at the executable itself, not its arguments (arguments often mention AppData legitimately).
         $exePath = if ($_.PathName -match '^\s*"([^"]+)"') { $matches[1] } elseif ($_.PathName -match '^\s*(\S+?\.exe)\b') { $matches[1] } else { $_.PathName }
@@ -832,7 +835,7 @@ function Invoke-CmpAudit {
     }
 
     # ---- 6. Unsigned programs in user-writable folders
-    Write-CmpLog 'Checking programs in user folders for missing/invalid signatures (this can take a minute)...' 'INFO'
+    Write-QpLog 'Checking programs in user folders for missing/invalid signatures (this can take a minute)...' 'INFO'
     $skip = '(?i)\\node_modules\\|\\npm-cache\\|\\\.vscode\\|\\Programs\\Python\\|\\go\\pkg\\|\\Android\\Sdk\\|\\\.gradle\\|\\\.m2\\|\\\.cargo\\|\\\.rustup\\|\\WindowsApps\\|\\Packages\\|\\Microsoft\\WindowsApps\\'
     $scanRoots = @($env:LOCALAPPDATA, $env:APPDATA, (Join-Path $env:USERPROFILE 'AppData\LocalLow'), (Join-Path $env:USERPROFILE 'Downloads'), $env:PUBLIC, $env:TEMP) | Where-Object { $_ -and (Test-Path $_) }
     $exe = foreach ($r in $scanRoots) { Get-ChildItem -Path $r -Recurse -Force -File -Include *.exe, *.scr -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch $skip } }
@@ -873,7 +876,7 @@ function Invoke-CmpAudit {
     if ($help.Count) { Add-Finding 'Files' 'Info' "$($help.Count) unsigned helper file(s) belonging to signed programs" ((($help | ForEach-Object { "{0:yyyy-MM-dd}  {1}`n            next to {2}" -f $_.U.Date, $_.U.File, $_.Sibling }) -join "`n") + "`nMany apps ship small unsigned helpers (for example crash reporters) next to their signed main program. Lower risk.") }
 
     # ---- 7. Unofficial / cracked software indicators
-    Write-CmpLog 'Looking for signs of cracked/unofficial software...' 'INFO'
+    Write-QpLog 'Looking for signs of cracked/unofficial software...' 'INFO'
     # Only unambiguous names - generic words (codex, rune, plaza, reloaded...) collide with legitimate software.
     $crackNames = '(?i)^(nodvd|crack|cracked|codex-rune|empress|skidrow|fitgirl|fitgirl repacks|dodi|dodi repacks|anadius|goldberg|goldberg_emu|steam_emu|smartsteamemu|creamapi|cream_api|tenoke)$'
     $crackFiles = '(?i)^(steam_emu\.ini|cream_api\.ini|codex\.ini|rune\.ini|steam_api64\.cdx|smartsteamemu\.ini|onlinefix\.ini|cpy\.ini)$'
@@ -888,7 +891,7 @@ function Invoke-CmpAudit {
     }
 
     # ---- 8. Browsers
-    Write-CmpLog 'Checking browser extensions and notification permissions...' 'INFO'
+    Write-QpLog 'Checking browser extensions and notification permissions...' 'INFO'
     $browsers = @{ 'Chrome' = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'; 'Edge' = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'; 'Brave' = Join-Path $env:LOCALAPPDATA 'BraveSoftware\Brave-Browser\User Data' }
     foreach ($b in $browsers.Keys) {
         $root = $browsers[$b]
@@ -941,7 +944,7 @@ function Invoke-CmpAudit {
     }
 
     # ---- 9. Security basics
-    Write-CmpLog 'Checking Microsoft Defender and firewall...' 'INFO'
+    Write-QpLog 'Checking Microsoft Defender and firewall...' 'INFO'
     $mp = Get-MpComputerStatus -ErrorAction SilentlyContinue
     if ($mp) {
         if (-not $mp.RealTimeProtectionEnabled) { Add-Finding 'Security' 'High' 'Defender real-time protection is OFF' 'Turn it back on in Windows Security unless another antivirus is installed.' }
@@ -960,29 +963,29 @@ function Invoke-CmpAudit {
     Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { -not $_.Enabled } | ForEach-Object { Add-Finding 'Security' 'High' "Windows Firewall is off for the $($_.Name) profile" '' }
 
     # ---- 10. Telemetry status
-    Write-CmpLog 'Checking telemetry status...' 'INFO'
-    $status = Get-CmpPrivacyStatus
-    $open = @((Get-CmpCatalog privacy).Items | Where-Object { $status[$_.Id] -in 'NotApplied', 'Partial' -and $_.Recommended })
+    Write-QpLog 'Checking telemetry status...' 'INFO'
+    $status = Get-QpPrivacyStatus
+    $open = @((Get-QpCatalog privacy).Items | Where-Object { $status[$_.Id] -in 'NotApplied', 'Partial' -and $_.Recommended })
     if ($open.Count) { Add-Finding 'Privacy & telemetry' 'Medium' "$($open.Count) recommended privacy setting(s) are not fully applied yet" (($open | ForEach-Object { "- $($_.Title)" + $(if ($status[$_.Id] -eq 'Partial') { ' (partly done)' } else { '' }) }) -join "`n") }
     else { Add-Finding 'Privacy & telemetry' 'Info' 'All recommended privacy settings are applied' '' }
-    $nv = Get-CmpNvidiaStatus
+    $nv = Get-QpNvidiaStatus
     if ($nv.NvidiaAppInstalled -and $nv.HostsBlocked -lt $nv.HostsTotal) { Add-Finding 'Privacy & telemetry' 'Medium' "NVIDIA telemetry is not blocked ($($nv.HostsBlocked)/$($nv.HostsTotal) servers)" 'Use the NVIDIA tab. Do NOT delete NVIDIA''s telemetry plugin - that breaks NVIDIA App.' }
 
     # ---- 11. Performance snapshot
-    Write-CmpLog 'Taking a performance snapshot...' 'INFO'
+    Write-QpLog 'Taking a performance snapshot...' 'INFO'
     $os = Get-CimInstance Win32_OperatingSystem
     $usedGB = ($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1MB
     $top = Get-Process | Group-Object ProcessName | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Count = $_.Count; MB = [math]::Round((($_.Group | Measure-Object WorkingSet64 -Sum).Sum) / 1MB) } } | Sort-Object MB -Descending | Select-Object -First 12
     Add-Finding 'Performance' 'Info' ("RAM in use: {0:N1} of {1:N1} GB, {2} processes, {3} program(s) start at sign-in" -f $usedGB, ($os.TotalVisibleMemorySize / 1MB), @(Get-Process).Count, $startupOn) ((($top | ForEach-Object { '{0,6} MB  {1} (x{2})' -f $_.MB, $_.Name, $_.Count }) -join "`n") + ("`n{0} startup entries in total; the rest are switched off in Task Manager or point to programs that no longer exist." -f $startupTotal))
 
     # ---- 12. Disk space
-    Write-CmpLog 'Measuring reclaimable space...' 'INFO'
-    $targets = @(Get-CmpCleanupTargets | Where-Object SizeBytes -gt 0)
-    if ($targets.Count) { Add-Finding 'Disk space' 'Info' ("Reclaimable with the Clean-up tab: about {0}" -f (Format-CmpBytes (($targets | Measure-Object SizeBytes -Sum).Sum))) (($targets | ForEach-Object { '{0,10}  {1}' -f (Format-CmpBytes $_.SizeBytes), $_.Title }) -join "`n") }
+    Write-QpLog 'Measuring reclaimable space...' 'INFO'
+    $targets = @(Get-QpCleanupTargets | Where-Object SizeBytes -gt 0)
+    if ($targets.Count) { Add-Finding 'Disk space' 'Info' ("Reclaimable with the Clean-up tab: about {0}" -f (Format-QpBytes (($targets | Measure-Object SizeBytes -Sum).Sum))) (($targets | ForEach-Object { '{0,10}  {1}' -f (Format-QpBytes $_.SizeBytes), $_.Title }) -join "`n") }
     if (Test-Path 'C:\Windows.old') { Add-Finding 'Disk space' 'Info' 'C:\Windows.old exists (previous Windows version)' 'Remove it with Settings > System > Storage > Temporary files > "Previous Windows installation(s)".' }
 
     # ---- 13. Possibly leftover folders
-    Write-CmpLog 'Looking for folders left behind by uninstalled programs...' 'INFO'
+    Write-QpLog 'Looking for folders left behind by uninstalled programs...' 'INFO'
     $cutoff = (Get-Date).AddDays(-180)
     $old = foreach ($r in @($env:LOCALAPPDATA, $env:APPDATA, (Join-Path $env:USERPROFILE 'AppData\LocalLow'), $env:ProgramData)) {
         Get-ChildItem -Path $r -Directory -Force -ErrorAction SilentlyContinue |
@@ -996,31 +999,31 @@ function Invoke-CmpAudit {
                 if (-not $recent) {
                     $newest = Get-ChildItem -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
                     $last = if ($newest -and $newest.LastWriteTime -gt $dir.LastWriteTime) { $newest.LastWriteTime } else { $dir.LastWriteTime }
-                    [pscustomobject]@{ Path = $dir.FullName; Last = $last; Size = (Get-CmpSize @($dir.FullName)) }
+                    [pscustomobject]@{ Path = $dir.FullName; Last = $last; Size = (Get-QpSize @($dir.FullName)) }
                 }
             }
     }
     $old = @($old | Sort-Object Size -Descending | Select-Object -First 30)
-    if ($old.Count) { Add-Finding 'Disk space' 'Info' 'Folders where nothing has changed for 6+ months (review before deleting - may belong to uninstalled programs)' ((($old | ForEach-Object { '{0,10}  {1:yyyy-MM-dd}  {2}' -f (Format-CmpBytes $_.Size), $_.Last, $_.Path }) -join "`n") + "`nThe date is the last time anything inside the folder changed. Check what a folder belongs to before deleting it - some apps you still use rarely write to their folders.") }
+    if ($old.Count) { Add-Finding 'Disk space' 'Info' 'Folders where nothing has changed for 6+ months (review before deleting - may belong to uninstalled programs)' ((($old | ForEach-Object { '{0,10}  {1:yyyy-MM-dd}  {2}' -f (Format-QpBytes $_.Size), $_.Last, $_.Path }) -join "`n") + "`nThe date is the last time anything inside the folder changed. Check what a folder belongs to before deleting it - some apps you still use rarely write to their folders.") }
 
     # ---- Report
     $high = @($findings | Where-Object Severity -eq 'High').Count
     $med = @($findings | Where-Object Severity -eq 'Medium').Count
-    $html = New-CmpReportHtml -Findings $findings -High $high -Medium $med -IsAdmin $isAdmin
+    $html = New-QpReportHtml -Findings $findings -High $high -Medium $med -IsAdmin $isAdmin
     try {
         $dir = Split-Path -Path $OutFile -Parent
         if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         Set-Content -Path $OutFile -Value $html -Encoding UTF8 -ErrorAction Stop
     } catch {
-        $OutFile = Join-Path $env:TEMP ("CleanMyPC-Report-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmm'))
+        $OutFile = Join-Path $env:TEMP ("Quietpane-Report-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmm'))
         Set-Content -Path $OutFile -Value $html -Encoding UTF8
-        Write-CmpLog "Could not save the report to the chosen location - saved to $OutFile instead" 'WARN'
+        Write-QpLog "Could not save the report to the chosen location - saved to $OutFile instead" 'WARN'
     }
-    Write-CmpLog ("Scan finished: {0} high, {1} medium, {2} info. Report: {3}" -f $high, $med, (@($findings).Count - $high - $med), $OutFile) 'OK'
+    Write-QpLog ("Scan finished: {0} high, {1} medium, {2} info. Report: {3}" -f $high, $med, (@($findings).Count - $high - $med), $OutFile) 'OK'
     [pscustomobject]@{ High = $high; Medium = $med; Info = (@($findings).Count - $high - $med); Report = $OutFile }
 }
 
-function New-CmpReportHtml {
+function New-QpReportHtml {
     param($Findings, [int]$High, [int]$Medium, [bool]$IsAdmin)
     $enc = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
     # The logo is embedded as a data URI so the report makes no network requests at all
@@ -1032,7 +1035,7 @@ function New-CmpReportHtml {
     [void]$sb.Append(@"
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Clean My PC report</title>
+<title>Quietpane report</title>
 <style>
 :root{--bg:#faf6ec;--card:#fffdf8;--text:#0f1b1c;--muted:#4b5b5c;--line:#e6dfcc;--anchor:#0f1b1c;--accent:#ffb627;--teal:#117a68;--high:#a83232;--med:#9a6700;--info:#117a68}
 @media (prefers-color-scheme:dark){:root{--bg:#0f1b1c;--card:#162627;--text:#faf6ec;--muted:#a9b5b3;--line:#22393a;--teal:#1fa187;--high:#e06666;--med:#ffb627;--info:#1fa187}}
@@ -1055,7 +1058,7 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
 <header class="brand"><div class="wrap row">
 "@)
     if ($logo) { [void]$sb.Append(('<img src="{0}" alt="KomodoWorks emblem">' -f $logo)) }
-    [void]$sb.Append(('<div><h1>Clean My PC &ndash; scan report</h1><p class="by">Developed by <a href="{0}" rel="noopener noreferrer">KomodoWorks.com</a></p></div></div></header><main><div class="wrap">' -f $brandUrl))
+    [void]$sb.Append(('<div><h1>Quietpane &ndash; scan report</h1><p class="by">Developed by <a href="{0}" rel="noopener noreferrer">KomodoWorks.com</a></p></div></div></header><main><div class="wrap">' -f $brandUrl))
     $adminNote = if (-not $IsAdmin) { ' &middot; run as administrator for the full scan' } else { '' }
     [void]$sb.Append(('<p class="meta">{0} &middot; version {1} &middot; read-only scan, nothing was changed{2}</p>' -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $script:AppVersion, $adminNote))
     [void]$sb.Append(('<div class="sum"><div class="pill"><b style="color:var(--high)">{0}</b>high</div><div class="pill"><b style="color:var(--med)">{1}</b>medium</div><div class="pill"><b style="color:var(--info)">{2}</b>info</div></div>' -f $High, $Medium, (@($Findings).Count - $High - $Medium)))
@@ -1066,17 +1069,17 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
             [void]$sb.Append(('<div class="f {0}"><span class="sev">{0}</span>{1}{2}</div>' -f $f.Severity, (& $enc $f.Title), $(if ($f.Detail) { '<pre>' + (& $enc $f.Detail) + '</pre>' } else { '' })))
         }
     }
-    [void]$sb.Append(('<footer>High = act on it &middot; Medium = review it &middot; Info = for your information.<br>This report was created on this PC and was not sent anywhere. It describes your PC, so review it before sharing it with anyone.<br>Clean My PC {0} &middot; free and open source (MIT) &middot; Developed by <a href="{1}" rel="noopener noreferrer">KomodoWorks.com</a> &middot; <a href="mailto:{2}">{2}</a></footer></div></main></body></html>' -f $script:AppVersion, $brandUrl, $script:Brand.Email))
+    [void]$sb.Append(('<footer>High = act on it &middot; Medium = review it &middot; Info = for your information.<br>This report was created on this PC and was not sent anywhere. It describes your PC, so review it before sharing it with anyone.<br>Quietpane {0} &middot; free and open source (MIT) &middot; Developed by <a href="{1}" rel="noopener noreferrer">KomodoWorks.com</a> &middot; <a href="mailto:{2}">{2}</a></footer></div></main></body></html>' -f $script:AppVersion, $brandUrl, $script:Brand.Email))
     return $sb.ToString()
 }
 
 #endregion
 
-Export-ModuleMember -Function Get-CmpInfo, Set-CmpLogSink, Write-CmpLog, Test-CmpAdmin, Get-CmpCatalog, Format-CmpBytes,
-    Get-CmpRestorePoints, Invoke-CmpUndo,
-    Get-CmpPrivacyStatus, Invoke-CmpPrivacy,
-    Get-CmpBloatApps, Invoke-CmpRemoveApps,
-    Get-CmpCleanupTargets, Invoke-CmpCleanup,
-    Get-CmpNvidiaStatus, Invoke-CmpNvidia,
-    Get-CmpRecommendedPlan, Invoke-CmpRecommended,
-    Invoke-CmpAudit
+Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes,
+    Get-QpRestorePoints, Invoke-QpUndo,
+    Get-QpPrivacyStatus, Invoke-QpPrivacy,
+    Get-QpBloatApps, Invoke-QpRemoveApps,
+    Get-QpCleanupTargets, Invoke-QpCleanup,
+    Get-QpNvidiaStatus, Invoke-QpNvidia,
+    Get-QpRecommendedPlan, Invoke-QpRecommended,
+    Invoke-QpAudit

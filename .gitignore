@@ -1,4 +1,5 @@
 # Scan reports and local test output - never commit these, they describe a real PC
+Quietpane-Report-*.html
 CleanMyPC-Report-*.html
 *.log
 

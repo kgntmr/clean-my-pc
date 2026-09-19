@@ -1,19 +1,19 @@
 # ============================================================================
-#  LOOKING FOR HOW TO START CLEAN MY PC?  This file is the app's code.
-#  Close this window, then double-click "Start Clean My PC" instead.
+#  LOOKING FOR HOW TO START Quietpane?  This file is the app's code.
+#  Close this window, then double-click "Start Quietpane" instead.
 # ============================================================================
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Clean My PC - privacy, telemetry, bloat and clutter clean-up for Windows 10/11.
+    Quietpane - privacy, telemetry, bloat and clutter clean-up for Windows 10/11.
     Developed by KomodoWorks - https://www.komodoworks.com - free and open source (MIT).
 
 .DESCRIPTION
-    Double-click "Start Clean My PC" to open the app. From PowerShell:
-        .\CleanMyPC.ps1                          open the app (asks for administrator rights)
-        .\CleanMyPC.ps1 -Scan                    run only the read-only scan and open the HTML report
-        .\CleanMyPC.ps1 -SelfTest                build the window without showing it (used for testing)
-        .\CleanMyPC.ps1 -SelfTest -Snapshot x.png -SnapshotTab 1
+    Double-click "Start Quietpane" to open the app. From PowerShell:
+        .\Quietpane.ps1                          open the app (asks for administrator rights)
+        .\Quietpane.ps1 -Scan                    run only the read-only scan and open the HTML report
+        .\Quietpane.ps1 -SelfTest                build the window without showing it (used for testing)
+        .\Quietpane.ps1 -SelfTest -Snapshot x.png -SnapshotTab 1
                                                  also render the window to an image (used for screenshots)
 
     Privacy: this app collects nothing and makes no network connections. See PRIVACY.md.
@@ -26,7 +26,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$modulePath = Join-Path $PSScriptRoot 'src\CleanMyPC.psm1'
+$modulePath = Join-Path $PSScriptRoot 'src\Quietpane.psm1'
 
 function Test-IsAdmin {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -47,7 +47,7 @@ if (-not $SelfTest -and -not (Test-IsAdmin)) {
 }
 
 Import-Module $modulePath -Force
-$info = Get-CmpInfo
+$info = Get-QpInfo
 
 function Open-AsUser([string]$Target) {
     # Opening through explorer.exe hands links and files to the normal (non-admin) desktop session,
@@ -57,12 +57,12 @@ function Open-AsUser([string]$Target) {
 
 # ------------------------------------------------------------------ scan-only mode
 if ($Scan) {
-    $host.UI.RawUI.WindowTitle = "Clean My PC $($info.Version) - Developed by KomodoWorks.com"
+    $host.UI.RawUI.WindowTitle = "Quietpane $($info.Version) - Developed by KomodoWorks.com"
     Write-Host ''
-    Write-Host '  Clean My PC - read-only scan' -ForegroundColor Yellow
+    Write-Host '  Quietpane - read-only scan' -ForegroundColor Yellow
     Write-Host '  Developed by KomodoWorks.com  |  free and open source  |  nothing leaves this PC' -ForegroundColor DarkCyan
     Write-Host ''
-    $result = @(Invoke-CmpAudit)[-1]
+    $result = @(Invoke-QpAudit)[-1]
     if ($result) { Open-AsUser $result.Report }
     Write-Host ''
     Write-Host "  Questions or feedback: $($info.BrandUrl)  |  $($info.BrandEmail)" -ForegroundColor DarkCyan
@@ -79,7 +79,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Clean My PC - by KomodoWorks" Width="1100" Height="780" MinWidth="860" MinHeight="580"
+        Title="Quietpane - by KomodoWorks" Width="1100" Height="780" MinWidth="860" MinHeight="580"
         WindowStartupLocation="CenterScreen" Background="#FAF6EC" FontFamily="Sora, Segoe UI" Foreground="#0F1B1C">
   <Window.Resources>
     <SolidColorBrush x:Key="Anchor" Color="#0F1B1C"/>
@@ -167,7 +167,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
         </Grid.ColumnDefinitions>
         <Image x:Name="HeaderLogo" Width="48" Height="48" Margin="0,0,14,0" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
         <StackPanel Grid.Column="1" VerticalAlignment="Center">
-          <TextBlock Text="Clean My PC" Foreground="#FAF6EC" FontSize="25" FontWeight="SemiBold" FontFamily="Fraunces, Georgia"/>
+          <TextBlock Text="Quietpane" Foreground="#FAF6EC" FontSize="25" FontWeight="SemiBold" FontFamily="Fraunces, Georgia"/>
           <TextBlock Foreground="#C9C2B0" FontSize="12.5" TextWrapping="Wrap" Margin="0,2,0,0"
                      Text="Switch off tracking, remove bloat, free up space. Nothing is collected and nothing leaves this PC."/>
         </StackPanel>
@@ -345,7 +345,7 @@ $script:CardAdware.Caption.Text = 'Takes about 2 minutes and changes nothing'
 
 $homeButtons = New-Object System.Windows.Controls.WrapPanel
 $homeButtons.Margin = Get-Thick '0,6,0,0'
-$btnOneClick = New-Button 'Clean my PC now' -Primary
+$btnOneClick = New-Button 'Quiet my PC now' -Primary
 $btnOneClick.FontSize = 18
 $btnOneClick.Padding = Get-Thick '36,14'
 $btnOneClick.Margin = Get-Thick '0,0,12,8'
@@ -398,7 +398,7 @@ $scanSummary = New-Text 'No scan yet.' 15 'SemiBold' '#0F1B1C' '0,6,0,6' 'Fraunc
 # 2. Privacy & telemetry
 $privacyPanel = New-TabPage 'Privacy' 'privacy' ('Windows, browser and app telemetry, ads, tips and background services. Items marked [already applied] are already done on this PC. Side effects are written in each description. Security (Defender, SmartScreen, firewall) and Windows Update are never touched.')
 $lastGroup = $null
-foreach ($item in (Get-CmpCatalog privacy).Items) {
+foreach ($item in (Get-QpCatalog privacy).Items) {
     if ($item.Group -ne $lastGroup) {
         [void]$privacyPanel.Children.Add((New-GroupHeader $item.Group))
         $lastGroup = $item.Group
@@ -459,7 +459,7 @@ if ($logo) {
 }
 $aboutTitle = New-Object System.Windows.Controls.StackPanel
 $aboutTitle.VerticalAlignment = 'Center'
-[void]$aboutTitle.Children.Add((New-Text "Clean My PC $($info.Version)" 24 'SemiBold' '#0F1B1C' '0,0,0,2' 'Fraunces, Georgia'))
+[void]$aboutTitle.Children.Add((New-Text "Quietpane $($info.Version)" 24 'SemiBold' '#0F1B1C' '0,0,0,2' 'Fraunces, Georgia'))
 [void]$aboutTitle.Children.Add((New-Text 'Developed by KomodoWorks - an independent technology studio in Dublin, Ireland.' 13 'Normal' '#4B5B5C' '0'))
 [void]$aboutHead.Children.Add($aboutTitle)
 [void]$aboutPanel.Children.Add($aboutHead)
@@ -531,7 +531,7 @@ $btnRepo.Add_Click({ Open-AsUser $info.RepoUrl })
 $btnMail.Add_Click({ Open-AsUser "mailto:$($info.BrandEmail)?subject=Clean%20My%20PC" })
 $btnData.Add_Click({
     if (Test-Path $info.DataRoot) { Open-AsUser $info.DataRoot }
-    else { [void][System.Windows.MessageBox]::Show('Nothing stored yet. Restore points appear here after your first Apply.', 'Clean My PC') }
+    else { [void][System.Windows.MessageBox]::Show('Nothing stored yet. Restore points appear here after your first Apply.', 'Quietpane') }
 })
 
 # ------------------------------------------------------------------ background worker
@@ -582,7 +582,7 @@ function Start-Work {
         param($WorkText, $Params)
         try {
             Import-Module $ModulePath -Force
-            Set-CmpLogSink { param($line) $Sync.Queue.Enqueue($line) }
+            Set-QpLogSink { param($line) $Sync.Queue.Enqueue($line) }
             $Sync.Result = & ([scriptblock]::Create($WorkText)) @Params
         } catch {
             $Sync.Queue.Enqueue(('[{0}] ERROR   {1}' -f (Get-Date -Format 'HH:mm:ss'), $_.Exception.Message))
@@ -651,7 +651,7 @@ function Update-FromState($state) {
     $script:CleanupList.Children.Clear()
     $script:Options['cleanup'].Clear()
     foreach ($c in @($state.Cleanup | Where-Object { $_ })) {
-        $title = '{0}   ({1})' -f $c.Title, (Format-CmpBytes $c.SizeBytes)
+        $title = '{0}   ({1})' -f $c.Title, (Format-QpBytes $c.SizeBytes)
         Add-Option -Panel $script:CleanupList -Key 'cleanup' -Id $c.Id -Title $title -Description $c.Description -Recommended ([bool]$c.Recommended)
         if ($c.SizeBytes -le 0) {
             $last = $script:Options['cleanup'][$script:Options['cleanup'].Count - 1]
@@ -678,7 +678,7 @@ function Update-FromState($state) {
 }
 
 function Update-HomeCards($state) {
-    # Same rules as Get-CmpRecommendedPlan in the engine: recommended items that are not done yet.
+    # Same rules as Get-QpRecommendedPlan in the engine: recommended items that are not done yet.
     $priv = @($script:Options['privacy'] | Where-Object { $_.Recommended -and $_.Status -in 'NotApplied', 'Partial' }).Count
     $apps = @($state.Apps | Where-Object { $_ -and $_.Recommended }).Count
     $bytes = [int64](@($state.Cleanup | Where-Object { $_ -and $_.Recommended -and $_.SizeBytes -gt 0 }) | Measure-Object -Property SizeBytes -Sum).Sum
@@ -691,7 +691,7 @@ function Update-HomeCards($state) {
     else { $script:CardTracking.Value.Text = 'All set'; $script:CardTracking.Value.Foreground = $good; $script:CardTracking.Caption.Text = 'Tracking and ads are already off' }
     if ($apps) { $script:CardApps.Value.Text = "$apps to remove"; $script:CardApps.Value.Foreground = $todo; $script:CardApps.Caption.Text = 'Pre-installed and promoted apps' }
     else { $script:CardApps.Value.Text = 'None found'; $script:CardApps.Value.Foreground = $good; $script:CardApps.Caption.Text = 'No known bloat apps on this PC' }
-    if ($bytes -gt 0) { $script:CardSpace.Value.Text = Format-CmpBytes $bytes; $script:CardSpace.Value.Foreground = $todo; $script:CardSpace.Caption.Text = 'Temp files, crash dumps, old installers' }
+    if ($bytes -gt 0) { $script:CardSpace.Value.Text = Format-QpBytes $bytes; $script:CardSpace.Value.Foreground = $todo; $script:CardSpace.Caption.Text = 'Temp files, crash dumps, old installers' }
     else { $script:CardSpace.Value.Text = 'Nothing to clean'; $script:CardSpace.Value.Foreground = $good; $script:CardSpace.Caption.Text = 'Already tidy' }
     if ($nv -and $nv.NvidiaGpu) {
         $script:CardNvidia.Border.Visibility = 'Visible'
@@ -700,7 +700,7 @@ function Update-HomeCards($state) {
     } else {
         $script:CardNvidia.Border.Visibility = 'Collapsed'
     }
-    if ($script:HomeCounts.Total -eq 0) { $btnOneClick.Content = 'Your PC is already clean' } else { $btnOneClick.Content = 'Clean my PC now' }
+    if ($script:HomeCounts.Total -eq 0) { $btnOneClick.Content = 'Your PC is already clean' } else { $btnOneClick.Content = 'Quiet my PC now' }
 }
 
 function Set-LogVisible([bool]$Visible) {
@@ -713,11 +713,11 @@ function Set-LogVisible([bool]$Visible) {
 
 $script:ReadState = {
     @{
-        Privacy = Get-CmpPrivacyStatus
-        Nvidia  = Get-CmpNvidiaStatus
-        Apps    = @(Get-CmpBloatApps)
-        Cleanup = @(Get-CmpCleanupTargets)
-        Restore = @(Get-CmpRestorePoints)
+        Privacy = Get-QpPrivacyStatus
+        Nvidia  = Get-QpNvidiaStatus
+        Apps    = @(Get-QpBloatApps)
+        Cleanup = @(Get-QpCleanupTargets)
+        Restore = @(Get-QpRestorePoints)
     }
 }
 
@@ -733,27 +733,27 @@ function Get-SelectedIds([string]$Key) {
 function Invoke-Selected([bool]$Preview) {
     $key = [string]$ui.Tabs.SelectedItem.Tag
     $ids = Get-SelectedIds $key
-    if ($ids.Count -eq 0) { [void][System.Windows.MessageBox]::Show('Tick at least one item first.', 'Clean My PC'); return }
+    if ($ids.Count -eq 0) { [void][System.Windows.MessageBox]::Show('Tick at least one item first.', 'Quietpane'); return }
     if (-not $Preview) {
         $msg = switch ($key) {
             'apps'    { "Remove $($ids.Count) app(s)?`n`nThey can be reinstalled from the Microsoft Store." }
             'cleanup' { "Move the selected items to the Recycle Bin?`n`nNothing is permanently deleted - empty the Recycle Bin yourself when you are happy." }
             default   { "Apply $($ids.Count) selected item(s)?`n`nA restore point is created first, so everything can be undone from the Undo tab." }
         }
-        if ([System.Windows.MessageBox]::Show($msg, 'Clean My PC', 'YesNo', 'Question') -ne 'Yes') { return }
+        if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
     }
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true   # preview/apply results are shown in the details log
     $after = if ($Preview) { $null } else { { Update-State } }
     $verb = if ($Preview) { 'Previewing' } else { 'Applying' }
     switch ($key) {
-        'privacy' { Start-Work -StatusText "$verb privacy changes..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-CmpPrivacy -Ids $Ids -Preview:$Preview } }
-        'nvidia'  { Start-Work -StatusText "$verb NVIDIA changes..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-CmpNvidia -Ids $Ids -Preview:$Preview } }
+        'privacy' { Start-Work -StatusText "$verb privacy changes..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-QpPrivacy -Ids $Ids -Preview:$Preview } }
+        'nvidia'  { Start-Work -StatusText "$verb NVIDIA changes..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-QpNvidia -Ids $Ids -Preview:$Preview } }
         'apps'    {
             $dep = [bool]$script:DeprovisionCb.IsChecked
-            Start-Work -StatusText "$verb app removal..." -Params @{ Ids = $ids; Preview = $Preview; Deprovision = $dep } -OnDone $after -Work { param($Ids, $Preview, $Deprovision) Invoke-CmpRemoveApps -Names $Ids -Preview:$Preview -Deprovision:$Deprovision }
+            Start-Work -StatusText "$verb app removal..." -Params @{ Ids = $ids; Preview = $Preview; Deprovision = $dep } -OnDone $after -Work { param($Ids, $Preview, $Deprovision) Invoke-QpRemoveApps -Names $Ids -Preview:$Preview -Deprovision:$Deprovision }
         }
-        'cleanup' { Start-Work -StatusText "$verb clean-up..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-CmpCleanup -Ids $Ids -Preview:$Preview } }
+        'cleanup' { Start-Work -StatusText "$verb clean-up..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-QpCleanup -Ids $Ids -Preview:$Preview } }
     }
 }
 
@@ -767,7 +767,7 @@ function Start-SafetyScan {
     $scanSummary.Text = 'Scanning... (1-3 minutes)'
     $script:CardAdware.Value.Text = 'Checking...'
     $script:CardAdware.Caption.Text = 'About 2 minutes - nothing is changed'
-    Start-Work -StatusText 'Checking for adware and problems (read-only, about 2 minutes)...' -Work { Invoke-CmpAudit } -OnDone {
+    Start-Work -StatusText 'Checking for adware and problems (read-only, about 2 minutes)...' -Work { Invoke-QpAudit } -OnDone {
         param($r)
         $r = @($r)[-1]
         if ($r -and $r.Report) {
@@ -812,7 +812,7 @@ function Show-HomeResult($r) {
     if ($r.Settings)      { $lines += "Switched off $($r.Settings) tracking and ads setting(s)." }
     if ($r.NvidiaBlocked) { $lines += 'Blocked NVIDIA tracking (NVIDIA App still works).' }
     if ($r.AppsRemoved)   { $lines += "Removed $($r.AppsRemoved) unneeded app(s)." }
-    if ($r.BytesFreed -gt 0) { $lines += "Freed about $(Format-CmpBytes $r.BytesFreed) - it is in your Recycle Bin, empty it whenever you like." }
+    if ($r.BytesFreed -gt 0) { $lines += "Freed about $(Format-QpBytes $r.BytesFreed) - it is in your Recycle Bin, empty it whenever you like." }
     $lines += ''
     $lines += 'Restart your PC to finish. Changed your mind? "Undo everything" puts it all back.'
     $script:ResultTitle.Text = 'All done!'
@@ -825,31 +825,31 @@ function Show-HomeResult($r) {
 $btnOneClick.Add_Click({
     $s = $script:HomeCounts
     if ($s -and $s.Total -eq 0) {
-        [void][System.Windows.MessageBox]::Show('Your PC is already in great shape - there is nothing recommended left to do.', 'Clean My PC')
+        [void][System.Windows.MessageBox]::Show('Your PC is already in great shape - there is nothing recommended left to do.', 'Quietpane')
         return
     }
     $lines = @()
     if ($s.Privacy) { $lines += "  - switch off $($s.Privacy) tracking and ads setting(s)" }
     if ($s.Nvidia)  { $lines += '  - block NVIDIA tracking (NVIDIA App keeps working)' }
     if ($s.Apps)    { $lines += "  - remove $($s.Apps) unneeded app(s)" }
-    if ($s.Bytes -gt 0) { $lines += "  - free about $(Format-CmpBytes $s.Bytes) (files go to your Recycle Bin)" }
-    $msg = "Clean My PC will:`n`n" + ($lines -join "`n") + "`n`nEverything can be undone afterwards. Please close games and browsers first.`n`nContinue?"
-    if ([System.Windows.MessageBox]::Show($msg, 'Clean My PC', 'YesNo', 'Question') -ne 'Yes') { return }
+    if ($s.Bytes -gt 0) { $lines += "  - free about $(Format-QpBytes $s.Bytes) (files go to your Recycle Bin)" }
+    $msg = "Quietpane will:`n`n" + ($lines -join "`n") + "`n`nEverything can be undone afterwards. Please close games and browsers first.`n`nContinue?"
+    if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
     $script:ResultPanel.Visibility = 'Collapsed'
     $ui.LogBox.AppendText([Environment]::NewLine)
-    Start-Work -StatusText 'Cleaning your PC... this usually takes less than a minute.' -Work { Invoke-CmpRecommended } -OnDone { param($r) Show-HomeResult $r; Update-State }
+    Start-Work -StatusText 'Cleaning your PC... this usually takes less than a minute.' -Work { Invoke-QpRecommended } -OnDone { param($r) Show-HomeResult $r; Update-State }
 })
 
 $btnRestart.Add_Click({
-    if ([System.Windows.MessageBox]::Show('Restart the PC now? Save any open work first.', 'Clean My PC', 'YesNo', 'Question') -ne 'Yes') { return }
+    if ([System.Windows.MessageBox]::Show('Restart the PC now? Save any open work first.', 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
     Start-Process -FilePath 'shutdown.exe' -ArgumentList '/r', '/t', '5' -WindowStyle Hidden
 })
 
 $btnUndoAll.Add_Click({
     if (-not $script:LastRestorePoint) { return }
-    if ([System.Windows.MessageBox]::Show('Put everything back exactly as it was before you clicked "Clean my PC now"?', 'Clean My PC', 'YesNo', 'Question') -ne 'Yes') { return }
+    if ([System.Windows.MessageBox]::Show('Put everything back exactly as it was before you clicked "Quiet my PC now"?', 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
     $ui.LogBox.AppendText([Environment]::NewLine)
-    Start-Work -StatusText 'Putting everything back...' -Params @{ Path = $script:LastRestorePoint } -Work { param($Path) Invoke-CmpUndo -Path $Path } -OnDone {
+    Start-Work -StatusText 'Putting everything back...' -Params @{ Path = $script:LastRestorePoint } -Work { param($Path) Invoke-QpUndo -Path $Path } -OnDone {
         $script:ResultTitle.Text = 'Everything is back as it was'
         $script:ResultText.Text = "All settings were restored. Files are still in your Recycle Bin, and removed apps can be reinstalled from the Microsoft Store.`nRestart your PC to finish."
         $script:LastRestorePoint = $null
@@ -865,11 +865,11 @@ $btnOpenReport.Add_Click({ if ($script:LastReport) { Open-AsUser $script:LastRep
 $btnUndoRefresh.Add_Click({ Update-State })
 $btnUndo.Add_Click({
     $sel = $script:UndoList.SelectedItem
-    if (-not ($sel -is [System.Windows.Controls.ListBoxItem])) { [void][System.Windows.MessageBox]::Show('Select a restore point first.', 'Clean My PC'); return }
-    if ([System.Windows.MessageBox]::Show("Undo all changes from:`n$($sel.Content)?", 'Clean My PC', 'YesNo', 'Question') -ne 'Yes') { return }
+    if (-not ($sel -is [System.Windows.Controls.ListBoxItem])) { [void][System.Windows.MessageBox]::Show('Select a restore point first.', 'Quietpane'); return }
+    if ([System.Windows.MessageBox]::Show("Undo all changes from:`n$($sel.Content)?", 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true
-    Start-Work -StatusText 'Undoing...' -Params @{ Path = [string]$sel.Tag } -Work { param($Path) Invoke-CmpUndo -Path $Path } -OnDone { Update-State }
+    Start-Work -StatusText 'Undoing...' -Params @{ Path = [string]$sel.Tag } -Work { param($Path) Invoke-QpUndo -Path $Path } -OnDone { Update-State }
 })
 
 $ui.Tabs.Add_SelectionChanged({
@@ -880,7 +880,7 @@ $ui.Tabs.Add_SelectionChanged({
 $window.Add_Closing({
     param($s, $e)
     if ($script:Job) {
-        if ([System.Windows.MessageBox]::Show('A task is still running. Close anyway?', 'Clean My PC', 'YesNo', 'Warning') -ne 'Yes') { $e.Cancel = $true; return }
+        if ([System.Windows.MessageBox]::Show('A task is still running. Close anyway?', 'Quietpane', 'YesNo', 'Warning') -ne 'Yes') { $e.Cancel = $true; return }
     }
     $timer.Stop()
 })
@@ -891,7 +891,7 @@ $ui.Tabs.SelectedIndex = 0
 if ($SelfTest) {
     if ($Snapshot) {
         Update-FromState (& $script:ReadState)
-        $ui.LogBox.Text = "[12:00:00] STEP    Clean My PC $($info.Version) - Developed by KomodoWorks.com`r`n[12:00:01] OK      Ready."
+        $ui.LogBox.Text = "[12:00:00] STEP    Quietpane $($info.Version) - Developed by KomodoWorks.com`r`n[12:00:01] OK      Ready."
         $ui.Status.Text = 'Ready.'
         $ui.Tabs.SelectedIndex = $SnapshotTab
         if ($SnapshotTab -eq ($ui.Tabs.Items.Count - 1)) { $script:PrivacyExpander.IsExpanded = $true }
@@ -918,7 +918,7 @@ if ($SelfTest) {
 $acceptFile = Join-Path $info.DataRoot 'welcome-accepted.txt'
 function Show-Welcome {
     if (Test-Path $acceptFile) { return $true }
-    $msg = "Welcome to Clean My PC $($info.Version) - developed by KomodoWorks.com`n`n" +
+    $msg = "Welcome to Quietpane $($info.Version) - developed by KomodoWorks.com`n`n" +
            "Before you start:`n" +
            "  - It runs only on this PC. It collects nothing and sends nothing anywhere.`n" +
            "  - Nothing changes until you click a button, and you are told exactly what will happen first.`n" +
@@ -926,7 +926,7 @@ function Show-Welcome {
            "  - It is free and open source (MIT) and provided as is. Use it only on PCs you own or are allowed to manage.`n`n" +
            "The full Privacy Policy and Terms of Use are in the About tab.`n`n" +
            "Continue?"
-    if ([System.Windows.MessageBox]::Show($window, $msg, 'Clean My PC', 'YesNo', 'Information') -ne 'Yes') { return $false }
+    if ([System.Windows.MessageBox]::Show($window, $msg, 'Quietpane', 'YesNo', 'Information') -ne 'Yes') { return $false }
     try {
         New-Item -ItemType Directory -Path $info.DataRoot -Force | Out-Null
         Set-Content -Path $acceptFile -Value ("Welcome notice acknowledged {0} (version {1})" -f (Get-Date).ToString('s'), $info.Version)
@@ -936,7 +936,7 @@ function Show-Welcome {
 
 $window.Add_ContentRendered({
     if (-not (Show-Welcome)) { $window.Close(); return }
-    $ui.LogBox.AppendText(('Clean My PC {0} - Developed by KomodoWorks.com. Started {1}. Administrator: {2}. This app makes no network connections.' -f $info.Version, (Get-Date -Format 'yyyy-MM-dd HH:mm'), (Test-IsAdmin)) + [Environment]::NewLine)
+    $ui.LogBox.AppendText(('Quietpane {0} - Developed by KomodoWorks.com. Started {1}. Administrator: {2}. This app makes no network connections.' -f $info.Version, (Get-Date -Format 'yyyy-MM-dd HH:mm'), (Test-IsAdmin)) + [Environment]::NewLine)
     Update-State
 })
 $timer.Start()

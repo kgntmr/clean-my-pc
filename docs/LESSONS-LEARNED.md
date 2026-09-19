@@ -44,5 +44,5 @@ This one cost a reinstall.
 - **Intel Driver & Support Assistant quietly installs the "Intel Computing Improvement Program"**, which is Intel telemetry and runs about 400 MB of background services. Uninstall it separately, or check for driver updates through your laptop maker's app or Windows Update instead.
 - **Windows re-creates some tip/"SoftLanding" tasks** after updates. They stay harmless while the tips settings are off. Just run the tool again after big updates.
 - **Clicking inside a PowerShell console window pauses the script.** The title shows "Select". Press Esc or Enter to resume.
-- **Windows paths have a 260-character limit.** Scripts stored in very deep folders can fail to start for no obvious reason. Keep the tool in a short path such as `C:\Tools\clean-my-pc`.
+- **Windows paths have a 260-character limit.** Scripts stored in very deep folders can fail to start for no obvious reason. Keep the tool in a short path such as `C:\Tools\quietpane`.
 - **Recycle Bin instead of delete.** Clean-up tools that permanently delete things can't be undone when they get something wrong. Moving files to the Recycle Bin costs nothing, and you empty it once you're sure.
