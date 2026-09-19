@@ -16,7 +16,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.1.1'
+$script:AppVersion  = '1.1.2'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/clean-my-pc' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -699,35 +699,72 @@ function Invoke-CmpAudit {
 
     # ---- 1. Startup entries
     Write-CmpLog 'Checking startup entries...' 'INFO'
+    # Each Run key is paired with the key where Task Manager records whether that entry is switched off.
+    $sa = 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved'
     $runKeys = @(
-        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
-        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
-        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce',
-        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run')
-    $approved = @{}
-    foreach ($ak in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32') {
-        $p = Get-ItemProperty -Path $ak -ErrorAction SilentlyContinue
-        if ($p) { $p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { if ($_.Value -is [byte[]] -and $_.Value.Length) { $approved[$_.Name] = ($_.Value[0] -eq 3) } } }
+        @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; Approved = "HKCU:\$sa\Run" },
+        @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'; Approved = $null },
+        @{ Key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'; Approved = "HKLM:\$sa\Run" },
+        @{ Key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce'; Approved = $null },
+        @{ Key = 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'; Approved = "HKLM:\$sa\Run32" },
+        @{ Key = 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce'; Approved = $null },
+        @{ Key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run'; Approved = $null },
+        @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run'; Approved = $null })
+    function Get-DisabledNames([string]$ApprovedKey) {
+        # Task Manager stores a switched-off entry with an odd first byte (usually 03).
+        $names = @{}
+        if (-not $ApprovedKey) { return $names }
+        $p = Get-ItemProperty -Path $ApprovedKey -ErrorAction SilentlyContinue
+        if ($p) { $p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { if ($_.Value -is [byte[]] -and $_.Value.Length -and ($_.Value[0] -band 1)) { $names[$_.Name] = $true } } }
+        return $names
     }
-    $startupCount = 0
-    foreach ($k in $runKeys) {
-        $p = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+    function Test-StartupTarget([string]$Command) {
+        # $true if the program a startup command points to exists (or if that can't be worked out).
+        try {
+            $c = [Environment]::ExpandEnvironmentVariables("$Command").Trim()
+            if (-not $c) { return $true }
+            $exePath = if ($c -match '^"([^"]+)"') { $matches[1] } elseif ($c -match '^(.+?\.(exe|com|bat|cmd|vbs|js|ps1|scr))(\s|$)') { $matches[1] } else { ($c -split '\s+')[0] }
+            if ([IO.Path]::IsPathRooted($exePath)) { return (Test-Path -LiteralPath $exePath) }
+            return [bool](Get-Command $exePath -CommandType Application -ErrorAction SilentlyContinue)
+        } catch { return $true }
+    }
+    $startupTotal = 0
+    $startupOn = 0
+    foreach ($rk in $runKeys) {
+        $p = Get-ItemProperty -Path $rk.Key -ErrorAction SilentlyContinue
         if (-not $p) { continue }
+        $off = Get-DisabledNames $rk.Approved
         foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' })) {
-            $startupCount++
-            $state = if ($approved.ContainsKey($prop.Name) -and $approved[$prop.Name]) { ' (disabled in Task Manager)' } else { '' }
-            $detail = "$k`n$($prop.Name) = $($prop.Value)"
+            $startupTotal++
+            $disabled = $off.ContainsKey($prop.Name)
+            $exists = Test-StartupTarget $prop.Value
+            if (-not $disabled -and $exists) { $startupOn++ }
+            $state = if ($disabled) { ' (disabled in Task Manager)' } else { '' }
+            $detail = "$($rk.Key)`n$($prop.Name) = $($prop.Value)"
             if ("$($prop.Value)" -match $suspiciousCmd) { Add-Finding 'Startup & persistence' 'High' "Suspicious startup entry: $($prop.Name)$state" "$detail`nThis launches a website, script or hidden command at login - typical adware/browser-hijacker behaviour." }
+            elseif (-not $exists) {
+                $how = if ($rk.Key -like '*RunOnce') { 'Windows removes this kind of entry by itself the next time you sign in.' } elseif ($disabled) { 'It is already switched off, so it does nothing.' } else { 'You can switch it off in Task Manager > Startup apps.' }
+                Add-Finding 'Startup & persistence' 'Info' "Leftover startup entry: $($prop.Name)$state" "$detail`nThe program it points to no longer exists - probably left behind by something you uninstalled. Harmless. $how"
+            }
             else { Add-Finding 'Startup & persistence' 'Info' "Startup entry: $($prop.Name)$state" $detail }
         }
     }
+    $folderOff = @{}
+    foreach ($ak in "HKCU:\$sa\StartupFolder", "HKLM:\$sa\StartupFolder") { foreach ($n in (Get-DisabledNames $ak).Keys) { $folderOff[$n] = $true } }
     $shell = New-Object -ComObject WScript.Shell
     foreach ($folder in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('CommonStartup'))) {
         Get-ChildItem -Path $folder -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' } | ForEach-Object {
-            $startupCount++
-            $target = if ($_.Extension -eq '.lnk') { $s = $shell.CreateShortcut($_.FullName); "$($s.TargetPath) $($s.Arguments)" } else { $_.FullName }
-            if ($target -match $suspiciousCmd -or $_.Extension -match '\.(bat|cmd|vbs|js|ps1|hta)$') { Add-Finding 'Startup & persistence' 'High' "Suspicious item in Startup folder: $($_.Name)" "$($_.FullName)`n-> $target" }
-            else { Add-Finding 'Startup & persistence' 'Info' "Startup folder item: $($_.Name)" "$($_.FullName)`n-> $target" }
+            $startupTotal++
+            $disabled = $folderOff.ContainsKey($_.Name)
+            $targetExe = $_.FullName
+            $target = $_.FullName
+            if ($_.Extension -eq '.lnk') { $s = $shell.CreateShortcut($_.FullName); $targetExe = $s.TargetPath; $target = "$($s.TargetPath) $($s.Arguments)" }
+            $exists = (-not $targetExe) -or (Test-Path -LiteralPath $targetExe)
+            if (-not $disabled -and $exists) { $startupOn++ }
+            $state = if ($disabled) { ' (disabled in Task Manager)' } else { '' }
+            if ($target -match $suspiciousCmd -or $_.Extension -match '\.(bat|cmd|vbs|js|ps1|hta)$') { Add-Finding 'Startup & persistence' 'High' "Suspicious item in Startup folder: $($_.Name)$state" "$($_.FullName)`n-> $target" }
+            elseif (-not $exists) { Add-Finding 'Startup & persistence' 'Info' "Leftover item in Startup folder: $($_.Name)$state" "$($_.FullName)`n-> $target`nThe program it points to no longer exists. Harmless - you can delete this shortcut." }
+            else { Add-Finding 'Startup & persistence' 'Info' "Startup folder item: $($_.Name)$state" "$($_.FullName)`n-> $target" }
         }
     }
 
@@ -800,13 +837,40 @@ function Invoke-CmpAudit {
     $scanRoots = @($env:LOCALAPPDATA, $env:APPDATA, (Join-Path $env:USERPROFILE 'AppData\LocalLow'), (Join-Path $env:USERPROFILE 'Downloads'), $env:PUBLIC, $env:TEMP) | Where-Object { $_ -and (Test-Path $_) }
     $exe = foreach ($r in $scanRoots) { Get-ChildItem -Path $r -Recurse -Force -File -Include *.exe, *.scr -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch $skip } }
     $exe = @($exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1500)
+    # Folders that hold a validly signed program: an unsigned file next to one is usually that app's own helper.
+    $signedIn = @{}
+    function Get-SignerName($Sig) { try { $Sig.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } catch { 'unknown publisher' } }
     $unsigned = foreach ($f in $exe) {
         $sig = Get-AuthenticodeSignature -FilePath $f.FullName -ErrorAction SilentlyContinue
-        if ($sig -and $sig.Status -ne 'Valid') { [pscustomobject]@{ File = $f.FullName; Status = [string]$sig.Status; Date = $f.LastWriteTime } }
+        if (-not $sig) { continue }
+        if ($sig.Status -eq 'Valid') {
+            # Prefer naming the app's main program over its uninstaller.
+            $cur = $signedIn[$f.DirectoryName]
+            if (-not $cur -or ($cur -match '^(?i)unins' -and $f.Name -notmatch '^(?i)unins')) { $signedIn[$f.DirectoryName] = '{0} (signed by {1})' -f $f.Name, (Get-SignerName $sig) }
+        }
+        else { [pscustomobject]@{ File = $f.FullName; Dir = $f.DirectoryName; Status = [string]$sig.Status; Date = $f.LastWriteTime } }
+    }
+    function Get-SignedSibling([string]$Dir) {
+        if ($signedIn.ContainsKey($Dir)) { return $signedIn[$Dir] }
+        $found = $null
+        foreach ($s in @(Get-ChildItem -LiteralPath $Dir -Filter *.exe -File -Force -ErrorAction SilentlyContinue | Sort-Object { $_.Name -match '^(?i)unins' } | Select-Object -First 20)) {
+            $sg = Get-AuthenticodeSignature -FilePath $s.FullName -ErrorAction SilentlyContinue
+            if ($sg -and $sg.Status -eq 'Valid') { $found = '{0} (signed by {1})' -f $s.Name, (Get-SignerName $sg); break }
+        }
+        $signedIn[$Dir] = $found
+        return $found
     }
     foreach ($u in @($unsigned | Where-Object Status -eq 'HashMismatch')) { Add-Finding 'Files' 'High' "Modified signed program (signature broken): $(Split-Path $u.File -Leaf)" "$($u.File)`nThe file was signed by its publisher but has been altered since - typical of cracks or infected files." }
-    $plain = @($unsigned | Where-Object Status -ne 'HashMismatch' | Select-Object -First 40)
-    if ($plain.Count) { Add-Finding 'Files' 'Medium' "$($plain.Count) unsigned program(s) in user folders (newest first)" (($plain | ForEach-Object { '{0:yyyy-MM-dd}  {1}' -f $_.Date, $_.File }) -join "`n") }
+    $alone = New-Object System.Collections.ArrayList
+    $helpers = New-Object System.Collections.ArrayList
+    foreach ($u in @($unsigned | Where-Object Status -ne 'HashMismatch')) {
+        $sib = Get-SignedSibling $u.Dir
+        if ($sib) { [void]$helpers.Add([pscustomobject]@{ U = $u; Sibling = $sib }) } else { [void]$alone.Add($u) }
+    }
+    $plain = @($alone | Select-Object -First 40)
+    if ($plain.Count) { Add-Finding 'Files' 'Medium' "$($plain.Count) unsigned program(s) in user folders (newest first)" ((($plain | ForEach-Object { '{0:yyyy-MM-dd}  {1}' -f $_.Date, $_.File }) -join "`n") + "`nUnsigned doesn't mean harmful, but make sure you recognise each one.") }
+    $help = @($helpers | Select-Object -First 40)
+    if ($help.Count) { Add-Finding 'Files' 'Info' "$($help.Count) unsigned helper file(s) belonging to signed programs" ((($help | ForEach-Object { "{0:yyyy-MM-dd}  {1}`n            next to {2}" -f $_.U.Date, $_.U.File, $_.Sibling }) -join "`n") + "`nMany apps ship small unsigned helpers (for example crash reporters) next to their signed main program. Lower risk.") }
 
     # ---- 7. Unofficial / cracked software indicators
     Write-CmpLog 'Looking for signs of cracked/unofficial software...' 'INFO'
@@ -830,6 +894,18 @@ function Invoke-CmpAudit {
         $root = $browsers[$b]
         if (-not (Test-Path $root)) { continue }
         foreach ($prof in @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' })) {
+            # The browser's own records say which extensions it installed itself (built-in or default ones).
+            $extInfo = @{}
+            $pj = $null
+            foreach ($pf in 'Secure Preferences', 'Preferences') {
+                $pp = Join-Path $prof.FullName $pf
+                if (-not (Test-Path $pp)) { continue }
+                try {
+                    $js = Get-Content $pp -Raw | ConvertFrom-Json
+                    if ($pf -eq 'Preferences') { $pj = $js }
+                    if ($js.extensions.settings) { foreach ($es in $js.extensions.settings.PSObject.Properties) { if (-not $extInfo.ContainsKey($es.Name)) { $extInfo[$es.Name] = $es.Value } } }
+                } catch { }
+            }
             foreach ($ext in @(Get-ChildItem (Join-Path $prof.FullName 'Extensions') -Directory -ErrorAction SilentlyContinue)) {
                 $manifest = Get-ChildItem $ext.FullName -Recurse -Depth 1 -Filter manifest.json -ErrorAction SilentlyContinue | Select-Object -First 1
                 if (-not $manifest) { continue }
@@ -844,13 +920,16 @@ function Invoke-CmpAudit {
                 }
                 $perms = @($j.permissions) + @($j.host_permissions) | Where-Object { $_ -is [string] }
                 $broad = @($perms | Where-Object { $_ -in '<all_urls>', '*://*/*', 'http://*/*', 'https://*/*' }).Count -gt 0
-                $sev = if ($broad -and ($perms -contains 'webRequest' -or $perms -contains 'scripting' -or $perms -contains 'tabs')) { 'Medium' } else { 'Info' }
-                Add-Finding 'Browsers' $sev "$b extension: $name" ("Profile: {0}`nID: {1}`nPermissions: {2}{3}" -f $prof.Name, $ext.Name, ($perms -join ', '), $(if ($sev -eq 'Medium') { "`nCan read and change every website you visit - keep it only if you trust it." } else { '' }))
+                # location 5 / 10 = part of the browser; was_installed_by_default = the browser installed it on its own
+                $info = $extInfo[$ext.Name]
+                $builtIn = $info -and ($info.was_installed_by_default -eq $true -or [int]$info.location -in 5, 10)
+                $sev = if (-not $builtIn -and $broad -and ($perms -contains 'webRequest' -or $perms -contains 'scripting' -or $perms -contains 'tabs')) { 'Medium' } else { 'Info' }
+                $note = if ($builtIn) { "`n$b installed this itself - it didn't come from you or another program." } elseif ($sev -eq 'Medium') { "`nCan read and change every website you visit - keep it only if you trust it." } else { '' }
+                $title = if ($builtIn) { "$b extension: $name (installed by $b itself)" } else { "$b extension: $name" }
+                Add-Finding 'Browsers' $sev $title ("Profile: {0}`nID: {1}`nPermissions: {2}{3}" -f $prof.Name, $ext.Name, ($perms -join ', '), $note)
             }
-            $prefs = Join-Path $prof.FullName 'Preferences'
-            if (Test-Path $prefs) {
+            if ($pj) {
                 try {
-                    $pj = Get-Content $prefs -Raw | ConvertFrom-Json
                     $n = $pj.profile.content_settings.exceptions.notifications
                     if ($n) {
                         $allowed = @($n.PSObject.Properties | Where-Object { $_.Value.setting -eq 1 } | ForEach-Object { $_.Name })
@@ -884,7 +963,7 @@ function Invoke-CmpAudit {
     Write-CmpLog 'Checking telemetry status...' 'INFO'
     $status = Get-CmpPrivacyStatus
     $open = @((Get-CmpCatalog privacy).Items | Where-Object { $status[$_.Id] -in 'NotApplied', 'Partial' -and $_.Recommended })
-    if ($open.Count) { Add-Finding 'Privacy & telemetry' 'Medium' "$($open.Count) recommended privacy setting(s) are not applied yet" (($open | ForEach-Object { "- $($_.Title)" }) -join "`n") }
+    if ($open.Count) { Add-Finding 'Privacy & telemetry' 'Medium' "$($open.Count) recommended privacy setting(s) are not fully applied yet" (($open | ForEach-Object { "- $($_.Title)" + $(if ($status[$_.Id] -eq 'Partial') { ' (partly done)' } else { '' }) }) -join "`n") }
     else { Add-Finding 'Privacy & telemetry' 'Info' 'All recommended privacy settings are applied' '' }
     $nv = Get-CmpNvidiaStatus
     if ($nv.NvidiaAppInstalled -and $nv.HostsBlocked -lt $nv.HostsTotal) { Add-Finding 'Privacy & telemetry' 'Medium' "NVIDIA telemetry is not blocked ($($nv.HostsBlocked)/$($nv.HostsTotal) servers)" 'Use the NVIDIA tab. Do NOT delete NVIDIA''s telemetry plugin - that breaks NVIDIA App.' }
@@ -894,7 +973,7 @@ function Invoke-CmpAudit {
     $os = Get-CimInstance Win32_OperatingSystem
     $usedGB = ($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1MB
     $top = Get-Process | Group-Object ProcessName | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Count = $_.Count; MB = [math]::Round((($_.Group | Measure-Object WorkingSet64 -Sum).Sum) / 1MB) } } | Sort-Object MB -Descending | Select-Object -First 12
-    Add-Finding 'Performance' 'Info' ("RAM in use: {0:N1} of {1:N1} GB, {2} processes, {3} startup entries" -f $usedGB, ($os.TotalVisibleMemorySize / 1MB), @(Get-Process).Count, $startupCount) (($top | ForEach-Object { '{0,6} MB  {1} (x{2})' -f $_.MB, $_.Name, $_.Count }) -join "`n")
+    Add-Finding 'Performance' 'Info' ("RAM in use: {0:N1} of {1:N1} GB, {2} processes, {3} program(s) start at sign-in" -f $usedGB, ($os.TotalVisibleMemorySize / 1MB), @(Get-Process).Count, $startupOn) ((($top | ForEach-Object { '{0,6} MB  {1} (x{2})' -f $_.MB, $_.Name, $_.Count }) -join "`n") + ("`n{0} startup entries in total; the rest are switched off in Task Manager or point to programs that no longer exist." -f $startupTotal))
 
     # ---- 12. Disk space
     Write-CmpLog 'Measuring reclaimable space...' 'INFO'
@@ -907,11 +986,22 @@ function Invoke-CmpAudit {
     $cutoff = (Get-Date).AddDays(-180)
     $old = foreach ($r in @($env:LOCALAPPDATA, $env:APPDATA, (Join-Path $env:USERPROFILE 'AppData\LocalLow'), $env:ProgramData)) {
         Get-ChildItem -Path $r -Directory -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime -lt $cutoff -and $_.Name -notmatch '^(Microsoft|Packages|Temp|Comms|ConnectedDevicesPlatform|Programs|Application Data|History|Temporary Internet Files|Package Cache|USOPrivate|USOShared|ssh|regid\..*|Desktop|Documents|Start Menu|Templates|Favorites|VirtualStore|Publishers|PlaceholderTileLogoFolder)$' } |
-            ForEach-Object { [pscustomobject]@{ Path = $_.FullName; Last = $_.LastWriteTime; Size = (Get-CmpSize @($_.FullName)) } }
+            Where-Object { $_.LastWriteTime -lt $cutoff -and $_.CreationTime -lt $cutoff -and $_.Name -notmatch '^(Microsoft|Packages|Temp|Comms|ConnectedDevicesPlatform|Programs|Application Data|History|Temporary Internet Files|Package Cache|USOPrivate|USOShared|ssh|regid\..*|Desktop|Documents|Start Menu|Templates|Favorites|VirtualStore|Publishers|PlaceholderTileLogoFolder)$' } |
+            ForEach-Object {
+                $dir = $_
+                # A folder's own date doesn't change when files inside it change, so look inside too.
+                # Stop at the first recent item - a folder with anything changed in the last 6 months is still in use.
+                $recent = Get-ChildItem -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LastWriteTime -ge $cutoff -or $_.CreationTime -ge $cutoff } | Select-Object -First 1
+                if (-not $recent) {
+                    $newest = Get-ChildItem -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                    $last = if ($newest -and $newest.LastWriteTime -gt $dir.LastWriteTime) { $newest.LastWriteTime } else { $dir.LastWriteTime }
+                    [pscustomobject]@{ Path = $dir.FullName; Last = $last; Size = (Get-CmpSize @($dir.FullName)) }
+                }
+            }
     }
     $old = @($old | Sort-Object Size -Descending | Select-Object -First 30)
-    if ($old.Count) { Add-Finding 'Disk space' 'Info' 'Folders not used for 6+ months (review - may belong to uninstalled programs)' (($old | ForEach-Object { '{0,10}  {1:yyyy-MM-dd}  {2}' -f (Format-CmpBytes $_.Size), $_.Last, $_.Path }) -join "`n") }
+    if ($old.Count) { Add-Finding 'Disk space' 'Info' 'Folders where nothing has changed for 6+ months (review before deleting - may belong to uninstalled programs)' ((($old | ForEach-Object { '{0,10}  {1:yyyy-MM-dd}  {2}' -f (Format-CmpBytes $_.Size), $_.Last, $_.Path }) -join "`n") + "`nThe date is the last time anything inside the folder changed. Check what a folder belongs to before deleting it - some apps you still use rarely write to their folders.") }
 
     # ---- Report
     $high = @($findings | Where-Object Severity -eq 'High').Count

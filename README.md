@@ -70,16 +70,16 @@ The one-click screen. Cards show what can be improved on this PC (tracking and a
 ### Safety scan (read-only)
 | Check | What it looks for |
 |---|---|
-| Startup entries | Run keys and Startup folders that open websites, hidden PowerShell, `mshta`/`wscript`, or programs in Temp |
+| Startup entries | Run keys and Startup folders that open websites, hidden PowerShell, `mshta`/`wscript`, or programs in Temp. Entries pointing to programs that no longer exist are marked as leftovers. |
 | Scheduled tasks | Tasks that re-create startup entries (`reg add ...\Run`), open URLs or run hidden scripts |
 | **"What installed this?"** | For every suspicious task, lists folders created **within 3 minutes** of it. That's usually the game or program that brought it in. |
 | Other persistence | WMI event consumers, IFEO debugger hijacks, Winlogon shell changes, AppInit_DLLs |
 | Network hijacks | Hosts-file redirects, proxies, DNS servers |
-| Files | Unsigned programs in user folders, **modified signed programs** (broken signature), cracked-software traces |
-| Browsers | Extensions that can read every site, and sites allowed to push notifications |
+| Files | Unsigned programs in user folders (helpers sitting next to a signed program are listed separately as lower risk), **modified signed programs** (broken signature), cracked-software traces |
+| Browsers | Extensions that can read every site, and sites allowed to push notifications. Extensions the browser installed itself are labelled. |
 | Security | Defender status and definition age, suspicious Defender exclusions, firewall |
 | Privacy | Recommended privacy settings still off, NVIDIA telemetry status |
-| Performance and space | RAM use, top processes, startup count, reclaimable space, folders unused for 6+ months |
+| Performance and space | RAM use, top processes, how many programs really start at sign-in, reclaimable space, folders where nothing has changed for 6+ months |
 
 ### Privacy
 32 settings across **Windows telemetry**, **Privacy**, **Ads, tips & suggestions**, **Background services** and **Browsers & other software** (Edge, Chrome, Office, Intel DTT, VS Code, .NET/PowerShell CLIs). Items already done show **[already applied]**.
