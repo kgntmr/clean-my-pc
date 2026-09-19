@@ -1,3 +1,6 @@
 # Scan reports and local test output - never commit these, they describe a real PC
 CleanMyPC-Report-*.html
 *.log
+
+# Release build output (tools\build-release.ps1)
+dist/

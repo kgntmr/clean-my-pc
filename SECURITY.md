@@ -16,3 +16,5 @@ Security fixes go into the latest release.
 - The only official source is **[github.com/kgntmr/clean-my-pc](https://github.com/kgntmr/clean-my-pc)**, published by KomodoWorks ([komodoworks.com](https://www.komodoworks.com)).
 - Clean My PC is **only** distributed as plain-text PowerShell scripts. **We don't publish `.exe` versions.** Treat any `.exe`, installer or "cracked/pro" version claiming to be Clean My PC as fake.
 - Because everything is plain text, you can read every line before running it. See [Verify it yourself](README.md#verify-it-yourself).
+- Each release lists the **SHA256 checksum** of `CleanMyPC.zip`. To check your download, open PowerShell where the file is and run `Get-FileHash .\CleanMyPC.zip`. The result must match the release notes.
+- The ZIP is built with [`tools/build-release.ps1`](tools/build-release.ps1) and contains exactly the files in this repository. Nothing is compiled or added.

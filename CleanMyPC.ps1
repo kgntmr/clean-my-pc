@@ -165,7 +165,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
         <StackPanel Grid.Column="1" VerticalAlignment="Center">
           <TextBlock Text="Clean My PC" Foreground="#FAF6EC" FontSize="25" FontWeight="SemiBold" FontFamily="Fraunces, Georgia"/>
           <TextBlock Foreground="#C9C2B0" FontSize="12.5" TextWrapping="Wrap" Margin="0,2,0,0"
-                     Text="Scan first. Preview. Apply. Undo anytime. Nothing is collected and nothing leaves this PC."/>
+                     Text="Switch off tracking, remove bloat, free up space. Nothing is collected and nothing leaves this PC."/>
         </StackPanel>
         <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right">
           <TextBlock HorizontalAlignment="Right" Foreground="#C9C2B0" FontSize="12.5">
@@ -194,8 +194,10 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
-        <TextBlock x:Name="Status" VerticalAlignment="Center" Foreground="#4B5B5C" Text="Starting..." TextTrimming="CharacterEllipsis"/>
-        <StackPanel Grid.Column="1" Orientation="Horizontal">
+        <TextBlock VerticalAlignment="Center" Foreground="#4B5B5C" TextTrimming="CharacterEllipsis">
+          <Run x:Name="Status" Text="Starting..."/><Run Text="    "/><Hyperlink x:Name="LinkDetails" Foreground="#117A68">Show details</Hyperlink>
+        </TextBlock>
+        <StackPanel x:Name="AdvancedButtons" Grid.Column="1" Orientation="Horizontal">
           <Button x:Name="BtnRecommended" Content="Select recommended" Margin="0,0,8,0"/>
           <Button x:Name="BtnNone" Content="Select none" Margin="0,0,8,0"/>
           <Button x:Name="BtnPreview" Content="Preview (no changes)" Margin="0,0,8,0"/>
@@ -209,10 +211,10 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
       <Grid.RowDefinitions>
         <RowDefinition Height="*"/>
         <RowDefinition Height="6"/>
-        <RowDefinition Height="160"/>
+        <RowDefinition x:Name="LogRow" Height="0"/>
       </Grid.RowDefinitions>
       <TabControl x:Name="Tabs" Margin="14,12,14,4" Padding="0" Background="#FFFDF8" BorderBrush="#E6DFCC" BorderThickness="1"/>
-      <GridSplitter Grid.Row="1" HorizontalAlignment="Stretch" Background="Transparent"/>
+      <GridSplitter x:Name="LogSplitter" Grid.Row="1" HorizontalAlignment="Stretch" Background="Transparent" Visibility="Collapsed"/>
       <TextBox x:Name="LogBox" Grid.Row="2" Margin="14,0,14,12" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
                Background="#0F1B1C" Foreground="#FAF6EC" BorderThickness="0" Padding="10,8"/>
@@ -224,7 +226,8 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $ui = @{}
 foreach ($n in 'Tabs', 'LogBox', 'Status', 'BtnRecommended', 'BtnNone', 'BtnPreview', 'BtnApply', 'HeaderLogo',
-               'LinkHeader', 'LinkFooter', 'LinkPrivacy', 'LinkTerms', 'LinkContact', 'VersionRun') { $ui[$n] = $window.FindName($n) }
+               'LinkHeader', 'LinkFooter', 'LinkPrivacy', 'LinkTerms', 'LinkContact', 'VersionRun',
+               'LinkDetails', 'AdvancedButtons', 'LogRow', 'LogSplitter') { $ui[$n] = $window.FindName($n) }
 
 $brushConv = New-Object System.Windows.Media.BrushConverter
 $thickConv = New-Object System.Windows.ThicknessConverter
@@ -302,8 +305,79 @@ function Add-Option {
 }
 
 # ------------------------------------------------------------------ tabs
+# 0. Home - the one-click screen for everyone
+$homePanel = New-TabPage 'Home' 'home' ''
+[void]$homePanel.Children.Add((New-Text 'Make this PC yours again.' 28 'SemiBold' '#0F1B1C' '0,4,0,6' 'Fraunces, Georgia'))
+[void]$homePanel.Children.Add((New-Text 'One click switches off tracking and ads, removes apps you do not need and frees up space. Only safe, recommended changes - and you can undo everything.' 14.5 'Normal' '#4B5B5C' '0,0,0,18'))
+
+function New-Card([string]$Title) {
+    $b = New-Object System.Windows.Controls.Border
+    $b.Width = 194
+    $b.MinHeight = 108
+    $b.Padding = Get-Thick '14,12'
+    $b.Margin = Get-Thick '0,0,12,12'
+    $b.Background = Get-Brush '#FAF6EC'
+    $b.BorderBrush = Get-Brush '#E6DFCC'
+    $b.BorderThickness = Get-Thick '1'
+    $sp = New-Object System.Windows.Controls.StackPanel
+    [void]$sp.Children.Add((New-Text $Title 11.5 'SemiBold' '#4B5B5C' '0,0,0,4'))
+    $value = New-Text 'Checking...' 21 'SemiBold' '#0F1B1C' '0,0,0,2' 'Fraunces, Georgia'
+    $caption = New-Text '' 12 'Normal' '#4B5B5C' '0'
+    [void]$sp.Children.Add($value)
+    [void]$sp.Children.Add($caption)
+    $b.Child = $sp
+    return [pscustomobject]@{ Border = $b; Value = $value; Caption = $caption }
+}
+$cards = New-Object System.Windows.Controls.WrapPanel
+$script:CardTracking = New-Card 'TRACKING & ADS'
+$script:CardApps     = New-Card 'UNNEEDED APPS'
+$script:CardSpace    = New-Card 'SPACE TO FREE UP'
+$script:CardNvidia   = New-Card 'NVIDIA TRACKING'
+$script:CardAdware   = New-Card 'ADWARE CHECK'
+foreach ($c in $script:CardTracking, $script:CardApps, $script:CardSpace, $script:CardNvidia, $script:CardAdware) { [void]$cards.Children.Add($c.Border) }
+$script:CardAdware.Value.Text = 'Not checked yet'
+$script:CardAdware.Caption.Text = 'Takes about 2 minutes and changes nothing'
+[void]$homePanel.Children.Add($cards)
+
+$homeButtons = New-Object System.Windows.Controls.WrapPanel
+$homeButtons.Margin = Get-Thick '0,6,0,0'
+$btnOneClick = New-Button 'Clean my PC now' -Primary
+$btnOneClick.FontSize = 18
+$btnOneClick.Padding = Get-Thick '36,14'
+$btnOneClick.Margin = Get-Thick '0,0,12,8'
+$btnHomeScan = New-Button 'Check for adware'
+$btnHomeScan.FontSize = 15
+$btnHomeScan.Padding = Get-Thick '22,14'
+$btnHomeScan.Margin = Get-Thick '0,0,12,8'
+[void]$homeButtons.Children.Add($btnOneClick)
+[void]$homeButtons.Children.Add($btnHomeScan)
+[void]$homePanel.Children.Add($homeButtons)
+[void]$homePanel.Children.Add((New-Text 'Safe by design: you are told what will change before anything happens, every change can be undone, and files only go to your Recycle Bin.' 12.5 'Normal' '#4B5B5C' '0,6,0,0'))
+
+$script:ResultPanel = New-Object System.Windows.Controls.Border
+$script:ResultPanel.Visibility = 'Collapsed'
+$script:ResultPanel.Margin = Get-Thick '0,18,0,0'
+$script:ResultPanel.Padding = Get-Thick '18,14'
+$script:ResultPanel.Background = Get-Brush '#EAF5F1'
+$script:ResultPanel.BorderBrush = Get-Brush '#117A68'
+$script:ResultPanel.BorderThickness = Get-Thick '4,0,0,0'
+$resultStack = New-Object System.Windows.Controls.StackPanel
+$script:ResultTitle = New-Text '' 22 'SemiBold' '#117A68' '0,0,0,6' 'Fraunces, Georgia'
+$script:ResultText = New-Text '' 14 'Normal' '#0F1B1C' '0,0,0,12'
+$resultButtons = New-Object System.Windows.Controls.WrapPanel
+$btnRestart = New-Button 'Restart now' -Primary
+$btnUndoAll = New-Button 'Undo everything I just did'
+$btnShowDetails = New-Button 'Show what changed'
+foreach ($b in $btnRestart, $btnUndoAll, $btnShowDetails) { $b.Margin = Get-Thick '0,0,10,4'; [void]$resultButtons.Children.Add($b) }
+[void]$resultStack.Children.Add($script:ResultTitle)
+[void]$resultStack.Children.Add($script:ResultText)
+[void]$resultStack.Children.Add($resultButtons)
+$script:ResultPanel.Child = $resultStack
+[void]$homePanel.Children.Add($script:ResultPanel)
+[void]$homePanel.Children.Add((New-Text 'Prefer to choose yourself? The Privacy, NVIDIA, Apps and Free up space tabs let you pick item by item, with a preview first.' 12.5 'Normal' '#4B5B5C' '0,20,0,0'))
+
 # 1. Scan
-$scanPanel = New-TabPage 'Scan' 'scan' ('Read-only check of startup entries, scheduled tasks, hidden persistence tricks, hosts/proxy hijacks, unsigned or tampered programs, cracked-software traces, risky browser extensions, notification spam, Defender status, telemetry status, RAM use and reclaimable space. Nothing is changed and nothing is sent anywhere. The report opens in your browser when it finishes (1-3 minutes).')
+$scanPanel = New-TabPage 'Safety scan' 'scan' ('Read-only check of startup entries, scheduled tasks, hidden persistence tricks, hosts/proxy hijacks, unsigned or tampered programs, cracked-software traces, risky browser extensions, notification spam, Defender status, telemetry status, RAM use and reclaimable space. Nothing is changed and nothing is sent anywhere. The report opens in your browser when it finishes (1-3 minutes).')
 $scanButtons = New-Object System.Windows.Controls.StackPanel
 $scanButtons.Orientation = 'Horizontal'
 $scanButtons.Margin = Get-Thick '0,6,0,10'
@@ -318,7 +392,7 @@ $scanSummary = New-Text 'No scan yet.' 15 'SemiBold' '#0F1B1C' '0,6,0,6' 'Fraunc
 [void]$scanPanel.Children.Add((New-Text 'High = act on it.  Medium = review it.  Info = for your information. If the scan finds a suspicious startup entry or task, the report also lists folders that were created at the same moment - that is usually what installed it.' 12.5 'Normal' '#4B5B5C'))
 
 # 2. Privacy & telemetry
-$privacyPanel = New-TabPage 'Privacy & Telemetry' 'privacy' ('Windows, browser and app telemetry, ads, tips and background services. Items marked [already applied] are already done on this PC. Side effects are written in each description. Security (Defender, SmartScreen, firewall) and Windows Update are never touched.')
+$privacyPanel = New-TabPage 'Privacy' 'privacy' ('Windows, browser and app telemetry, ads, tips and background services. Items marked [already applied] are already done on this PC. Side effects are written in each description. Security (Defender, SmartScreen, firewall) and Windows Update are never touched.')
 $lastGroup = $null
 foreach ($item in (Get-CmpCatalog privacy).Items) {
     if ($item.Group -ne $lastGroup) {
@@ -338,7 +412,7 @@ Add-Option -Panel $nvidiaPanel -Key 'nvidia' -Id 'nv.flags' -Recommended $true -
     -Description 'Registry values NVIDIA software reads to decide whether to send telemetry. Also turn off data sharing in NVIDIA App > Settings > About.'
 
 # 4. Apps
-$appsPanel = New-TabPage 'Remove bloat apps' 'apps' ('Pre-installed and promoted apps found on this PC. Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool, Terminal, codecs, runtimes and driver control panels are never offered. Removed apps can be reinstalled from the Microsoft Store.')
+$appsPanel = New-TabPage 'Apps' 'apps' ('Pre-installed and promoted apps found on this PC. Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool, Terminal, codecs, runtimes and driver control panels are never offered. Removed apps can be reinstalled from the Microsoft Store.')
 $script:DeprovisionCb = New-Object System.Windows.Controls.CheckBox
 $script:DeprovisionCb.Content = New-Text 'Also stop removed apps being installed for new user accounts on this PC' 12.5 'Normal' '#0F1B1C' '2,0,0,0'
 $script:DeprovisionCb.IsChecked = $true
@@ -349,7 +423,7 @@ $script:AppsList = New-Object System.Windows.Controls.StackPanel
 [void]$appsPanel.Children.Add($script:AppsList)
 
 # 5. Clean-up
-$cleanupPanel = New-TabPage 'Clean up space' 'cleanup' ('Temporary files, crash dumps, caches and leftover installers. Everything is moved to the Recycle Bin - nothing is permanently deleted. Empty the Recycle Bin yourself when you are happy. Close games and browsers first.')
+$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Temporary files, crash dumps, caches and leftover installers. Everything is moved to the Recycle Bin - nothing is permanently deleted. Empty the Recycle Bin yourself when you are happy. Close games and browsers first.')
 $script:CleanupList = New-Object System.Windows.Controls.StackPanel
 [void]$script:CleanupList.Children.Add((New-Text 'Measuring sizes...' 13 'Normal' '#4B5B5C'))
 [void]$cleanupPanel.Children.Add($script:CleanupList)
@@ -435,7 +509,7 @@ $script:LicenseExpander = New-DocExpander 'License (MIT)' 'LICENSE'
 $script:SecurityExpander = New-DocExpander 'Security & genuine copies' 'SECURITY.md'
 foreach ($e in $script:PrivacyExpander, $script:TermsExpander, $script:LicenseExpander, $script:SecurityExpander) { [void]$aboutPanel.Children.Add($e) }
 
-$script:ActionButtons = @($ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply, $btnScan, $btnUndo, $btnUndoRefresh)
+$script:ActionButtons = @($ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply, $btnScan, $btnUndo, $btnUndoRefresh, $btnOneClick, $btnHomeScan, $btnUndoAll, $btnRestart)
 
 # ------------------------------------------------------------------ links
 function Show-Doc($expander) {
@@ -461,15 +535,19 @@ $script:Sync = [hashtable]::Synchronized(@{ Queue = New-Object 'System.Collectio
 $script:Job = $null
 $script:FirstLoad = $true
 $script:LastReport = $null
+$script:LastRestorePoint = $null
+$script:HomeCounts = $null
+$script:LogVisible = $false
 
 function Update-Buttons {
     $key = [string]$ui.Tabs.SelectedItem.Tag
     $optionTab = $key -in 'privacy', 'nvidia', 'apps', 'cleanup'
     $idle = -not $script:Job
+    # The pick-and-choose buttons only appear on the tabs where they do something.
+    $ui.AdvancedButtons.Visibility = if ($optionTab) { 'Visible' } else { 'Collapsed' }
     foreach ($b in $ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply) { $b.IsEnabled = ($optionTab -and $idle) }
-    $btnScan.IsEnabled = $idle
-    $btnUndo.IsEnabled = $idle
-    $btnUndoRefresh.IsEnabled = $idle
+    foreach ($b in $btnScan, $btnUndo, $btnUndoRefresh, $btnOneClick, $btnHomeScan, $btnUndoAll, $btnRestart) { $b.IsEnabled = $idle }
+    $btnUndoAll.IsEnabled = $idle -and [bool]$script:LastRestorePoint
     $btnOpenReport.IsEnabled = [bool]$script:LastReport
 }
 
@@ -585,6 +663,7 @@ function Update-FromState($state) {
         [void]$script:UndoList.Items.Add($li)
     }
     if ($script:UndoList.Items.Count -eq 0) { [void]$script:UndoList.Items.Add('No restore points yet.') }
+    Update-HomeCards $state
     if ($script:FirstLoad) {
         foreach ($k in 'privacy', 'nvidia', 'apps', 'cleanup') { Select-Recommended $k }
         $script:FirstLoad = $false
@@ -592,6 +671,40 @@ function Update-FromState($state) {
         foreach ($k in 'apps', 'cleanup') { Select-Recommended $k }
         foreach ($k in 'privacy', 'nvidia') { foreach ($o in $script:Options[$k]) { if ($o.Status -in 'Applied', 'NotApplicable') { $o.CheckBox.IsChecked = $false } } }
     }
+}
+
+function Update-HomeCards($state) {
+    # Same rules as Get-CmpRecommendedPlan in the engine: recommended items that are not done yet.
+    $priv = @($script:Options['privacy'] | Where-Object { $_.Recommended -and $_.Status -in 'NotApplied', 'Partial' }).Count
+    $apps = @($state.Apps | Where-Object { $_ -and $_.Recommended }).Count
+    $bytes = [int64](@($state.Cleanup | Where-Object { $_ -and $_.Recommended -and $_.SizeBytes -gt 0 }) | Measure-Object -Property SizeBytes -Sum).Sum
+    $nv = $state.Nvidia
+    $nvTodo = [bool]($nv -and $nv.NvidiaGpu -and ($nv.HostsBlocked -lt $nv.HostsTotal -or $nv.FlagsSet -lt $nv.FlagsTotal))
+    $script:HomeCounts = [pscustomobject]@{ Privacy = $priv; Apps = $apps; Bytes = $bytes; Nvidia = $nvTodo; Total = $priv + $apps + [int]($bytes -gt 0) + [int]$nvTodo }
+
+    $good = Get-Brush '#117A68'; $todo = Get-Brush '#0F1B1C'
+    if ($priv) { $script:CardTracking.Value.Text = "$priv to switch off"; $script:CardTracking.Value.Foreground = $todo; $script:CardTracking.Caption.Text = 'Telemetry, ads and tips' }
+    else { $script:CardTracking.Value.Text = 'All set'; $script:CardTracking.Value.Foreground = $good; $script:CardTracking.Caption.Text = 'Tracking and ads are already off' }
+    if ($apps) { $script:CardApps.Value.Text = "$apps to remove"; $script:CardApps.Value.Foreground = $todo; $script:CardApps.Caption.Text = 'Pre-installed and promoted apps' }
+    else { $script:CardApps.Value.Text = 'None found'; $script:CardApps.Value.Foreground = $good; $script:CardApps.Caption.Text = 'No known bloat apps on this PC' }
+    if ($bytes -gt 0) { $script:CardSpace.Value.Text = Format-CmpBytes $bytes; $script:CardSpace.Value.Foreground = $todo; $script:CardSpace.Caption.Text = 'Temp files, crash dumps, old installers' }
+    else { $script:CardSpace.Value.Text = 'Nothing to clean'; $script:CardSpace.Value.Foreground = $good; $script:CardSpace.Caption.Text = 'Already tidy' }
+    if ($nv -and $nv.NvidiaGpu) {
+        $script:CardNvidia.Border.Visibility = 'Visible'
+        if ($nvTodo) { $script:CardNvidia.Value.Text = 'Not blocked yet'; $script:CardNvidia.Value.Foreground = $todo; $script:CardNvidia.Caption.Text = 'NVIDIA App keeps working' }
+        else { $script:CardNvidia.Value.Text = 'Blocked'; $script:CardNvidia.Value.Foreground = $good; $script:CardNvidia.Caption.Text = 'NVIDIA App still works normally' }
+    } else {
+        $script:CardNvidia.Border.Visibility = 'Collapsed'
+    }
+    if ($script:HomeCounts.Total -eq 0) { $btnOneClick.Content = 'Your PC is already clean' } else { $btnOneClick.Content = 'Clean my PC now' }
+}
+
+function Set-LogVisible([bool]$Visible) {
+    $ui.LogRow.Height = if ($Visible) { New-Object System.Windows.GridLength(170) } else { New-Object System.Windows.GridLength(0) }
+    $ui.LogSplitter.Visibility = if ($Visible) { 'Visible' } else { 'Collapsed' }
+    $ui.LinkDetails.Inlines.Clear()
+    $ui.LinkDetails.Inlines.Add($(if ($Visible) { 'Hide details' } else { 'Show details' }))
+    $script:LogVisible = $Visible
 }
 
 $script:ReadState = {
@@ -626,6 +739,7 @@ function Invoke-Selected([bool]$Preview) {
         if ([System.Windows.MessageBox]::Show($msg, 'Clean My PC', 'YesNo', 'Question') -ne 'Yes') { return }
     }
     $ui.LogBox.AppendText([Environment]::NewLine)
+    Set-LogVisible $true   # preview/apply results are shown in the details log
     $after = if ($Preview) { $null } else { { Update-State } }
     $verb = if ($Preview) { 'Previewing' } else { 'Applying' }
     switch ($key) {
@@ -644,22 +758,104 @@ $ui.BtnApply.Add_Click({ Invoke-Selected $false })
 $ui.BtnRecommended.Add_Click({ Select-Recommended ([string]$ui.Tabs.SelectedItem.Tag) })
 $ui.BtnNone.Add_Click({ foreach ($o in $script:Options[[string]$ui.Tabs.SelectedItem.Tag]) { $o.CheckBox.IsChecked = $false } })
 
-$btnScan.Add_Click({
+function Start-SafetyScan {
     $ui.LogBox.AppendText([Environment]::NewLine)
     $scanSummary.Text = 'Scanning... (1-3 minutes)'
-    Start-Work -StatusText 'Scanning (read-only)...' -Work { Invoke-CmpAudit } -OnDone {
+    $script:CardAdware.Value.Text = 'Checking...'
+    $script:CardAdware.Caption.Text = 'About 2 minutes - nothing is changed'
+    Start-Work -StatusText 'Checking for adware and problems (read-only, about 2 minutes)...' -Work { Invoke-CmpAudit } -OnDone {
         param($r)
         $r = @($r)[-1]
         if ($r -and $r.Report) {
             $script:LastReport = $r.Report
             $scanSummary.Text = ('Scan finished: {0} high, {1} medium, {2} info. The report opened in your browser and is saved on your Desktop.' -f $r.High, $r.Medium, $r.Info)
+            if ($r.High -gt 0) {
+                $script:CardAdware.Value.Text = "$($r.High) problem(s) found"
+                $script:CardAdware.Value.Foreground = Get-Brush '#A83232'
+                $script:CardAdware.Caption.Text = 'See the red items in the report that opened'
+            } else {
+                $script:CardAdware.Value.Text = 'Nothing serious'
+                $script:CardAdware.Value.Foreground = Get-Brush '#117A68'
+                $script:CardAdware.Caption.Text = "$($r.Medium) thing(s) worth a look in the report"
+            }
             Open-AsUser $r.Report
             Update-Buttons
         } else {
-            $scanSummary.Text = 'The scan did not finish - see the log below.'
+            $scanSummary.Text = 'The scan did not finish - click "Show details" at the bottom to see why.'
+            $script:CardAdware.Value.Text = 'Did not finish'
         }
     }
+}
+$btnScan.Add_Click({ Start-SafetyScan })
+$btnHomeScan.Add_Click({ Start-SafetyScan })
+
+# ---- One click
+function Show-HomeResult($r) {
+    $r = @($r)[-1]
+    $script:ResultPanel.Visibility = 'Visible'
+    if (-not $r) {
+        $script:ResultTitle.Text = 'Something went wrong'
+        $script:ResultText.Text = 'Click "Show details" at the bottom to see what happened. Anything that was changed can be undone in the Undo tab.'
+        return
+    }
+    if ($r.Nothing) {
+        $script:ResultTitle.Text = 'Already clean!'
+        $script:ResultText.Text = 'This PC already has every recommended setting. Nothing needed changing.'
+        $btnRestart.Visibility = 'Collapsed'; $btnUndoAll.Visibility = 'Collapsed'
+        return
+    }
+    $lines = @()
+    if ($r.Settings)      { $lines += "Switched off $($r.Settings) tracking and ads setting(s)." }
+    if ($r.NvidiaBlocked) { $lines += 'Blocked NVIDIA tracking (NVIDIA App still works).' }
+    if ($r.AppsRemoved)   { $lines += "Removed $($r.AppsRemoved) unneeded app(s)." }
+    if ($r.BytesFreed -gt 0) { $lines += "Freed about $(Format-CmpBytes $r.BytesFreed) - it is in your Recycle Bin, empty it whenever you like." }
+    $lines += ''
+    $lines += 'Restart your PC to finish. Changed your mind? "Undo everything" puts it all back.'
+    $script:ResultTitle.Text = 'All done!'
+    $script:ResultText.Text = $lines -join [Environment]::NewLine
+    $script:LastRestorePoint = $r.RestorePoint
+    $btnRestart.Visibility = 'Visible'; $btnUndoAll.Visibility = 'Visible'
+    Update-Buttons
+}
+
+$btnOneClick.Add_Click({
+    $s = $script:HomeCounts
+    if ($s -and $s.Total -eq 0) {
+        [void][System.Windows.MessageBox]::Show('Your PC is already in great shape - there is nothing recommended left to do.', 'Clean My PC')
+        return
+    }
+    $lines = @()
+    if ($s.Privacy) { $lines += "  - switch off $($s.Privacy) tracking and ads setting(s)" }
+    if ($s.Nvidia)  { $lines += '  - block NVIDIA tracking (NVIDIA App keeps working)' }
+    if ($s.Apps)    { $lines += "  - remove $($s.Apps) unneeded app(s)" }
+    if ($s.Bytes -gt 0) { $lines += "  - free about $(Format-CmpBytes $s.Bytes) (files go to your Recycle Bin)" }
+    $msg = "Clean My PC will:`n`n" + ($lines -join "`n") + "`n`nEverything can be undone afterwards. Please close games and browsers first.`n`nContinue?"
+    if ([System.Windows.MessageBox]::Show($msg, 'Clean My PC', 'YesNo', 'Question') -ne 'Yes') { return }
+    $script:ResultPanel.Visibility = 'Collapsed'
+    $ui.LogBox.AppendText([Environment]::NewLine)
+    Start-Work -StatusText 'Cleaning your PC... this usually takes less than a minute.' -Work { Invoke-CmpRecommended } -OnDone { param($r) Show-HomeResult $r; Update-State }
 })
+
+$btnRestart.Add_Click({
+    if ([System.Windows.MessageBox]::Show('Restart the PC now? Save any open work first.', 'Clean My PC', 'YesNo', 'Question') -ne 'Yes') { return }
+    Start-Process -FilePath 'shutdown.exe' -ArgumentList '/r', '/t', '5' -WindowStyle Hidden
+})
+
+$btnUndoAll.Add_Click({
+    if (-not $script:LastRestorePoint) { return }
+    if ([System.Windows.MessageBox]::Show('Put everything back exactly as it was before you clicked "Clean my PC now"?', 'Clean My PC', 'YesNo', 'Question') -ne 'Yes') { return }
+    $ui.LogBox.AppendText([Environment]::NewLine)
+    Start-Work -StatusText 'Putting everything back...' -Params @{ Path = $script:LastRestorePoint } -Work { param($Path) Invoke-CmpUndo -Path $Path } -OnDone {
+        $script:ResultTitle.Text = 'Everything is back as it was'
+        $script:ResultText.Text = "All settings were restored. Files are still in your Recycle Bin, and removed apps can be reinstalled from the Microsoft Store.`nRestart your PC to finish."
+        $script:LastRestorePoint = $null
+        $btnUndoAll.Visibility = 'Collapsed'
+        Update-State
+    }
+})
+
+$btnShowDetails.Add_Click({ Set-LogVisible $true })
+$ui.LinkDetails.Add_Click({ Set-LogVisible (-not $script:LogVisible) })
 $btnOpenReport.Add_Click({ if ($script:LastReport) { Open-AsUser $script:LastReport } })
 
 $btnUndoRefresh.Add_Click({ Update-State })
@@ -668,6 +864,7 @@ $btnUndo.Add_Click({
     if (-not ($sel -is [System.Windows.Controls.ListBoxItem])) { [void][System.Windows.MessageBox]::Show('Select a restore point first.', 'Clean My PC'); return }
     if ([System.Windows.MessageBox]::Show("Undo all changes from:`n$($sel.Content)?", 'Clean My PC', 'YesNo', 'Question') -ne 'Yes') { return }
     $ui.LogBox.AppendText([Environment]::NewLine)
+    Set-LogVisible $true
     Start-Work -StatusText 'Undoing...' -Params @{ Path = [string]$sel.Tag } -Work { param($Path) Invoke-CmpUndo -Path $Path } -OnDone { Update-State }
 })
 
@@ -720,7 +917,7 @@ function Show-Welcome {
     $msg = "Welcome to Clean My PC $($info.Version) - developed by KomodoWorks.com`n`n" +
            "Before you start:`n" +
            "  - It runs only on this PC. It collects nothing and sends nothing anywhere.`n" +
-           "  - Nothing changes until you tick items and click Apply. Use Preview first.`n" +
+           "  - Nothing changes until you click a button, and you are told exactly what will happen first.`n" +
            "  - Every change gets a restore point you can undo. Files only go to the Recycle Bin.`n" +
            "  - It is free and open source (MIT) and provided as is. Use it only on PCs you own or are allowed to manage.`n`n" +
            "The full Privacy Policy and Terms of Use are in the About tab.`n`n" +

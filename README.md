@@ -10,6 +10,36 @@
   Developed by <a href="https://www.komodoworks.com"><b>KomodoWorks.com</b></a> &middot; Free &amp; open source (MIT) &middot; Windows 10 / 11
 </p>
 
+<p align="center">
+  <a href="https://github.com/kgntmr/clean-my-pc/releases/latest/download/CleanMyPC.zip"><b>⬇&nbsp;&nbsp;Download Clean My PC</b></a> &nbsp;(one small ZIP file)
+</p>
+
+---
+
+## Get started in 3 steps
+
+1. **[Download Clean My PC](https://github.com/kgntmr/clean-my-pc/releases/latest/download/CleanMyPC.zip)**.
+2. Right-click the downloaded **CleanMyPC.zip** → **Extract All** → **Extract**.
+3. Open the new **CleanMyPC** folder, double-click **Start Clean My PC**, and click the big **Clean my PC now** button.
+
+That's it. It tells you what it will do before it does anything, finishes in about a minute, and has an **Undo everything** button.
+
+<p align="center"><img src="docs/screenshot-home.png" width="820" alt="Clean My PC home screen with one big 'Clean my PC now' button"></p>
+
+**If Windows asks questions first** (this is normal for new free software):
+
+| Windows says | Click |
+|---|---|
+| "Windows protected your PC" | **More info** → **Run anyway** |
+| "Do you want to run this file?" | **Run** |
+| "Do you want to allow this app to make changes?" | **Yes** |
+
+Why? Clean My PC isn't signed with a paid code-signing certificate yet, so Windows doesn't recognise the publisher. Every file is plain text, so you can open any of them in Notepad and read exactly what it does.
+
+Just want a check-up that changes nothing? Double-click **Safety scan only** instead.
+
+**Requirements:** Windows 10 or 11 and an administrator account. Nothing needs to be installed.
+
 ---
 
 ## Why this exists
@@ -21,7 +51,8 @@ Almost everything on a modern PC reports home. Windows sends diagnostic data, br
 - 🔒 **Collects nothing.** No accounts, analytics, telemetry, crash reports, ads, cookies or tracking.
 - 🌐 **Connects to nothing.** The app makes no network requests. Don't take our word for it: [verify it yourself](#verify-it-yourself).
 - 👀 **Shows you everything first.** Every item explains what it does and its side effects. **Preview** shows exactly what would change.
-- ↩️ **Can be undone.** Every Apply creates a restore point, and files only ever go to your Recycle Bin.
+- 🖱️ **One click for everyone.** "Clean my PC now" applies only the safe, recommended changes. The detailed tabs are there if you'd rather choose yourself.
+- ↩️ **Can be undone.** Every change creates a restore point, and files only ever go to your Recycle Bin.
 - 📖 **Hides nothing.** Plain-text PowerShell you can read line by line. No `.exe`, no installer, no obfuscation.
 - 🛡️ **Leaves your security alone.** Defender, SmartScreen, the firewall and Windows Update are never touched.
 
@@ -29,26 +60,12 @@ It was built from a real, hands-on clean-up of a gaming and development laptop. 
 
 ---
 
-## Quick start
-
-1. Download: **Code → Download ZIP**, then extract it to a short path such as `C:\Tools\clean-my-pc`.
-2. Double-click **`CleanMyPC.cmd`** and click **Yes** when Windows asks for administrator rights.
-3. Go through the tabs from left to right:
-   **Scan → Privacy & Telemetry → NVIDIA → Remove bloat apps → Clean up space**.
-   On each tab: tick items → **Preview (no changes)** → **Apply selected**.
-4. Restart the PC when you're done, and empty the Recycle Bin once you're happy.
-
-Only want a health check? Double-click **`CleanMyPC-ScanOnly.cmd`**. It changes nothing and opens a report.
-
-> Windows may warn about files downloaded from the internet. Every file here is plain text, so you can open any of them in Notepad first.
-
-**Requirements:** Windows 10/11, Windows PowerShell 5.1 (built in) and an administrator account. Nothing else needs installing.
-
----
-
 ## What each tab does
 
-### 1. Scan (read-only)
+### Home
+The one-click screen. Cards show what can be improved on this PC (tracking and ads, unneeded apps, space, NVIDIA, adware check). **Clean my PC now** applies only the recommended items that aren't done yet, all in **one** restore point, so **Undo everything** really undoes everything.
+
+### Safety scan (read-only)
 | Check | What it looks for |
 |---|---|
 | Startup entries | Run keys and Startup folders that open websites, hidden PowerShell, `mshta`/`wscript`, or programs in Temp |
@@ -62,22 +79,22 @@ Only want a health check? Double-click **`CleanMyPC-ScanOnly.cmd`**. It changes 
 | Privacy | Recommended privacy settings still off, NVIDIA telemetry status |
 | Performance and space | RAM use, top processes, startup count, reclaimable space, folders unused for 6+ months |
 
-### 2. Privacy & Telemetry
+### Privacy
 32 settings across **Windows telemetry**, **Privacy**, **Ads, tips & suggestions**, **Background services** and **Browsers & other software** (Edge, Chrome, Office, Intel DTT, VS Code, .NET/PowerShell CLIs). Items already done show **[already applied]**.
 
-### 3. NVIDIA
+### NVIDIA
 Blocks only NVIDIA's telemetry, analytics, survey and experiment servers, and sets NVIDIA's own opt-out flags. **NVIDIA App, driver updates and game optimisation keep working.** Deleting NVIDIA's telemetry plugin breaks NVIDIA App 11, and we [found that out the hard way](docs/LESSONS-LEARNED.md#nvidia-app-telemetry-cannot-be-deleted).
 
-### 4. Remove bloat apps
+### Apps
 Shows only known bloat that's actually installed. Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool, Terminal, codecs and driver control panels are **never** offered.
 
-### 5. Clean up space
+### Free up space
 Temp files, crash dumps, error-report archives, old NVIDIA installers, shader caches, browser caches and the Windows Update download cache, each with its size. Everything goes to the Recycle Bin.
 
-### 6. Undo
-Restore points for every Apply. Undo puts back services, tasks, registry values, environment variables, VS Code settings and hosts entries.
+### Undo
+Restore points for every change (one-click or Apply). Undo puts back services, tasks, registry values, environment variables, VS Code settings and hosts entries.
 
-### 7. About
+### About
 Privacy Policy, Terms of Use, License and Security policy, readable offline inside the app.
 
 ---
@@ -86,7 +103,7 @@ Privacy Policy, Terms of Use, License and Security policy, readable offline insi
 
 Every claim above can be checked in a few minutes.
 
-**1. Read it.** Three places hold everything: `CleanMyPC.ps1` (the window), `src/CleanMyPC.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps and folders).
+**1. Read it.** Three places hold the whole app: `CleanMyPC.ps1` (the window), `src/CleanMyPC.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps and folders). `tools/` only contains the start files and the script that builds the download ZIP. In the download, the app is in the `app` folder.
 
 **2. Search for network code.** Open PowerShell in the folder and run:
 ```powershell
@@ -139,6 +156,12 @@ That service, task or program doesn't exist on your Windows version, or has alre
 Yes. Each PC keeps its own restore points.
 
 ---
+
+## For developers
+
+- **Run from source:** clone the repo and double-click `CleanMyPC.cmd` (or `CleanMyPC-ScanOnly.cmd`).
+- **Build the download ZIP:** `powershell -ExecutionPolicy Bypass -File tools\build-release.ps1`. This creates `dist\CleanMyPC.zip` with the friendly layout (`Start Clean My PC`, `Safety scan only`, `HOW TO USE.txt`, and everything else in `app\`) and prints its SHA256 checksum. The ZIP contains exactly the files in this repo, and nothing is compiled.
+- **Test without changing anything:** `.\CleanMyPC.ps1 -SelfTest` builds the window without showing it, and `-Snapshot file.png -SnapshotTab 0` renders it to an image.
 
 ## Contributing
 The lists are plain data files in [`src/catalog/`](src/catalog), so adding a setting, app or folder needs no code. Please describe side effects honestly and test with **Preview** first.

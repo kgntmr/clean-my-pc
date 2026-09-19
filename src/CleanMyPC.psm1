@@ -12,7 +12,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.0.0'
+$script:AppVersion  = '1.1.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/clean-my-pc' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -383,12 +383,13 @@ function Invoke-CmpPrivacy {
     param([string[]]$Ids, [switch]$Preview)
     $items = @((Get-CmpCatalog privacy).Items | Where-Object { $Ids -contains $_.Id })
     if ($items.Count -eq 0) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
-    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } else { Start-CmpSession 'privacy' }
+    $own = (-not $Preview) -and (-not $script:Session)   # join an existing restore point (one-click) if there is one
+    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-CmpSession 'privacy' }
     foreach ($item in $items) {
         Write-CmpLog $item.Title 'STEP'
         foreach ($a in $item.Actions) { Invoke-CmpAction -Action $a -Preview:$Preview }
     }
-    if ($Preview) { Write-CmpLog 'Preview finished. Nothing was changed.' 'OK' } else { Stop-CmpSession }
+    if ($Preview) { Write-CmpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-CmpSession }
 }
 
 #endregion
@@ -418,7 +419,8 @@ function Get-CmpBloatApps {
 function Invoke-CmpRemoveApps {
     param([string[]]$Names, [switch]$Deprovision, [switch]$Preview)
     if (-not $Names) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
-    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } else { Start-CmpSession 'apps' }
+    $own = (-not $Preview) -and (-not $script:Session)
+    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-CmpSession 'apps' }
     foreach ($n in $Names) {
         if (Test-CmpProtectedApp $n) { Write-CmpLog "$n is protected and will not be removed" 'WARN'; continue }
         $pkgs = @(Get-AppxPackage -Name $n -ErrorAction SilentlyContinue)
@@ -442,7 +444,7 @@ function Invoke-CmpRemoveApps {
             }
         }
     }
-    if ($Preview) { Write-CmpLog 'Preview finished. Nothing was changed.' 'OK' } else { Stop-CmpSession }
+    if ($Preview) { Write-CmpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-CmpSession }
 }
 
 #endregion
@@ -460,13 +462,25 @@ function Resolve-CmpPaths {
 function Get-CmpCleanupTargets {
     foreach ($item in (Get-CmpCatalog cleanup).Items) {
         $paths = @(Resolve-CmpPaths $item.Paths)
+        # Only count what Clean-up would actually move (respects the MinAgeHours safety rule).
+        $cutoff = if ($item.MinAgeHours) { (Get-Date).AddHours(-[double]$item.MinAgeHours) } else { $null }
+        $size = 0
+        foreach ($p in $paths) {
+            if ($cutoff) {
+                foreach ($c in @(Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff })) {
+                    $size += if ($c.PSIsContainer) { Get-CmpSize @($c.FullName) } else { $c.Length }
+                }
+            } else {
+                $size += Get-CmpSize @($p)
+            }
+        }
         [pscustomobject]@{
             Id          = $item.Id
             Title       = $item.Title
             Description = $item.Description
             Recommended = [bool]$item.Recommended
             Paths       = $paths
-            SizeBytes   = if ($paths.Count) { Get-CmpSize $paths } else { 0 }
+            SizeBytes   = $size
         }
     }
 }
@@ -475,7 +489,8 @@ function Invoke-CmpCleanup {
     param([string[]]$Ids, [switch]$Preview)
     $items = @((Get-CmpCatalog cleanup).Items | Where-Object { $Ids -contains $_.Id })
     if ($items.Count -eq 0) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
-    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be moved.' 'STEP' } else { Start-CmpSession 'cleanup' }
+    $own = (-not $Preview) -and (-not $script:Session)
+    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be moved.' 'STEP' } elseif ($own) { Start-CmpSession 'cleanup' }
     $total = 0
     foreach ($item in $items) {
         Write-CmpLog $item.Title 'STEP'
@@ -506,8 +521,9 @@ function Invoke-CmpCleanup {
         Write-CmpLog ("Preview finished. About {0} could be freed." -f (Format-CmpBytes $total)) 'OK'
     } else {
         Write-CmpLog ("About {0} moved to the Recycle Bin. Empty the Recycle Bin yourself when you are happy - this tool never permanently deletes." -f (Format-CmpBytes $total)) 'OK'
-        Stop-CmpSession
+        if ($own) { Stop-CmpSession }
     }
+    [pscustomobject]@{ BytesFreed = [int64]$total }
 }
 
 #endregion
@@ -559,7 +575,8 @@ function Invoke-CmpNvidia {
     param([string[]]$Ids, [switch]$Preview)
     if (-not $Ids) { Write-CmpLog 'Nothing selected.' 'WARN'; return }
     $cat = Get-CmpCatalog nvidia
-    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } else { Start-CmpSession 'nvidia' }
+    $own = (-not $Preview) -and (-not $script:Session)
+    if ($Preview) { Write-CmpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-CmpSession 'nvidia' }
     if ($Ids -contains 'nv.hosts') {
         Write-CmpLog 'Block NVIDIA telemetry servers (hosts file)' 'STEP'
         Add-CmpHostsBlock -HostNames $cat.Hosts -Tag 'CleanMyPC-NVIDIA' -Preview:$Preview
@@ -575,8 +592,70 @@ function Invoke-CmpNvidia {
     } else {
         & ipconfig.exe /flushdns | Out-Null
         Write-CmpLog 'NVIDIA App, driver updates and game optimization are unaffected. Re-run this after NVIDIA App updates.' 'INFO'
-        Stop-CmpSession
+        if ($own) { Stop-CmpSession }
     }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- one-click
+
+function Get-CmpRecommendedPlan {
+    <# What "Clean my PC now" would do on this PC: only recommended items that are not done yet. Read-only. #>
+    $status = Get-CmpPrivacyStatus
+    $privacy = @((Get-CmpCatalog privacy).Items | Where-Object { $_.Recommended -and $status[$_.Id] -in 'NotApplied', 'Partial' })
+    $nv = Get-CmpNvidiaStatus
+    $nvIds = @()
+    if ($nv.NvidiaGpu) {
+        if ($nv.HostsBlocked -lt $nv.HostsTotal) { $nvIds += 'nv.hosts' }
+        if ($nv.FlagsSet -lt $nv.FlagsTotal) { $nvIds += 'nv.flags' }
+    }
+    $apps = @(Get-CmpBloatApps | Where-Object { $_.Recommended })
+    $clean = @(Get-CmpCleanupTargets | Where-Object { $_.Recommended -and $_.SizeBytes -gt 0 })
+    [pscustomobject]@{
+        PrivacyIds    = @($privacy | ForEach-Object { $_.Id })
+        PrivacyTitles = @($privacy | ForEach-Object { $_.Title })
+        NvidiaIds     = @($nvIds)
+        HasNvidia     = [bool]$nv.NvidiaGpu
+        AppNames      = @($apps | ForEach-Object { $_.Name })
+        AppTitles     = @($apps | ForEach-Object { $_.Title })
+        CleanupIds    = @($clean | ForEach-Object { $_.Id })
+        CleanupBytes  = [int64](($clean | Measure-Object -Property SizeBytes -Sum).Sum)
+        IsEmpty       = (-not $privacy -and -not $nvIds -and -not $apps -and -not $clean)
+    }
+}
+
+function Invoke-CmpRecommended {
+    <#
+        "Clean my PC now": applies every recommended item that is not done yet, all inside ONE restore point,
+        so "Undo everything" really undoes everything. Returns a plain summary for the Home screen.
+    #>
+    $plan = Get-CmpRecommendedPlan
+    if ($plan.IsEmpty) {
+        Write-CmpLog 'Nothing to do - this PC already has every recommended setting.' 'OK'
+        return [pscustomobject]@{ Nothing = $true }
+    }
+    Start-CmpSession 'one-click'
+    $restore = $script:Session.Path
+    if ($plan.PrivacyIds.Count) { Invoke-CmpPrivacy -Ids $plan.PrivacyIds }
+    if ($plan.NvidiaIds.Count)  { Invoke-CmpNvidia -Ids $plan.NvidiaIds }
+    if ($plan.AppNames.Count)   { Invoke-CmpRemoveApps -Names $plan.AppNames -Deprovision }
+    $freed = 0
+    if ($plan.CleanupIds.Count) {
+        $r = @(Invoke-CmpCleanup -Ids $plan.CleanupIds) | Where-Object { $_ -and $_.PSObject.Properties['BytesFreed'] } | Select-Object -Last 1
+        if ($r) { $freed = $r.BytesFreed }
+    }
+    $entries = @($script:Session.Entries)
+    $summary = [pscustomobject]@{
+        Nothing       = $false
+        Settings      = $plan.PrivacyIds.Count
+        AppsRemoved   = @($entries | Where-Object { $_.Type -eq 'Appx' }).Count
+        NvidiaBlocked = ($plan.NvidiaIds.Count -gt 0)
+        BytesFreed    = [int64]$freed
+        RestorePoint  = $restore
+    }
+    Stop-CmpSession
+    return $summary
 }
 
 #endregion
@@ -905,4 +984,5 @@ Export-ModuleMember -Function Get-CmpInfo, Set-CmpLogSink, Write-CmpLog, Test-Cm
     Get-CmpBloatApps, Invoke-CmpRemoveApps,
     Get-CmpCleanupTargets, Invoke-CmpCleanup,
     Get-CmpNvidiaStatus, Invoke-CmpNvidia,
+    Get-CmpRecommendedPlan, Invoke-CmpRecommended,
     Invoke-CmpAudit

@@ -1,0 +1,37 @@
+CLEAN MY PC - HOW TO USE
+Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
+
+
+1. UNZIP FIRST
+   If you are looking at this inside the zip file:
+   right-click CleanMyPC.zip  >  Extract All  >  Extract.
+
+2. START IT
+   Double-click "Start Clean My PC".
+
+   Windows may ask a few questions first:
+   - "Windows protected your PC"          -> click "More info", then "Run anyway"
+   - "Do you want to run this file?"      -> click "Run"
+   - "Allow this app to make changes?"    -> click "Yes"
+
+   Why? Clean My PC is free and new, so it is not signed with a paid
+   certificate yet. Every file is plain text - you can open them in
+   Notepad and read exactly what they do.
+
+3. CLICK ONE BUTTON
+   Click the big "Clean my PC now" button.
+   It tells you what it will do, you click Yes, and it is done
+   in about a minute. Restart your PC when it says "All done!".
+
+
+CHANGED YOUR MIND?
+   Click "Undo everything" straight away, or open Clean My PC again later
+   and use the Undo tab. Files it cleaned are in your Recycle Bin.
+
+JUST WANT A CHECK-UP THAT CHANGES NOTHING?
+   Double-click "Safety scan only".
+
+
+Questions:       info@komodoworks.com
+Website:         https://www.komodoworks.com
+Source, privacy policy and terms:  https://github.com/kgntmr/clean-my-pc
