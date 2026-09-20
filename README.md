@@ -165,9 +165,6 @@ That appears whenever a browser policy is set, which is how the telemetry switch
 **Some items say [not on this PC].**
 That service, task or program isn't on your Windows version, or is already gone.
 
-**Wasn't this called something else?**
-Up to version 1.1.2 it was "Clean My PC". It became **Quietpane** in 1.2.0, because the old name was too close to a name another company owns. Same app, same promises, and your old undo history still works.
-
 **How do I remove Quietpane?**
 Removing it doesn't undo its changes: click **Undo** first if you want your PC back as it was. Then delete the Quietpane folder and any Quietpane-Report files on your Desktop. Nothing is installed, so that's all. Your undo history stays in `C:\ProgramData\Quietpane` until you delete that too.
 
