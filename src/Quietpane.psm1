@@ -16,7 +16,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.4.0'
+$script:AppVersion  = '1.5.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -70,7 +70,7 @@ function Test-QpAdmin {
 }
 
 function Get-QpCatalog {
-    param([ValidateSet('privacy', 'apps', 'cleanup', 'vendors')][string]$Name)
+    param([ValidateSet('privacy', 'apps', 'cleanup', 'vendors', 'threats')][string]$Name)
     Import-PowerShellDataFile -Path (Join-Path $script:CatalogRoot "$Name.psd1")
 }
 
@@ -834,6 +834,284 @@ function Invoke-QpRecommended {
 
 #endregion
 
+#region ---------------------------------------------------------------- threats (Defender first, heuristics labelled)
+
+# Quietpane does not identify malware families itself. Microsoft Defender names a threat; this code
+# translates that name into plain words and an impact tier, and always keeps Defender's own name and
+# classification visible. Quietpane's own checks are reported as heuristics and never claim a family.
+
+$script:SeverityRank = @{ Critical = 0; High = 1; Medium = 2; Low = 3; Info = 4 }
+$script:DefenderStatusMap = @{ '0' = 'Detected'; '1' = 'Detected'; '2' = 'Removed'; '3' = 'Quarantined'; '4' = 'Removed'; '5' = 'Allowed'; '6' = 'Removed' }
+
+function Get-QpDefenderState {
+    <# Can we ask Defender anything, and should we trust the answer? Never throws. #>
+    $s = [pscustomobject]@{
+        Available = $false; RealTime = $false; SignatureAge = $null
+        CanScan = $false; CanRemediate = $false; ThirdParty = @(); Note = ''
+    }
+    $mp = Get-MpComputerStatus -ErrorAction SilentlyContinue
+    if ($mp) {
+        $s.Available = $true
+        $s.RealTime = [bool]$mp.RealTimeProtectionEnabled
+        $s.SignatureAge = [int]$mp.AntivirusSignatureAge
+        $s.CanScan = [bool](Get-Command Start-MpScan -ErrorAction SilentlyContinue)
+        $s.CanRemediate = [bool](Get-Command Remove-MpThreat -ErrorAction SilentlyContinue)
+    }
+    try {
+        $av = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop | ForEach-Object { [string]$_.displayName })
+        $s.ThirdParty = @($av | Where-Object { $_ -and $_ -notmatch '(?i)(windows|microsoft) defender' })
+    } catch { }
+    if (-not $s.Available) {
+        $s.Note = 'Microsoft Defender could not be reached, so only Quietpane''s own checks ran. Nothing here can confirm a virus by name.'
+    } elseif ($s.ThirdParty.Count) {
+        $s.Note = 'Another antivirus is installed (' + ($s.ThirdParty -join ', ') + '), so Defender may be standing down and its list of threats can look empty. Check that program as well.'
+    } elseif (-not $s.RealTime) {
+        $s.Note = 'Defender real-time protection is off, so new threats are not being caught as they arrive.'
+    }
+    return $s
+}
+
+function Resolve-QpThreatInfo {
+    <# Defender's threat name -> Quietpane tier and plain-language note. Nothing is ever dropped. #>
+    param([string]$ThreatName, [int]$VendorSeverity = 0)
+    $cat = Get-QpCatalog threats
+    foreach ($f in $cat.Families) {
+        if ($ThreatName -match $f.Match) {
+            return [pscustomobject]@{ Family = $f.Family; Tier = $f.Tier; Category = $f.Category; What = $f.What; Why = $f.Why; MatchedBy = 'family' }
+        }
+    }
+    foreach ($c in $cat.CategoryFallback) {
+        if ($ThreatName -match $c.Match) {
+            return [pscustomobject]@{ Family = ''; Tier = $c.Tier; Category = $c.Category; What = $c.What; Why = $c.Why; MatchedBy = 'category' }
+        }
+    }
+    $tier = if ($cat.SeverityFallback["$VendorSeverity"]) { $cat.SeverityFallback["$VendorSeverity"] } else { 'Medium' }
+    [pscustomobject]@{
+        Family = ''; Tier = $tier; Category = 'Malware'
+        What = 'Defender reported this, and Quietpane has no plain-language note for this name yet.'
+        Why = 'Follow what Defender recommends. The exact name is in the technical details.'
+        MatchedBy = 'severity'
+    }
+}
+
+function Get-QpFileHash {
+    param([string]$Path, [int64]$MaxBytes = 104857600)
+    try {
+        if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+        if ((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Length -gt $MaxBytes) { return '' }
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    } catch { return '' }   # locked or unreadable: a missing hash is fine, a failed scan is not
+}
+
+function New-QpFinding {
+    <# The one shape every finding has, whoever found it. #>
+    param(
+        [string]$Section = 'Threats',
+        [ValidateSet('Critical', 'High', 'Medium', 'Low', 'Info')][string]$Severity = 'Info',
+        [string]$ThreatName = '', [string]$Family = '', [string]$Category = '',
+        [string]$Source = 'Quietpane check', [string]$Method = '',
+        [string]$Object = '', [string]$Path = '', [string]$Sha256 = '',
+        [ValidateSet('Confirmed', 'Likely', 'Heuristic', 'Informational')][string]$Confidence = 'Informational',
+        [string]$VendorName = '', [string]$VendorSeverity = '',
+        $FirstSeen = $null, [string]$Recommended = '', [string]$Status = 'Detected',
+        [string]$What = '', [string]$Why = '', [string]$Technical = '',
+        [string]$Title = '', [string]$Detail = '',
+        [string]$ThreatId = '', [bool]$VendorActive = $false
+    )
+    $seed = '{0}|{1}|{2}|{3}' -f $Source, $ThreatName, $Path, $Object
+    $bytes = [Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($seed))
+    $id = (($bytes | Select-Object -First 8) | ForEach-Object { $_.ToString('x2') }) -join ''
+    if (-not $Title) { $Title = if ($ThreatName) { $ThreatName } else { $Object } }
+    if (-not $Detail) { $Detail = $Technical }
+    [pscustomobject]@{
+        Id = $id; Section = $Section; Severity = $Severity
+        ThreatName = $ThreatName; Family = $Family; Category = $Category
+        Source = $Source; Method = $Method
+        Object = $Object; Path = $Path; Sha256 = $Sha256
+        Confidence = $Confidence; VendorName = $VendorName; VendorSeverity = $VendorSeverity
+        FirstSeen = $(if ($FirstSeen) { $FirstSeen } else { Get-Date })
+        Recommended = $Recommended; Status = $Status
+        What = $What; Why = $Why; Technical = $Technical
+        Title = $Title; Detail = $Detail
+        ThreatId = $ThreatId; VendorActive = $VendorActive
+    }
+}
+
+function Get-QpDefenderFindings {
+    <# Everything Defender has detected on this PC, in Quietpane's shape. Read-only. #>
+    $state = Get-QpDefenderState
+    if (-not $state.Available) { return @() }
+    $threats = @{}
+    foreach ($t in @(Get-MpThreat -ErrorAction SilentlyContinue)) { $threats["$($t.ThreatID)"] = $t }
+    $seen = @{}
+    $out = foreach ($d in @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Sort-Object InitialDetectionTime -Descending)) {
+        $t = $threats["$($d.ThreatID)"]
+        $name = if ($t -and $t.ThreatName) { [string]$t.ThreatName } else { "Unnamed detection $($d.ThreatID)" }
+        $vendorSev = if ($t) { [int]$t.SeverityID } else { 0 }
+        $info = Resolve-QpThreatInfo -ThreatName $name -VendorSeverity $vendorSev
+        $path = ''; $kind = 'file'
+        foreach ($r in @($d.Resources | Where-Object { $_ })) {
+            if ($r -match '^(?<k>[a-z]+):_?(?<v>.+)$') { if (-not $path) { $kind = $matches['k']; $path = $matches['v'] } }
+            elseif (-not $path) { $path = [string]$r }
+        }
+        $key = "$name|$path"
+        if ($seen.ContainsKey($key)) { continue }   # keep only the newest detection of the same thing
+        $seen[$key] = $true
+        $status = $script:DefenderStatusMap["$([int]$d.ThreatStatusID)"]
+        if (-not $status) { $status = 'Detected' }
+        $confidence = if ($name -match '^Behavior:') { 'Likely' } else { 'Confirmed' }
+        $recommended = if ($status -eq 'Detected') { 'Let Defender remove it, or quarantine it with Quietpane.' } else { "Already handled by Defender ($status). Nothing more to do." }
+        $tech = @(
+            "Defender threat name: $name"
+            "Defender severity: $vendorSev (5 = severe, 4 = high, 2 = moderate, 1 = low)"
+            "Defender status: $($d.ThreatStatusID) ($status)"
+            "Resource: $kind $path"
+            "Detected: $($d.InitialDetectionTime)"
+            "Ran before it was caught: $(if ($t) { $t.DidThreatExecute } else { 'unknown' })"
+            "Matched Quietpane note by: $($info.MatchedBy)"
+        ) -join "`n"
+        New-QpFinding -Section 'Threats' -Severity $info.Tier -ThreatName $name -Family $info.Family -Category $info.Category `
+            -Source 'Microsoft Defender' -Method 'Antivirus signature' -Object (Split-Path $path -Leaf) -Path $path `
+            -Sha256 (Get-QpFileHash $path) -Confidence $confidence -VendorName $name -VendorSeverity "$vendorSev" `
+            -FirstSeen $d.InitialDetectionTime -Recommended $recommended -Status $status `
+            -What $info.What -Why $info.Why -Technical $tech `
+            -Title $(if ($info.Family) { $info.Family } else { $name }) `
+            -ThreatId "$($d.ThreatID)" -VendorActive $(if ($t) { [bool]$t.IsActive } else { $false })
+    }
+    return @($out)
+}
+
+function Invoke-QpThreatScan {
+    <#
+        Asks Microsoft Defender to scan, then reads what it found. Quietpane never opens or runs a
+        detected file. Quick scan covers the places malware normally lives; a custom scan takes a folder.
+    #>
+    param([ValidateSet('Quick', 'Full', 'Custom')][string]$Type = 'Quick', [string]$Path)
+    $state = Get-QpDefenderState
+    if (-not $state.Available -or -not $state.CanScan) {
+        Write-QpLog 'Microsoft Defender is not available here, so no antivirus scan was run. Quietpane''s own checks still work.' 'WARN'
+        return [pscustomobject]@{ Ran = $false; Findings = @(); State = $state }
+    }
+    if ($state.ThirdParty.Count) { Write-QpLog $state.Note 'INFO' }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        if ($Type -eq 'Custom') {
+            if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { Write-QpLog 'That folder could not be found - nothing scanned.' 'WARN'; return [pscustomobject]@{ Ran = $false; Findings = @(); State = $state } }
+            Write-QpLog "Asking Defender to scan $Path ..." 'STEP'
+            Start-MpScan -ScanType CustomScan -ScanPath $Path -ErrorAction Stop
+        } else {
+            Write-QpLog "Asking Defender to run a $($Type.ToLower()) scan. This is Defender's own engine, not ours." 'STEP'
+            Start-MpScan -ScanType "$($Type)Scan" -ErrorAction Stop
+        }
+        Write-QpLog ("Defender finished in {0:N0} seconds." -f $sw.Elapsed.TotalSeconds) 'OK'
+    } catch {
+        Write-QpLog "Defender could not complete the scan: $($_.Exception.Message)" 'WARN'
+        return [pscustomobject]@{ Ran = $false; Findings = @(Get-QpDefenderFindings); State = $state }
+    }
+    [pscustomobject]@{ Ran = $true; Findings = @(Get-QpDefenderFindings); State = $state; Seconds = [int]$sw.Elapsed.TotalSeconds }
+}
+
+function Write-QpAudit {
+    <# Append-only record of everything Quietpane did to a threat, including failures. #>
+    param([string]$FindingId, [string]$Action, [string]$Result, [string]$Object = '', [string]$Note = '')
+    try {
+        if (-not (Test-Path $script:DataRoot)) { New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null }
+        $line = [pscustomobject]@{
+            Time = (Get-Date).ToString('s'); FindingId = $FindingId; Action = $Action; Result = $Result
+            Object = $Object; Note = $Note; User = "$env:USERDOMAIN\$env:USERNAME"
+        } | ConvertTo-Json -Compress
+        Add-Content -Path (Join-Path $script:DataRoot 'audit.log') -Value $line -Encoding UTF8
+    } catch { Write-QpLog "Could not write the audit log: $($_.Exception.Message)" 'WARN' }
+}
+
+function Get-QpAllowList {
+    $file = Join-Path $script:DataRoot 'allowed.json'
+    if (-not (Test-Path $file)) { return @() }
+    try { return @(Get-Content $file -Raw | ConvertFrom-Json) } catch { return @() }
+}
+
+function Add-QpAllow {
+    <#
+        The user chose to leave something in place. This is Quietpane's own note only: it never creates a
+        Defender exclusion and never weakens any future scan. The item keeps showing up, marked Allowed.
+    #>
+    param([string]$FindingId, [string]$ThreatName, [string]$Path)
+    $all = @(Get-QpAllowList | Where-Object { $_.FindingId -ne $FindingId })
+    $all += [pscustomobject]@{ FindingId = $FindingId; ThreatName = $ThreatName; Path = $Path; Allowed = (Get-Date).ToString('s') }
+    try {
+        if (-not (Test-Path $script:DataRoot)) { New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null }
+        $all | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $script:DataRoot 'allowed.json') -Encoding UTF8
+        Write-QpLog "Left in place on purpose: $ThreatName. It is still on this PC, and Quietpane will keep showing it." 'WARN'
+        Write-QpAudit -FindingId $FindingId -Action 'Allow' -Result 'Recorded' -Object $Path -Note 'Quietpane note only - no Defender exclusion was created'
+    } catch { Write-QpLog "Could not record that choice: $($_.Exception.Message)" 'WARN' }
+}
+
+function Invoke-QpRemediate {
+    <#
+        Stage 1 handles what Defender already owns, plus the user's explicit "leave it".
+        Quarantine, Recycle Bin and permanent delete arrive with the quarantine store.
+    #>
+    param([Parameter(Mandatory)]$Finding, [ValidateSet('Defender', 'Allow')][string]$Action = 'Defender')
+    if ($Action -eq 'Allow') {
+        Add-QpAllow -FindingId $Finding.Id -ThreatName $Finding.ThreatName -Path $Finding.Path
+        return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Allowed'; Ok = $true; Note = 'Left in place at your request.' }
+    }
+    if ($Finding.Source -ne 'Microsoft Defender') {
+        Write-QpLog 'Only Defender can remove its own detections. This finding came from a Quietpane check, so there is nothing for Defender to remove.' 'WARN'
+        return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'Not a Defender detection.' }
+    }
+    $state = Get-QpDefenderState
+    if (-not $state.CanRemediate) {
+        Write-QpAudit -FindingId $Finding.Id -Action 'Remove' -Result 'Failed' -Object $Finding.Path -Note 'Defender remediation unavailable'
+        return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'Defender cannot be asked to remove anything on this PC.' }
+    }
+    if (-not (Test-QpAdmin)) {
+        Write-QpLog 'Administrator rights are needed before Defender will remove anything. Nothing was changed.' 'WARN'
+        Write-QpAudit -FindingId $Finding.Id -Action 'Remove' -Result 'Failed' -Object $Finding.Path -Note 'not running as administrator'
+        return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'Quietpane needs administrator rights for this. Close it and start it again with "Start Quietpane", which asks Windows for permission.' }
+    }
+    Write-QpLog "Asking Defender to deal with $($Finding.ThreatName)" 'STEP'
+    $hadFile = $Finding.Path -and (Test-Path -LiteralPath $Finding.Path)
+    $tried = @()
+    try {
+        # A targeted scan of the file is what actually makes Defender clean it. Remove-MpThreat only ever
+        # touches threats Defender still counts as active, which is why it can quietly do nothing.
+        if ($hadFile) {
+            $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+            if (Test-Path $mp) {
+                & $mp -Scan -ScanType 3 -File $Finding.Path | Out-Null
+                $tried += "MpCmdRun -Scan -File (exit $LASTEXITCODE)"
+            }
+        }
+        if ($Finding.VendorActive -or -not $hadFile) {
+            $tried += 'Remove-MpThreat'
+            Remove-MpThreat -ErrorAction SilentlyContinue | Out-Null
+        }
+    } catch {
+        Write-QpLog "Defender returned an error: $($_.Exception.Message)" 'WARN'
+    }
+    # Never report success without checking. A claim of "removed" has to be true.
+    Start-Sleep -Milliseconds 800
+    $stillThere = $Finding.Path -and (Test-Path -LiteralPath $Finding.Path)
+    if ($hadFile -and -not $stillThere) {
+        Write-QpLog "Defender removed $($Finding.Path)" 'OK'
+        Write-QpAudit -FindingId $Finding.Id -Action 'Remove' -Result 'Removed' -Object $Finding.Path -Note ($tried -join ' + ')
+        return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Removed'; Ok = $true; Note = 'Defender removed the file. It is in Defender''s own quarantine, and Windows Security can restore it.' }
+    }
+    $now = @(Get-MpThreat -ErrorAction SilentlyContinue | Where-Object { "$($_.ThreatID)" -eq $Finding.ThreatId })
+    if (-not $hadFile -and $now.Count -and -not $now[0].IsActive) {
+        Write-QpLog 'Defender says this one is no longer active. Nothing is left to remove.' 'OK'
+        Write-QpAudit -FindingId $Finding.Id -Action 'Remove' -Result 'AlreadyHandled' -Object $Finding.Path -Note ($tried -join ' + ')
+        return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Removed'; Ok = $true; Note = 'Defender had already dealt with this one.' }
+    }
+    $note = 'Defender did not remove it. Open Windows Security > Protection history and act there, or leave it and we will offer quarantine in the next version.'
+    Write-QpLog "Defender did not remove $($Finding.Path). Nothing was changed by Quietpane." 'WARN'
+    Write-QpAudit -FindingId $Finding.Id -Action 'Remove' -Result 'Failed' -Object $Finding.Path -Note ("tried: " + ($tried -join ' + '))
+    [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = $note }
+}
+
+#endregion
+
 #region ---------------------------------------------------------------- scan (read-only)
 
 function Invoke-QpAudit {
@@ -846,7 +1124,11 @@ function Invoke-QpAudit {
     $findings = New-Object System.Collections.ArrayList
     $isAdmin = Test-QpAdmin
     function Add-Finding([string]$Section, [string]$Severity, [string]$Title, [string]$Detail = '') {
-        [void]$findings.Add([pscustomobject]@{ Section = $Section; Severity = $Severity; Title = $Title; Detail = $Detail })
+        # Quietpane's own checks. They are heuristics: useful signals, never proof, and never a family name.
+        $confidence = if ($Severity -eq 'Info') { 'Informational' } else { 'Heuristic' }
+        [void]$findings.Add((New-QpFinding -Section $Section -Severity $Severity -Title $Title -Detail $Detail `
+            -Source 'Quietpane check' -Method 'Heuristic check' -Confidence $confidence `
+            -Object $Title -What $Title -Why $Detail -Technical $Detail))
     }
 
     $suspiciousCmd = '(?i)(cmd(\.exe)?\s+/c\s+start\s+\S*(https?:|www\.))|(\bstart\s+(https?://|www\.))|\bmshta\b|\bwscript\b|\bcscript\b|powershell[^;|]*\s-(e|enc|encodedcommand)\s|-w(indowstyle)?\s+hidden|downloadstring|\\AppData\\Local\\Temp\\|\\Users\\Public\\'
@@ -866,6 +1148,15 @@ function Invoke-QpAudit {
     }
 
     Write-QpLog 'Scan started (read-only - nothing will be changed)' 'STEP'
+
+    # ---- 0. What Microsoft Defender has found. Defender names threats; Quietpane only explains them.
+    Write-QpLog 'Asking Microsoft Defender what it has found...' 'INFO'
+    $defender = Get-QpDefenderState
+    foreach ($f in @(Get-QpDefenderFindings)) { [void]$findings.Add($f) }
+    if ($defender.Note) { Add-Finding 'Threats' 'Medium' 'Antivirus cover is not complete' $defender.Note }
+    if ($defender.Available -and -not @($findings | Where-Object { $_.Source -eq 'Microsoft Defender' }).Count) {
+        Add-Finding 'Threats' 'Info' 'Microsoft Defender has no threats on record for this PC' 'Nothing has been detected or quarantined. Quietpane cannot confirm a PC is clean on its own - it only reports what Defender knows plus its own checks below.'
+    }
 
     # ---- 1. Startup entries
     Write-QpLog 'Checking startup entries...' 'INFO'
@@ -1187,9 +1478,10 @@ function Invoke-QpAudit {
     if ($old.Count) { Add-Finding 'Disk space' 'Info' 'Folders where nothing has changed for 6+ months (review before deleting - may belong to uninstalled programs)' ((($old | ForEach-Object { '{0,10}  {1:yyyy-MM-dd}  {2}' -f (Format-QpBytes $_.Size), $_.Last, $_.Path }) -join "`n") + "`nThe date is the last time anything inside the folder changed. Check what a folder belongs to before deleting it - some apps you still use rarely write to their folders.") }
 
     # ---- Report
-    $high = @($findings | Where-Object Severity -eq 'High').Count
-    $med = @($findings | Where-Object Severity -eq 'Medium').Count
-    $html = New-QpReportHtml -Findings $findings -High $high -Medium $med -IsAdmin $isAdmin
+    $counts = [ordered]@{}
+    foreach ($s in 'Critical', 'High', 'Medium', 'Low', 'Info') { $counts[$s] = @($findings | Where-Object { $_.Severity -eq $s }).Count }
+    $high = $counts['High']; $med = $counts['Medium']
+    $html = New-QpReportHtml -Findings $findings -Counts $counts -IsAdmin $isAdmin
     try {
         $dir = Split-Path -Path $OutFile -Parent
         if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -1199,12 +1491,56 @@ function Invoke-QpAudit {
         Set-Content -Path $OutFile -Value $html -Encoding UTF8
         Write-QpLog "Could not save the report to the chosen location - saved to $OutFile instead" 'WARN'
     }
-    Write-QpLog ("Scan finished: {0} high, {1} medium, {2} info. Report: {3}" -f $high, $med, (@($findings).Count - $high - $med), $OutFile) 'OK'
-    [pscustomobject]@{ High = $high; Medium = $med; Info = (@($findings).Count - $high - $med); Report = $OutFile }
+    Write-QpLog ("Check finished: {0} critical, {1} high, {2} medium, {3} low, {4} for information. Report: {5}" -f $counts['Critical'], $counts['High'], $counts['Medium'], $counts['Low'], $counts['Info'], $OutFile) 'OK'
+    [pscustomobject]@{
+        Critical = $counts['Critical']; High = $high; Medium = $med; Low = $counts['Low']; Info = $counts['Info']
+        Counts = $counts; Total = @($findings).Count
+        Findings = @($findings)
+        Defender = $defender
+        Report = $OutFile
+    }
+}
+
+function New-QpDonutSvg {
+    <#
+        The severity doughnut, drawn as plain inline SVG: no scripts, no fonts, no network.
+        Every segment is also written out in the legend, so the picture never carries meaning on its own.
+    #>
+    param([hashtable]$Counts, [hashtable]$Colours)
+    $order = @('Critical', 'High', 'Medium', 'Low', 'Info')
+    $total = 0; foreach ($s in $order) { $total += [int]$Counts[$s] }
+    $cx = 90; $cy = 90; $r = 68; $w = 26
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('<svg viewBox="0 0 180 180" width="180" height="180" role="img" aria-label="Findings by severity">')
+    [void]$sb.Append(('<circle cx="{0}" cy="{1}" r="{2}" fill="none" stroke="{3}" stroke-width="{4}"/>' -f $cx, $cy, $r, '#e6dfcc', $w))
+    if ($total -gt 0) {
+        $angle = -90.0
+        foreach ($s in $order) {
+            $n = [int]$Counts[$s]
+            if ($n -le 0) { continue }
+            $sweep = 360.0 * $n / $total
+            # a full circle cannot be drawn as one arc, so draw it as a ring
+            if ([Math]::Abs($sweep - 360) -lt 0.01) {
+                [void]$sb.Append(('<circle cx="{0}" cy="{1}" r="{2}" fill="none" stroke="{3}" stroke-width="{4}"/>' -f $cx, $cy, $r, $Colours[$s], $w))
+                break
+            }
+            $a1 = $angle * [Math]::PI / 180.0
+            $a2 = ($angle + $sweep) * [Math]::PI / 180.0
+            $x1 = $cx + $r * [Math]::Cos($a1); $y1 = $cy + $r * [Math]::Sin($a1)
+            $x2 = $cx + $r * [Math]::Cos($a2); $y2 = $cy + $r * [Math]::Sin($a2)
+            $large = if ($sweep -gt 180) { 1 } else { 0 }
+            [void]$sb.Append(('<path d="M {0:F2} {1:F2} A {2} {2} 0 {3} 1 {4:F2} {5:F2}" fill="none" stroke="{6}" stroke-width="{7}"><title>{8}: {9}</title></path>' -f $x1, $y1, $r, $large, $x2, $y2, $Colours[$s], $w, $s, $n))
+            $angle += $sweep
+        }
+    }
+    [void]$sb.Append(('<text x="{0}" y="{1}" text-anchor="middle" font-size="34" font-weight="700" fill="currentColor">{2}</text>' -f $cx, ($cy + 4), $total))
+    [void]$sb.Append(('<text x="{0}" y="{1}" text-anchor="middle" font-size="12" fill="currentColor" opacity="0.75">{2}</text>' -f $cx, ($cy + 24), $(if ($total -eq 1) { 'finding' } else { 'findings' })))
+    [void]$sb.Append('</svg>')
+    return $sb.ToString()
 }
 
 function New-QpReportHtml {
-    param($Findings, [int]$High, [int]$Medium, [bool]$IsAdmin)
+    param($Findings, [System.Collections.IDictionary]$Counts, [bool]$IsAdmin)
     $enc = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
     # The logo is embedded as a data URI so the report makes no network requests at all
     # (no web fonts, no CDNs, no images from the internet).
@@ -1217,8 +1553,8 @@ function New-QpReportHtml {
 <meta name="referrer" content="no-referrer">
 <title>Quietpane report</title>
 <style>
-:root{--bg:#faf6ec;--card:#fffdf8;--text:#0f1b1c;--muted:#4b5b5c;--line:#e6dfcc;--anchor:#0f1b1c;--accent:#ffb627;--teal:#117a68;--high:#a83232;--med:#9a6700;--info:#117a68}
-@media (prefers-color-scheme:dark){:root{--bg:#0f1b1c;--card:#162627;--text:#faf6ec;--muted:#a9b5b3;--line:#22393a;--teal:#1fa187;--high:#e06666;--med:#ffb627;--info:#1fa187}}
+:root{--bg:#faf6ec;--card:#fffdf8;--text:#0f1b1c;--muted:#4b5b5c;--line:#e6dfcc;--anchor:#0f1b1c;--accent:#ffb627;--teal:#117a68;--crit:#7b1d1d;--high:#a83232;--med:#9a6700;--low:#4b5b5c;--info:#117a68}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1b1c;--card:#162627;--text:#faf6ec;--muted:#a9b5b3;--line:#22393a;--teal:#1fa187;--crit:#ff7b7b;--high:#e06666;--med:#ffb627;--low:#a9b5b3;--info:#1fa187}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 "Sora","Segoe UI",system-ui,sans-serif}
 header.brand{background:var(--anchor);color:#faf6ec;padding:18px 16px}
 .wrap{max-width:980px;margin:0 auto}.row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
@@ -1230,8 +1566,15 @@ main{padding:24px 16px}p.meta{color:var(--muted);margin:0 0 20px}
 .pill b{font:600 24px/1.2 "Fraunces",Georgia,serif;display:block}
 h2{font:600 19px/1.3 "Fraunces",Georgia,serif;margin:28px 0 8px;color:var(--teal)}
 .f{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--info);padding:10px 14px;margin:8px 0}
-.f.High{border-left-color:var(--high)}.f.Medium{border-left-color:var(--med)}
-.sev{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-right:8px}.High .sev{color:var(--high)}.Medium .sev{color:var(--med)}.Info .sev{color:var(--info)}
+.f.Critical{border-left-color:var(--crit)}.f.High{border-left-color:var(--high)}.f.Medium{border-left-color:var(--med)}.f.Low{border-left-color:var(--low)}
+.sev{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-right:8px}
+.Critical .sev{color:var(--crit)}.High .sev{color:var(--high)}.Medium .sev{color:var(--med)}.Low .sev{color:var(--low)}.Info .sev{color:var(--info)}
+.chart{display:flex;gap:24px;align-items:center;flex-wrap:wrap;background:var(--card);border:1px solid var(--line);padding:16px;margin-bottom:24px}
+.legend{list-style:none;margin:0;padding:0;min-width:230px}
+.legend li{display:flex;align-items:center;gap:10px;padding:3px 0;font-size:14px}
+.legend .k{width:14px;height:14px;flex:0 0 14px;display:inline-block;border:1px solid rgba(0,0,0,.15)}
+.legend .n{margin-left:auto;font-weight:700}.legend li.zero{opacity:.45}
+.meta2{color:var(--muted);font-size:13px;margin:4px 0 0}.meta2 b{color:var(--text)}
 pre{white-space:pre-wrap;word-break:break-all;margin:6px 0 0;color:var(--muted);font:13px/1.45 Consolas,monospace}
 footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var(--muted);font-size:13px}footer a{color:var(--teal)}
 </style></head><body>
@@ -1241,15 +1584,38 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
     [void]$sb.Append(('<div><h1>Quietpane &ndash; scan report</h1><p class="by">Developed by <a href="{0}" rel="noopener noreferrer">KomodoWorks.com</a></p></div></div></header><main><div class="wrap">' -f $brandUrl))
     $adminNote = if (-not $IsAdmin) { ' &middot; run as administrator for the full scan' } else { '' }
     [void]$sb.Append(('<p class="meta">{0} &middot; version {1} &middot; read-only scan, nothing was changed{2}</p>' -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $script:AppVersion, $adminNote))
-    [void]$sb.Append(('<div class="sum"><div class="pill"><b style="color:var(--high)">{0}</b>high</div><div class="pill"><b style="color:var(--med)">{1}</b>medium</div><div class="pill"><b style="color:var(--info)">{2}</b>info</div></div>' -f $High, $Medium, (@($Findings).Count - $High - $Medium)))
-    $order = @{ High = 0; Medium = 1; Info = 2 }
-    foreach ($g in ($Findings | Group-Object Section)) {
+    # Severity doughnut plus a written legend: the chart never carries meaning through colour alone.
+    $colours = @{ Critical = '#7b1d1d'; High = '#a83232'; Medium = '#9a6700'; Low = '#8a8578'; Info = '#117a68' }
+    $meaning = @{ Critical = 'act now'; High = 'act on it'; Medium = 'worth a look'; Low = 'minor'; Info = 'just so you know' }
+    $plain = @{}
+    foreach ($s in 'Critical', 'High', 'Medium', 'Low', 'Info') { $plain[$s] = [int]$Counts[$s] }
+    [void]$sb.Append('<div class="chart">' + (New-QpDonutSvg -Counts $plain -Colours $colours) + '<ul class="legend">')
+    foreach ($s in 'Critical', 'High', 'Medium', 'Low', 'Info') {
+        $cls = if ($plain[$s] -eq 0) { ' class="zero"' } else { '' }
+        [void]$sb.Append(('<li{0}><span class="k" style="background:{1}"></span>{2} <span style="color:var(--muted)">- {3}</span><span class="n">{4}</span></li>' -f $cls, $colours[$s], $s, $meaning[$s], $plain[$s]))
+    }
+    [void]$sb.Append('</ul></div>')
+    $order = @{ Critical = 0; High = 1; Medium = 2; Low = 3; Info = 4 }
+    foreach ($g in ($Findings | Group-Object Section | Sort-Object { ($_.Group | ForEach-Object { $order[$_.Severity] } | Measure-Object -Minimum).Minimum })) {
         [void]$sb.Append("<h2>$(& $enc $g.Name)</h2>")
         foreach ($f in ($g.Group | Sort-Object { $order[$_.Severity] })) {
-            [void]$sb.Append(('<div class="f {0}"><span class="sev">{0}</span>{1}{2}</div>' -f $f.Severity, (& $enc $f.Title), $(if ($f.Detail) { '<pre>' + (& $enc $f.Detail) + '</pre>' } else { '' })))
+            $line = '<div class="f {0}"><span class="sev">{0}</span>{1}' -f $f.Severity, (& $enc $f.Title)
+            # Findings that came from Defender carry extra facts worth printing.
+            if ($f.Source -and $f.Source -ne 'Quietpane check') {
+                $bits = @("found by <b>$(& $enc $f.Source)</b>", "confidence: <b>$(& $enc $f.Confidence)</b>", "status: <b>$(& $enc $f.Status)</b>")
+                if ($f.Category) { $bits += 'type: <b>' + (& $enc $f.Category) + '</b>' }
+                $line += '<p class="meta2">' + ($bits -join ' &middot; ') + '</p>'
+                if ($f.What) { $line += '<p class="meta2">' + (& $enc $f.What) + '</p>' }
+                if ($f.Why) { $line += '<p class="meta2">' + (& $enc $f.Why) + '</p>' }
+                if ($f.Recommended) { $line += '<p class="meta2">What to do: <b>' + (& $enc $f.Recommended) + '</b></p>' }
+                if ($f.Path) { $line += '<p class="meta2">Where: ' + (& $enc $f.Path) + '</p>' }
+                if ($f.Sha256) { $line += '<p class="meta2">SHA256: ' + (& $enc $f.Sha256) + '</p>' }
+            }
+            if ($f.Detail) { $line += '<pre>' + (& $enc $f.Detail) + '</pre>' }
+            [void]$sb.Append($line + '</div>')
         }
     }
-    [void]$sb.Append(('<footer>High = act on it &middot; Medium = review it &middot; Info = for your information.<br>This report was created on this PC and was not sent anywhere. It describes your PC, so review it before sharing it with anyone.<br><b>A good start, not a guarantee.</b> This check looks at the places problems usually hide, but it cannot promise a PC is clean. If yours still feels wrong, run a deeper scan with a dedicated security tool as well.<br>Quietpane {0} &middot; free and open source (MIT) &middot; Developed by <a href="{1}" rel="noopener noreferrer">KomodoWorks.com</a> &middot; <a href="mailto:{2}">{2}</a></footer></div></main></body></html>' -f $script:AppVersion, $brandUrl, $script:Brand.Email))
+    [void]$sb.Append(('<footer>Critical = act now &middot; High = act on it &middot; Medium = worth a look &middot; Low = minor &middot; Info = just so you know.<br>Threat names come from Microsoft Defender. Quietpane''s own checks are marked as such and are signals, not proof.<br>This report was created on this PC and was not sent anywhere. It describes your PC, so review it before sharing it with anyone.<br><b>A good start, not a guarantee.</b> This check looks at the places problems usually hide, but it cannot promise a PC is clean. If yours still feels wrong, run a deeper scan with a dedicated security tool as well.<br>Quietpane {0} &middot; free and open source (MIT) &middot; Developed by <a href="{1}" rel="noopener noreferrer">KomodoWorks.com</a> &middot; <a href="mailto:{2}">{2}</a></footer></div></main></body></html>' -f $script:AppVersion, $brandUrl, $script:Brand.Email))
     return $sb.ToString()
 }
 
@@ -1262,5 +1628,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpBloatApps, Invoke-QpRemoveApps,
     Get-QpCleanupTargets, Invoke-QpCleanup,
     Get-QpVendorStatus, Invoke-QpVendor, Invoke-QpVendorUninstall,
+    Get-QpDefenderState, Get-QpDefenderFindings, Invoke-QpThreatScan, Invoke-QpRemediate, Get-QpAllowList, Resolve-QpThreatInfo, New-QpFinding,
+    New-QpDonutSvg, New-QpReportHtml, Get-QpFileHash,
     Get-QpRecommendedPlan, Invoke-QpRecommended,
     Invoke-QpAudit

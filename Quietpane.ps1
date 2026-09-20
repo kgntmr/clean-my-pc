@@ -428,20 +428,53 @@ $script:ResultPanel.Child = $resultStack
 [void]$homePanel.Children.Add($script:ResultPanel)
 [void]$homePanel.Children.Add((New-Text 'Rather choose yourself? The Privacy, Telemetry, Apps and Free up space tabs let you pick item by item, and Preview shows what would happen without touching anything.' 12.5 'Normal' '#4B5B5C' '0,20,0,0'))
 
-# 1. Scan
-$scanPanel = New-TabPage 'Safety scan' 'scan' ('A careful look around your PC for the tricks adware uses: odd startup entries, hidden tasks, browser add-ons, tampered programs and more. It changes nothing, and the report opens in your browser when it finishes.')
+# 1. Safety scan - Microsoft Defender's detections plus Quietpane's own checks
+$scanPanel = New-TabPage 'Safety scan' 'scan' ('We ask Microsoft Defender what it has found, and we look around for the tricks adware uses: odd startup entries, hidden tasks, browser add-ons and tampered programs. Nothing is changed while we look.')
+[void]$scanPanel.Children.Add((New-Text 'Threat names come from Defender. Anything Quietpane spots on its own is marked as our own check - a signal worth knowing about, not proof.' 12.5 'Normal' '#4B5B5C' '0,0,0,10'))
 $scanButtons = New-Object System.Windows.Controls.StackPanel
 $scanButtons.Orientation = 'Horizontal'
-$scanButtons.Margin = Get-Thick '0,6,0,10'
-$btnScan = New-Button 'Run scan' -Primary
+$scanButtons.Margin = Get-Thick '0,0,0,10'
+$btnScan = New-Button 'Check this PC' -Primary
+$btnScanDeep = New-Button 'Check and ask Defender to scan'
 $btnOpenReport = New-Button 'Open last report'
 $btnOpenReport.IsEnabled = $false
-[void]$scanButtons.Children.Add($btnScan)
-[void]$scanButtons.Children.Add($btnOpenReport)
+foreach ($b in $btnScan, $btnScanDeep, $btnOpenReport) { [void]$scanButtons.Children.Add($b) }
 [void]$scanPanel.Children.Add($scanButtons)
-$scanSummary = New-Text 'No scan yet.' 15 'SemiBold' '#0F1B1C' '0,6,0,6' 'Fraunces, Georgia'
+$scanSummary = New-Text 'No check yet.' 15 'SemiBold' '#0F1B1C' '0,6,0,6' 'Fraunces, Georgia'
 [void]$scanPanel.Children.Add($scanSummary)
-[void]$scanPanel.Children.Add((New-Text 'High means have a look now, Medium means worth a look, Info is just so you know. If something suspicious turns up, the report also shows what was installed at the same moment - usually the culprit.' 12.5 'Normal' '#4B5B5C'))
+$script:ScanProgress = New-Text '' 12.5 'Normal' '#4B5B5C' '0,0,0,6'
+[void]$scanPanel.Children.Add($script:ScanProgress)
+
+# Severity doughnut: colour, label and count, so it never depends on colour alone.
+$script:SevColours = [ordered]@{ Critical = '#7B1D1D'; High = '#A83232'; Medium = '#9A6700'; Low = '#8A8578'; Info = '#117A68' }
+$script:SevMeaning = @{ Critical = 'act now'; High = 'act on it'; Medium = 'worth a look'; Low = 'minor'; Info = 'just so you know' }
+$script:SevCounts = [ordered]@{ Critical = 0; High = 0; Medium = 0; Low = 0; Info = 0 }
+$script:SevFilter = 'All'
+$script:ScanFindings = @()
+
+$script:ChartPanel = New-Object System.Windows.Controls.Border
+$script:ChartPanel.Visibility = 'Collapsed'
+$script:ChartPanel.Background = Get-Brush '#FFFDF8'
+$script:ChartPanel.BorderBrush = Get-Brush '#E6DFCC'
+$script:ChartPanel.BorderThickness = Get-Thick '1'
+$script:ChartPanel.Padding = Get-Thick '16,14'
+$script:ChartPanel.Margin = Get-Thick '0,4,0,12'
+$chartRow = New-Object System.Windows.Controls.StackPanel
+$chartRow.Orientation = 'Horizontal'
+$script:ChartCanvas = New-Object System.Windows.Controls.Canvas
+$script:ChartCanvas.Width = 172; $script:ChartCanvas.Height = 172
+$script:ChartCanvas.Margin = Get-Thick '0,0,22,0'
+[void]$chartRow.Children.Add($script:ChartCanvas)
+$script:LegendPanel = New-Object System.Windows.Controls.StackPanel
+$script:LegendPanel.VerticalAlignment = 'Center'
+$script:LegendPanel.MinWidth = 300
+[void]$chartRow.Children.Add($script:LegendPanel)
+$script:ChartPanel.Child = $chartRow
+[void]$scanPanel.Children.Add($script:ChartPanel)
+
+$script:FindingsPanel = New-Object System.Windows.Controls.StackPanel
+[void]$scanPanel.Children.Add($script:FindingsPanel)
+[void]$scanPanel.Children.Add((New-Text 'A good start, not a guarantee: this looks where problems usually hide, and it cannot promise a PC is clean. If yours still feels wrong, run a deeper scan with a dedicated security tool too.' 12.5 'Normal' '#9A6700' '0,14,0,0'))
 
 # 2. Privacy & telemetry - one collapsed section per group, so nothing shouts at you
 function New-Section([string]$Header) {
@@ -919,36 +952,241 @@ $ui.BtnApply.Add_Click({ Invoke-Selected $false })
 $ui.BtnRecommended.Add_Click({ Select-Recommended ([string]$ui.Tabs.SelectedItem.Tag) })
 $ui.BtnNone.Add_Click({ foreach ($o in $script:Options[[string]$ui.Tabs.SelectedItem.Tag]) { $o.CheckBox.IsChecked = $false } })
 
-function Start-SafetyScan {
+function Draw-SeverityChart {
+    <# A doughnut drawn with arcs. Each slice is also a row in the legend, with its name and count. #>
+    $script:ChartCanvas.Children.Clear()
+    $cx = 86.0; $cy = 86.0; $r = 64.0; $thick = 24.0
+    $total = 0; foreach ($k in $script:SevCounts.Keys) { $total += [int]$script:SevCounts[$k] }
+    $ring = New-Object System.Windows.Shapes.Ellipse
+    $ring.Width = $r * 2; $ring.Height = $r * 2
+    $ring.Stroke = Get-Brush '#EDE6D5'; $ring.StrokeThickness = $thick; $ring.Fill = $null
+    [System.Windows.Controls.Canvas]::SetLeft($ring, $cx - $r); [System.Windows.Controls.Canvas]::SetTop($ring, $cy - $r)
+    [void]$script:ChartCanvas.Children.Add($ring)
+    if ($total -gt 0) {
+        $angle = -90.0
+        foreach ($k in $script:SevCounts.Keys) {
+            $n = [int]$script:SevCounts[$k]
+            if ($n -le 0) { continue }
+            $sweep = 360.0 * $n / $total
+            if ($sweep -ge 359.99) {
+                $full = New-Object System.Windows.Shapes.Ellipse
+                $full.Width = $r * 2; $full.Height = $r * 2
+                $full.Stroke = Get-Brush $script:SevColours[$k]; $full.StrokeThickness = $thick; $full.Fill = $null
+                [System.Windows.Controls.Canvas]::SetLeft($full, $cx - $r); [System.Windows.Controls.Canvas]::SetTop($full, $cy - $r)
+                [void]$script:ChartCanvas.Children.Add($full)
+                break
+            }
+            $a1 = $angle * [Math]::PI / 180.0
+            $a2 = ($angle + $sweep) * [Math]::PI / 180.0
+            $p1 = [System.Windows.Point]::new($cx + $r * [Math]::Cos($a1), $cy + $r * [Math]::Sin($a1))
+            $p2 = [System.Windows.Point]::new($cx + $r * [Math]::Cos($a2), $cy + $r * [Math]::Sin($a2))
+            $fig = New-Object System.Windows.Media.PathFigure
+            $fig.StartPoint = $p1
+            $arc = New-Object System.Windows.Media.ArcSegment
+            $arc.Point = $p2
+            $arc.Size = [System.Windows.Size]::new($r, $r)
+            $arc.SweepDirection = 'Clockwise'
+            $arc.IsLargeArc = ($sweep -gt 180)
+            [void]$fig.Segments.Add($arc)
+            $geo = New-Object System.Windows.Media.PathGeometry
+            [void]$geo.Figures.Add($fig)
+            $path = New-Object System.Windows.Shapes.Path
+            $path.Data = $geo
+            $path.Stroke = Get-Brush $script:SevColours[$k]
+            $path.StrokeThickness = $thick
+            $path.ToolTip = '{0}: {1}' -f $k, $n
+            [void]$script:ChartCanvas.Children.Add($path)
+            $angle += $sweep
+        }
+    }
+    $centre = New-Object System.Windows.Controls.StackPanel
+    $centre.Width = 96
+    [void]$centre.Children.Add((New-Text "$total" 30 'SemiBold' '#0F1B1C' '0' 'Fraunces, Georgia'))
+    [void]$centre.Children.Add((New-Text $(if ($total -eq 1) { 'finding' } else { 'findings' }) 12 'Normal' '#4B5B5C' '0'))
+    foreach ($c in $centre.Children) { $c.TextAlignment = 'Center' }
+    [System.Windows.Controls.Canvas]::SetLeft($centre, $cx - 48); [System.Windows.Controls.Canvas]::SetTop($centre, $cy - 26)
+    [void]$script:ChartCanvas.Children.Add($centre)
+
+    $script:LegendPanel.Children.Clear()
+    $allBtn = New-Object System.Windows.Controls.Button
+    $allBtn.Content = New-Text $('Show everything ({0})' -f $total) 13 'SemiBold' '#0F1B1C' '0'
+    $allBtn.Margin = Get-Thick '0,0,0,6'; $allBtn.Padding = Get-Thick '10,4'
+    $allBtn.HorizontalContentAlignment = 'Left'; $allBtn.HorizontalAlignment = 'Left'
+    $allBtn.Add_Click({ $script:SevFilter = 'All'; Show-Findings })
+    [void]$script:LegendPanel.Children.Add($allBtn)
+    foreach ($k in $script:SevCounts.Keys) {
+        $n = [int]$script:SevCounts[$k]
+        $row = New-Object System.Windows.Controls.Button
+        $row.Margin = Get-Thick '0,1,0,1'; $row.Padding = Get-Thick '6,3'
+        $row.HorizontalContentAlignment = 'Left'; $row.HorizontalAlignment = 'Left'
+        $row.Background = $null; $row.BorderThickness = Get-Thick '0'
+        $row.Cursor = 'Hand'
+        $row.IsEnabled = ($n -gt 0)
+        $row.Opacity = $(if ($n -gt 0) { 1.0 } else { 0.45 })
+        $row.Tag = $k
+        $inner = New-Object System.Windows.Controls.StackPanel
+        $inner.Orientation = 'Horizontal'
+        $key = New-Object System.Windows.Shapes.Rectangle
+        $key.Width = 13; $key.Height = 13; $key.Fill = Get-Brush $script:SevColours[$k]
+        $key.Margin = Get-Thick '0,0,8,0'; $key.VerticalAlignment = 'Center'
+        [void]$inner.Children.Add($key)
+        [void]$inner.Children.Add((New-Text ('{0} - {1}' -f $k, $script:SevMeaning[$k]) 13 'Normal' '#0F1B1C' '0,0,10,0'))
+        [void]$inner.Children.Add((New-Text "$n" 13 'SemiBold' '#0F1B1C' '0'))
+        $row.Content = $inner
+        $row.ToolTip = "Show only $k findings"
+        $row.Add_Click({ $script:SevFilter = [string]$this.Tag; Show-Findings })
+        [void]$script:LegendPanel.Children.Add($row)
+    }
+}
+
+function New-FindingCard($f) {
+    $b = New-Object System.Windows.Controls.Border
+    $b.Background = Get-Brush '#FFFDF8'
+    $b.BorderBrush = Get-Brush '#E6DFCC'
+    $b.BorderThickness = Get-Thick '1,1,1,1'
+    $b.Margin = Get-Thick '0,0,0,10'
+    $b.Padding = Get-Thick '14,12'
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $head = New-Object System.Windows.Controls.StackPanel
+    $head.Orientation = 'Horizontal'
+    $chip = New-Object System.Windows.Controls.Border
+    $chip.Background = Get-Brush $script:SevColours[$f.Severity]
+    $chip.Padding = Get-Thick '8,2'; $chip.Margin = Get-Thick '0,0,10,0'; $chip.VerticalAlignment = 'Center'
+    $chipText = New-Text ($f.Severity.ToUpper()) 11 'SemiBold' '#FFFDF8' '0'
+    $chip.Child = $chipText
+    [void]$head.Children.Add($chip)
+    [void]$head.Children.Add((New-Text $f.Title 16 'SemiBold' '#0F1B1C' '0' 'Fraunces, Georgia'))
+    [void]$sp.Children.Add($head)
+    $facts = @("found by $($f.Source)")
+    if ($f.Confidence) { $facts += "confidence: $($f.Confidence)" }
+    if ($f.Status) { $facts += "status: $($f.Status)" }
+    if ($f.Category) { $facts += $f.Category }
+    [void]$sp.Children.Add((New-Text ($facts -join '   |   ') 12 'Normal' '#4B5B5C' '0,6,0,0'))
+    if ($f.What) { [void]$sp.Children.Add((New-Text $f.What 13.5 'Normal' '#0F1B1C' '0,8,0,0')) }
+    if ($f.Why)  { [void]$sp.Children.Add((New-Text $f.Why 13 'Normal' '#4B5B5C' '0,4,0,0')) }
+    if ($f.Path) { [void]$sp.Children.Add((New-Text ('Where: ' + $f.Path) 12.5 'Normal' '#4B5B5C' '0,6,0,0')) }
+    if ($f.Recommended) { [void]$sp.Children.Add((New-Text ('What to do: ' + $f.Recommended) 13 'SemiBold' '#117A68' '0,6,0,0')) }
+
+    if ($f.Source -eq 'Microsoft Defender' -and $f.Status -eq 'Detected') {
+        $btns = New-Object System.Windows.Controls.WrapPanel
+        $btns.Margin = Get-Thick '0,10,0,0'
+        $remove = New-Button 'Remove it'
+        $remove.Tag = $f.Id
+        $remove.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Defender' })
+        $quar = New-Button 'Quarantine'
+        $quar.IsEnabled = $false
+        $quar.ToolTip = 'Quietpane''s own quarantine arrives in the next version. For now, Remove hands it to Defender, which keeps its own copy you can restore from Windows Security.'
+        $leave = New-Button 'Leave it for now'
+        $leave.Tag = $f.Id
+        $leave.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Allow' })
+        foreach ($x in $remove, $quar, $leave) { $x.Margin = Get-Thick '0,0,8,0'; [void]$btns.Children.Add($x) }
+        [void]$sp.Children.Add($btns)
+    }
+    if ($f.Technical) {
+        $ex = New-Object System.Windows.Controls.Expander
+        $ex.Header = New-Text 'Technical details' 12.5 'SemiBold' '#4B5B5C' '0'
+        $ex.Margin = Get-Thick '0,8,0,0'
+        $tech = New-Text $f.Technical 12 'Normal' '#4B5B5C' '0,6,0,0'
+        $tech.FontFamily = New-Object System.Windows.Media.FontFamily('Consolas, Courier New')
+        $inner = New-Object System.Windows.Controls.StackPanel
+        [void]$inner.Children.Add($tech)
+        if ($f.Sha256) { [void]$inner.Children.Add((New-Text ('SHA256: ' + $f.Sha256) 12 'Normal' '#4B5B5C' '0,6,0,0')) }
+        $ex.Content = $inner
+        [void]$sp.Children.Add($ex)
+    }
+    $b.Child = $sp
+    return $b
+}
+
+function Show-Findings {
+    $script:FindingsPanel.Children.Clear()
+    $list = @($script:ScanFindings)
+    if ($script:SevFilter -ne 'All') { $list = @($list | Where-Object { $_.Severity -eq $script:SevFilter }) }
+    if (-not $list.Count) {
+        $msg = if ($script:SevFilter -eq 'All') { 'Nothing was found. Lovely.' } else { "Nothing at $($script:SevFilter) level." }
+        [void]$script:FindingsPanel.Children.Add((New-Text $msg 13.5 'SemiBold' '#117A68' '0,4,0,0'))
+        return
+    }
+    $rank = @{ Critical = 0; High = 1; Medium = 2; Low = 3; Info = 4 }
+    $shown = @($list | Sort-Object { $rank[$_.Severity] } | Select-Object -First 60)
+    $heading = if ($script:SevFilter -eq 'All') { 'What we found' } else { "$($script:SevFilter) findings" }
+    [void]$script:FindingsPanel.Children.Add((New-Text $heading 16 'SemiBold' '#117A68' '0,4,0,8' 'Fraunces, Georgia'))
+    foreach ($f in $shown) { [void]$script:FindingsPanel.Children.Add((New-FindingCard $f)) }
+    if ($list.Count -gt $shown.Count) {
+        [void]$script:FindingsPanel.Children.Add((New-Text ('...and {0} more in the full report.' -f ($list.Count - $shown.Count)) 12.5 'Normal' '#4B5B5C' '0,4,0,0'))
+    }
+}
+
+function Invoke-FindingAction([string]$Id, [string]$Action) {
+    $f = @($script:ScanFindings | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
+    if (-not $f) { return }
+    if ($Action -eq 'Allow') {
+        $msg = "Leave this on your PC?`n`n$($f.Title)`n$($f.Path)`n`nIt stays exactly where it is and may still be a risk. Quietpane will keep showing it, and your antivirus is not changed in any way."
+        if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Warning') -ne 'Yes') { return }
+    } else {
+        $msg = "Ask Microsoft Defender to remove this?`n`n$($f.Title)`n$($f.Path)`n`nDefender keeps its own copy, so you can restore it from Windows Security if it turns out to be a mistake."
+        if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
+    }
     $ui.LogBox.AppendText([Environment]::NewLine)
-    $scanSummary.Text = 'Having a look around... this takes a minute or three.'
-    $script:CardAdware.Value.Text = 'Checking...'
-    $script:CardAdware.Caption.Text = 'About 2 minutes - nothing is changed'
-    Start-Work -StatusText 'Checking for adware and problems (read-only, about 2 minutes)...' -Work { Invoke-QpAudit } -OnDone {
+    Set-LogVisible $true
+    Start-Work -StatusText 'Dealing with it...' -Params @{ Finding = $f; Action = $Action } -Work { param($Finding, $Action) Invoke-QpRemediate -Finding $Finding -Action $Action } -OnDone {
         param($r)
         $r = @($r)[-1]
+        if ($r) {
+            $f.Status = $r.Status
+            [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane')
+            Show-Findings
+        }
+    }
+}
+
+function Start-SafetyScan([bool]$AskDefender = $false) {
+    $ui.LogBox.AppendText([Environment]::NewLine)
+    $script:ScanStarted = Get-Date
+    $scanSummary.Text = 'Having a look around...'
+    $script:ScanProgress.Text = if ($AskDefender) { 'Step 1 of 2: Microsoft Defender is scanning. This can take a few minutes.' } else { 'Reading what Defender knows, then checking the usual hiding places. A minute or three.' }
+    $script:CardAdware.Value.Text = 'Checking...'
+    $script:CardAdware.Caption.Text = 'Nothing is changed while we look'
+    Start-Work -StatusText 'Looking for threats and problems (nothing is changed)...' -Params @{ Deep = $AskDefender } -Work {
+        param($Deep)
+        if ($Deep) { Invoke-QpThreatScan -Type Quick | Out-Null }
+        Invoke-QpAudit
+    } -OnDone {
+        param($r)
+        $r = @($r | Where-Object { $_ -and $_.PSObject.Properties['Report'] })[-1]
         if ($r -and $r.Report) {
             $script:LastReport = $r.Report
-            $scanSummary.Text = ('Scan finished: {0} high, {1} medium, {2} info. The report opened in your browser and is saved on your Desktop.' -f $r.High, $r.Medium, $r.Info)
-            if ($r.High -gt 0) {
-                $script:CardAdware.Value.Text = "$($r.High) problem(s) found"
+            $script:ScanFindings = @($r.Findings)
+            foreach ($k in @($script:SevCounts.Keys)) { $script:SevCounts[$k] = [int]$r.Counts[$k] }
+            $script:SevFilter = 'All'
+            $script:ChartPanel.Visibility = 'Visible'
+            Draw-SeverityChart
+            Show-Findings
+            $secs = [int]((Get-Date) - $script:ScanStarted).TotalSeconds
+            $scanSummary.Text = ('Checked {0} things in {1} seconds. {2} critical, {3} high, {4} medium, {5} low, {6} for information.' -f $r.Total, $secs, $r.Critical, $r.High, $r.Medium, $r.Low, $r.Info)
+            $worst = @('Critical', 'High', 'Medium', 'Low', 'Info') | Where-Object { [int]$r.Counts[$_] -gt 0 } | Select-Object -First 1
+            $script:ScanProgress.Text = if ($r.Defender -and $r.Defender.Note) { $r.Defender.Note } else { 'The full report also opened in your browser and is saved on your Desktop.' }
+            if ($worst -in 'Critical', 'High') {
+                $script:CardAdware.Value.Text = ('{0} to deal with' -f ([int]$r.Critical + [int]$r.High))
                 $script:CardAdware.Value.Foreground = Get-Brush '#A83232'
-                $script:CardAdware.Caption.Text = 'See the red items in the report that opened'
+                $script:CardAdware.Caption.Text = 'Open the Safety scan tab'
             } else {
                 $script:CardAdware.Value.Text = 'Nothing serious'
                 $script:CardAdware.Value.Foreground = Get-Brush '#117A68'
-                $script:CardAdware.Caption.Text = "$($r.Medium) thing(s) worth a look in the report"
+                $script:CardAdware.Caption.Text = ('{0} thing(s) worth a look' -f ([int]$r.Medium + [int]$r.Low))
             }
             Open-AsUser $r.Report
             Update-Buttons
         } else {
             $scanSummary.Text = 'The check did not finish. Click "Show details" at the bottom to see why.'
+            $script:ScanProgress.Text = ''
             $script:CardAdware.Value.Text = 'Did not finish'
         }
     }
 }
-$btnScan.Add_Click({ Start-SafetyScan })
-$btnHomeScan.Add_Click({ Start-SafetyScan })
+$btnScan.Add_Click({ Start-SafetyScan $false })
+$btnScanDeep.Add_Click({ Start-SafetyScan $true })
+$btnHomeScan.Add_Click({ $ui.Tabs.SelectedIndex = 1; Start-SafetyScan $false })
 
 # ---- One click
 function Show-HomeResult($r) {

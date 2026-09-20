@@ -38,6 +38,12 @@ CHANGED YOUR MIND?
 JUST WANT A CHECK-UP THAT CHANGES NOTHING?
    Double-click "Safety scan only".
 
+   The check asks Microsoft Defender what it has found and looks around
+   for the tricks adware uses. Anything found is sorted into Critical,
+   High, Medium, Low or Info, and each item says who found it. Threat
+   names come from Defender - Quietpane explains them in plain words.
+   You choose what happens next; nothing is removed behind your back.
+
 A WINDOW FULL OF CODE OPENED, OR WINDOWS ASKED "HOW DO YOU WANT TO OPEN THIS FILE?"
    You opened one of the app's own files. Close it (pick nothing) and
    double-click "Start Quietpane" instead.

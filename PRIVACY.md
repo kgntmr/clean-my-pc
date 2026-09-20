@@ -21,6 +21,8 @@ The app runs only on your PC, only when you start it, and only does what you cli
 | Feature | What it reads or changes | Where results are kept |
 |---|---|---|
 | **Scan** (read-only) | Startup entries, scheduled tasks, services, selected registry values, the hosts file, proxy and DNS settings, names and digital signatures of program files in user folders, browser **extension manifests** and **notification permission lists**, Microsoft Defender and firewall status, the running-process list, folder sizes | An HTML report saved on **your** Desktop |
+| **Microsoft Defender detections** (part of the scan) | Defender's own list of what it has found on this PC: threat names, file paths, dates and status, read through Windows' built-in Defender commands. Quietpane also works out the SHA256 of a detected file so you can look it up yourself. **Nothing is sent to Microsoft by Quietpane, and nothing is sent to us.** | Shown on screen and in the report on your Desktop |
+| **Acting on a threat** | Asks Defender to remove what Defender found, or records that you chose to leave something alone | A line per action in `%ProgramData%\Quietpane\audit.log`, and allowed items in `%ProgramData%\Quietpane\allowed.json`. Leaving something alone is Quietpane's own note: it never creates a Defender exclusion. |
 | **Telemetry tab** | Your PC's maker and graphics chip, the list of installed programs, services and scheduled tasks, to recognise brand software | Shown on screen only |
 | **Privacy, Telemetry, Apps** (only when you click Apply) | The settings, services, tasks, apps and hosts-file entries you ticked | Restore points and logs in `%ProgramData%\Quietpane\restore\` on your PC. These hold the previous values, so Undo can put them back. |
 | **Clean up space** (only when you click Apply) | The folders you ticked | Files are moved to **your Recycle Bin** |
@@ -36,7 +38,7 @@ All processing happens locally on your own device, under your control, for your 
 
 You can remove everything the app has stored at any time:
 - **Scan reports:** delete `Quietpane-Report-*.html` from your Desktop.
-- **Restore points, logs and the totals file:** delete the folder `%ProgramData%\Quietpane`, and `%ProgramData%\CleanMyPC` if you used the app under its former name. Do this after you're sure you won't need Undo.
+- **Restore points, logs, the totals file and the audit log:** delete the folder `%ProgramData%\Quietpane`, and `%ProgramData%\CleanMyPC` if you used the app under its former name. Do this after you're sure you won't need Undo.
 - **The app itself:** delete the folder you extracted it to. There is no installer and nothing else to remove.
 
 ## When you leave the app

@@ -76,11 +76,21 @@ NVIDIA is a special case: deleting its telemetry plugin breaks NVIDIA App, so Qu
 ### Privacy
 32 settings in five collapsed sections: Windows telemetry, privacy, ads and tips, background services, and browsers and other software (Edge, Chrome, Office, Intel DTT, VS Code, .NET and PowerShell). Anything already done says so.
 
-### Safety scan (read-only)
-A check for the tricks adware uses. It changes nothing and opens a report in your browser.
+### Safety scan
+Two things at once: **what Microsoft Defender has found**, and Quietpane's own look around for the tricks adware uses. Looking changes nothing.
+
+Results come back as a doughnut chart with a written legend, and a card for each finding. Click a severity to show only those. Every card says **who found it** and **how sure that is**:
+
+- **Microsoft Defender** - a real detection with a real threat name. Quietpane translates the name into plain words and sorts it into Critical, High, Medium, Low or Info. Defender's own name and classification stay on the card.
+- **Quietpane check** - our own heuristics: odd startup entries, hidden tasks, tampered programs, cracked-software traces. These are **signals, not proof**, and they never claim a malware family.
+
+Threats Defender is still holding get three buttons: **Remove it** (Defender does the removing and keeps a copy you can restore from Windows Security), **Quarantine** (arriving in the next version) and **Leave it for now**, which warns you that it stays on the PC. Leaving something alone is recorded by Quietpane only: **it never creates a Defender exclusion** and never weakens a future scan. Every action is written to `%ProgramData%\Quietpane\audit.log`.
+
+**Quietpane cannot identify a malware family by itself.** Without Defender, only the heuristics run, and the scan says so rather than implying the PC is clean.
 
 | Check | What it looks for |
 |---|---|
+| Microsoft Defender detections | Everything Defender has found, quarantined or removed, named by Defender and explained in plain words |
 | Startup entries and tasks | Items that open websites, run hidden scripts or re-create themselves. Entries pointing to programs that no longer exist are flagged as leftovers. |
 | **"What installed this?"** | For anything suspicious, the folders created within 3 minutes of it. That's usually the culprit. |
 | Hidden persistence | WMI event consumers, IFEO hijacks, Winlogon changes, AppInit_DLLs |
@@ -175,6 +185,7 @@ Removing it doesn't undo its changes: click **Undo** first if you want your PC b
 - **Run from source:** clone and double-click `Start Quietpane.cmd` (or `Safety scan only.cmd`).
 - **Build the download:** `powershell -ExecutionPolicy Bypass -File tools\build-release.ps1` creates `dist\Quietpane.zip` and prints its SHA256. The ZIP holds exactly the files in this repo; nothing is compiled.
 - **Test safely:** `.\Quietpane.ps1 -SelfTest` builds the window without showing it; add `-Snapshot file.png -SnapshotTab 0` to render it.
+- **Run the tests:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`, or add `-Live` to include the EICAR check. No real malware is used anywhere; the EICAR string is built at runtime, so it is never stored in this repository.
 - **Contribute:** the lists are plain data files in [`src/catalog/`](src/catalog), so adding a setting, app, folder or brand needs no code. Describe side effects honestly and test with **Preview** first.
 
 ---
