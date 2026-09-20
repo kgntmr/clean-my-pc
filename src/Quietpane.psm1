@@ -16,7 +16,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.2.0'
+$script:AppVersion  = '1.4.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -28,6 +28,9 @@ $script:DataRoot    = Join-Path $env:ProgramData 'Quietpane'
 # New ones go to the folder above; old ones stay readable so Undo keeps working.
 $script:LegacyDataRoot = Join-Path $env:ProgramData 'CleanMyPC'
 $script:HostsPath   = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
+$script:ComputerMaker = $null      # filled in once, when brand software is looked for
+$script:GpuNames = $null
+$script:InstalledPrograms = $null
 
 # Apps that are never removed, even if someone adds them to the catalog.
 $script:ProtectedAppPattern = '^(Microsoft\.WindowsStore|Microsoft\.StorePurchaseApp|Microsoft\.DesktopAppInstaller|Microsoft\.SecHealthUI|Microsoft\.Windows\.Photos|Microsoft\.WindowsCamera|Microsoft\.WindowsCalculator|Microsoft\.WindowsNotepad|Microsoft\.Paint|Microsoft\.ScreenSketch|Microsoft\.WindowsTerminal|Microsoft\.Winget\.Source|Microsoft\.VCLibs.*|Microsoft\.NET\..*|Microsoft\.UI\.Xaml.*|Microsoft\.WindowsAppRuntime.*|MicrosoftCorporationII\.WinAppRuntime.*|Microsoft\.Services\.Store.*|Microsoft\..*Extension[s]?|Microsoft\.LanguageExperiencePack.*|NVIDIACorp\..*|RealtekSemiconductorCorp\..*|AppUp\.Intel.*|Microsoft\.MicrosoftEdge\.Stable|Microsoft\.MicrosoftEdgeDevToolsClient)$'
@@ -67,7 +70,7 @@ function Test-QpAdmin {
 }
 
 function Get-QpCatalog {
-    param([ValidateSet('privacy', 'apps', 'cleanup', 'nvidia')][string]$Name)
+    param([ValidateSet('privacy', 'apps', 'cleanup', 'vendors')][string]$Name)
     Import-PowerShellDataFile -Path (Join-Path $script:CatalogRoot "$Name.psd1")
 }
 
@@ -117,6 +120,56 @@ function Get-QpRegValue {
 }
 
 #endregion
+
+function Get-QpSystemUsage {
+    <# Live disk and memory figures for the Home screen. Read-only. #>
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $sysDrive = ($env:SystemDrive, 'C:')[[int][string]::IsNullOrEmpty($env:SystemDrive)]
+    $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$sysDrive'" -ErrorAction SilentlyContinue
+    $memTotal = if ($os) { [int64]$os.TotalVisibleMemorySize * 1KB } else { 0 }
+    $memFree = if ($os) { [int64]$os.FreePhysicalMemory * 1KB } else { 0 }
+    [pscustomobject]@{
+        Drive     = $sysDrive
+        DiskTotal = if ($disk) { [int64]$disk.Size } else { 0 }
+        DiskFree  = if ($disk) { [int64]$disk.FreeSpace } else { 0 }
+        DiskUsed  = if ($disk) { [int64]($disk.Size - $disk.FreeSpace) } else { 0 }
+        MemTotal  = $memTotal
+        MemFree   = $memFree
+        MemUsed   = $memTotal - $memFree
+    }
+}
+
+function Get-QpTotals {
+    <# Running totals of what this tool has freed on this PC, so the Home screen can show progress. #>
+    $file = Join-Path $script:DataRoot 'totals.json'
+    $empty = [pscustomobject]@{ SpaceFreedBytes = [int64]0; MemoryFreedBytes = [int64]0; Runs = 0; LastRun = $null }
+    if (-not (Test-Path $file)) { return $empty }
+    try {
+        $t = Get-Content $file -Raw | ConvertFrom-Json
+        [pscustomobject]@{
+            SpaceFreedBytes  = [int64]$t.SpaceFreedBytes
+            MemoryFreedBytes = [int64]$t.MemoryFreedBytes
+            Runs             = [int]$t.Runs
+            LastRun          = $t.LastRun
+        }
+    } catch { $empty }
+}
+
+function Add-QpTotals {
+    param([int64]$SpaceBytes = 0, [int64]$MemoryBytes = 0, [switch]$CountRun)
+    if ($SpaceBytes -le 0 -and $MemoryBytes -le 0 -and -not $CountRun) { return }
+    try {
+        $t = Get-QpTotals
+        $new = [pscustomobject]@{
+            SpaceFreedBytes  = $t.SpaceFreedBytes + [Math]::Max(0, $SpaceBytes)
+            MemoryFreedBytes = $t.MemoryFreedBytes + [Math]::Max(0, $MemoryBytes)
+            Runs             = $t.Runs + [int]([bool]$CountRun)
+            LastRun          = (Get-Date).ToString('yyyy-MM-dd HH:mm')
+        }
+        if (-not (Test-Path $script:DataRoot)) { New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null }
+        $new | ConvertTo-Json | Set-Content -Path (Join-Path $script:DataRoot 'totals.json') -Encoding UTF8
+    } catch { Write-QpLog "Could not record the totals: $($_.Exception.Message)" 'WARN' }
+}
 
 #region ---------------------------------------------------------------- restore points
 
@@ -337,6 +390,7 @@ function Invoke-QpAction {
         'Task'            { Invoke-QpTaskAction -Action $Action -Preview:$Preview }
         'Reg'             { Invoke-QpRegAction -Action $Action -Preview:$Preview }
         'Env'             { Invoke-QpEnvAction -Action $Action -Preview:$Preview }
+        'Hosts'           { Add-QpHostsBlock -HostNames $Action.Hosts -Tag $Action.Tag -Preview:$Preview }
         'VSCodeTelemetry' { Invoke-QpVSCodeTelemetry -Preview:$Preview }
         default           { Write-QpLog "Unknown action type '$($Action.Type)'" 'WARN' }
     }
@@ -361,6 +415,10 @@ function Test-QpActionApplied {
             return ($cur.Exists -and ("$($cur.Value)" -eq "$($Action.Value)"))
         }
         'Env' { return ([Environment]::GetEnvironmentVariable($Action.Name, 'Machine') -eq $Action.Value) }
+        'Hosts' {
+            $lines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
+            return (@($Action.Hosts | Where-Object { -not (Test-QpHostBlocked -Lines $lines -HostName $_) }).Count -eq 0)
+        }
         'VSCodeTelemetry' {
             $file = Join-Path $env:APPDATA 'Code\User\settings.json'
             if (-not (Test-Path (Join-Path $env:APPDATA 'Code'))) { return $null }
@@ -528,6 +586,7 @@ function Invoke-QpCleanup {
         Write-QpLog ("Preview finished. About {0} could be freed." -f (Format-QpBytes $total)) 'OK'
     } else {
         Write-QpLog ("About {0} moved to the Recycle Bin. Empty the Recycle Bin yourself when you are happy - this tool never permanently deletes." -f (Format-QpBytes $total)) 'OK'
+        Add-QpTotals -SpaceBytes $total
         if ($own) { Stop-QpSession }
     }
     [pscustomobject]@{ BytesFreed = [int64]$total }
@@ -564,43 +623,145 @@ function Remove-QpHostsBlock {
     Write-QpLog "Removed hosts entries tagged '$Tag'" 'OK'
 }
 
-function Get-QpNvidiaStatus {
-    $cat = Get-QpCatalog nvidia
-    $lines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
-    [pscustomobject]@{
-        NvidiaAppInstalled = (Test-Path (Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVIDIA App'))
-        NvidiaGpu          = [bool](Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object Name -match 'NVIDIA')
-        HostsBlocked       = @($cat.Hosts | Where-Object { Test-QpHostBlocked -Lines $lines -HostName $_ }).Count
-        HostsTotal         = @($cat.Hosts).Count
-        FlagsSet           = @($cat.Flags | Where-Object { "$((Get-QpRegValue -Path $_.Path -Name $_.Name).Value)" -eq "$($_.Value)" }).Count
-        FlagsTotal         = @($cat.Flags).Count
-        TelemetryPlugin    = (Test-Path (Join-Path $env:ProgramFiles 'NVIDIA Corporation\NvTelemetry\plugin\NvTelemetry64.dll'))
-    }
+function Test-QpNeverTouch {
+    # Drivers, audio and the bits people rely on are off limits, whatever a catalog entry says.
+    param([string]$Name)
+    if (-not $Name) { return $false }
+    foreach ($p in (Get-QpCatalog vendors).NeverTouch) { if ($Name -like $p -or $Name -eq $p) { return $true } }
+    return $false
 }
 
-function Invoke-QpNvidia {
-    param([string[]]$Ids, [switch]$Preview)
-    if (-not $Ids) { Write-QpLog 'Nothing selected.' 'WARN'; return }
-    $cat = Get-QpCatalog nvidia
-    $own = (-not $Preview) -and (-not $script:Session)
-    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'nvidia' }
-    if ($Ids -contains 'nv.hosts') {
-        Write-QpLog 'Block NVIDIA telemetry servers (hosts file)' 'STEP'
-        Add-QpHostsBlock -HostNames $cat.Hosts -Tag 'Quietpane-NVIDIA' -Preview:$Preview
+function Test-QpVendorPresent {
+    # Is this brand's software actually on this PC?
+    param($Vendor)
+    $d = $Vendor.Detect
+    if (-not $d) { return $false }
+    if ($d.Manufacturer) {
+        if (-not $script:ComputerMaker) { $script:ComputerMaker = [string](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).Manufacturer }
+        if ($script:ComputerMaker -match $d.Manufacturer) { return $true }
     }
-    if ($Ids -contains 'nv.flags') {
-        Write-QpLog "Set NVIDIA's own telemetry opt-out flags" 'STEP'
-        foreach ($f in $cat.Flags) {
-            Invoke-QpRegAction -Action @{ Path = $f.Path; Name = $f.Name; Value = $f.Value; Kind = 'DWord' } -Preview:$Preview
+    if ($d.Gpu) {
+        if ($null -eq $script:GpuNames) { $script:GpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ' | ' }
+        if ($script:GpuNames -match $d.Gpu) { return $true }
+    }
+    foreach ($p in @($d.Paths)) { if ($p -and (Test-Path ([Environment]::ExpandEnvironmentVariables($p)))) { return $true } }
+    foreach ($s in @($d.Services)) { if ($s -and (Get-Service -Name $s -ErrorAction SilentlyContinue)) { return $true } }
+    return $false
+}
+
+function Get-QpInstalledPrograms {
+    # Ordinary installed programs (not Store apps), from the places Windows lists them.
+    if ($script:InstalledPrograms) { return $script:InstalledPrograms }
+    $keys = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    $script:InstalledPrograms = @(
+        foreach ($k in $keys) {
+            Get-ItemProperty -Path $k -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and -not $_.SystemComponent } | ForEach-Object {
+                [pscustomobject]@{
+                    Name      = [string]$_.DisplayName
+                    Publisher = [string]$_.Publisher
+                    Uninstall = [string]$(if ($_.QuietUninstallString) { $_.QuietUninstallString } else { $_.UninstallString })
+                    Quiet     = [bool]$_.QuietUninstallString
+                    Key       = $_.PSChildName
+                }
+            }
+        }
+    )
+    return $script:InstalledPrograms
+}
+
+function Get-QpVendorStatus {
+    <#
+        What brand and hardware software is on this PC, and which of its background bits are still on.
+        Read-only. Vendors and items that are not on this PC are left out entirely.
+    #>
+    $hostLines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
+    $programs = Get-QpInstalledPrograms
+    $result = foreach ($v in (Get-QpCatalog vendors).Vendors) {
+        if (-not (Test-QpVendorPresent $v)) { continue }
+        $items = foreach ($item in @($v.Items)) {
+            $blocked = @($item.Actions | Where-Object { $_.Name -and (Test-QpNeverTouch $_.Name) })
+            if ($blocked.Count) { continue }
+            $states = @($item.Actions | ForEach-Object { Test-QpActionApplied $_ })
+            $relevant = @($states | Where-Object { $null -ne $_ })
+            if ($relevant.Count -eq 0) { continue }   # nothing of this item exists here - don't mention it
+            $done = @($relevant | Where-Object { $_ }).Count
+            $status = if ($done -eq $relevant.Count) { 'Applied' } elseif ($done -gt 0) { 'Partial' } else { 'NotApplied' }
+            [pscustomobject]@{
+                Id = $item.Id; VendorId = $v.Id; Title = $item.Title; Description = $item.Description
+                Recommended = [bool]$item.Recommended; Status = $status
+            }
+        }
+        $junk = foreach ($j in @($v.Junk)) {
+            foreach ($p in @($programs | Where-Object { $_.Name -match $j.Match -and $_.Uninstall })) {
+                if (Test-QpNeverTouch $p.Name) { continue }
+                [pscustomobject]@{ VendorId = $v.Id; Title = $j.Title; Why = $j.Why; Name = $p.Name; Key = $p.Key; Uninstall = $p.Uninstall; Quiet = $p.Quiet }
+            }
+        }
+        $items = @($items); $junk = @($junk)
+        if ($items.Count -eq 0 -and $junk.Count -eq 0) { continue }
+        [pscustomobject]@{
+            Id = $v.Id; Name = $v.Name; Kind = $v.Kind; Note = $v.Note
+            Items = $items; Junk = $junk
+            Open = @($items | Where-Object { $_.Status -ne 'Applied' }).Count
+        }
+    }
+    return @($result)
+}
+
+function Invoke-QpVendor {
+    param([string[]]$Ids, [switch]$Preview)
+    if (-not $Ids) { Write-QpLog 'Pick at least one thing first.' 'WARN'; return }
+    $items = @(foreach ($v in (Get-QpCatalog vendors).Vendors) { foreach ($i in @($v.Items)) { if ($Ids -contains $i.Id) { $i } } })
+    if ($items.Count -eq 0) { Write-QpLog 'Pick at least one thing first.' 'WARN'; return }
+    $own = (-not $Preview) -and (-not $script:Session)
+    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'brands' }
+    $touchedHosts = $false
+    foreach ($item in $items) {
+        Write-QpLog $item.Title 'STEP'
+        foreach ($a in $item.Actions) {
+            if ($a.Name -and (Test-QpNeverTouch $a.Name)) { Write-QpLog "$($a.Name) is on the protected list - left alone" 'SKIP'; continue }
+            if ($a.Type -eq 'Hosts') { $touchedHosts = $true }
+            Invoke-QpAction -Action $a -Preview:$Preview
         }
     }
     if ($Preview) {
         Write-QpLog 'Preview finished. Nothing was changed.' 'OK'
     } else {
-        & ipconfig.exe /flushdns | Out-Null
-        Write-QpLog 'NVIDIA App, driver updates and game optimization are unaffected. Re-run this after NVIDIA App updates.' 'INFO'
+        if ($touchedHosts) { & ipconfig.exe /flushdns | Out-Null }
+        Write-QpLog 'The apps themselves still open and work. Run this again after a big brand-software update.' 'INFO'
         if ($own) { Stop-QpSession }
     }
+}
+
+function Invoke-QpVendorUninstall {
+    <#
+        Runs the program's own uninstaller. The window always asks first, one program at a time.
+        This CANNOT be undone - the program has to be downloaded again from its maker.
+    #>
+    param([string[]]$Keys)
+    $all = Get-QpVendorStatus
+    $targets = @(foreach ($v in $all) { foreach ($j in $v.Junk) { if ($Keys -contains $j.Key) { $j } } })
+    if ($targets.Count -eq 0) { Write-QpLog 'Nothing to remove.' 'WARN'; return }
+    foreach ($t in $targets) {
+        Write-QpLog "Removing $($t.Name) using its own uninstaller (this cannot be undone)" 'STEP'
+        try {
+            $cmd = $t.Uninstall.Trim()
+            if ($cmd -match '^"([^"]+)"\s*(.*)$') { $exe = $matches[1]; $args = $matches[2] }
+            elseif ($cmd -match '^(\S+\.exe)\s*(.*)$') { $exe = $matches[1]; $args = $matches[2] }
+            else { $exe = $cmd; $args = '' }
+            if ($exe -match '(?i)msiexec') { $args = ($args -replace '(?i)/I', '/X'); if ($args -notmatch '(?i)/qn|/quiet|/passive') { $args += ' /passive /norestart' } }
+            $p = if ($args) { Start-Process -FilePath $exe -ArgumentList $args -PassThru -Wait -ErrorAction Stop } else { Start-Process -FilePath $exe -PassThru -Wait -ErrorAction Stop }
+            Write-QpLog "$($t.Name): uninstaller finished (exit code $($p.ExitCode))" 'OK'
+        } catch {
+            Write-QpLog "$($t.Name) could not be removed automatically: $($_.Exception.Message). You can remove it from Settings > Apps." 'WARN'
+        }
+    }
+    $script:InstalledPrograms = $null
+    Write-QpLog 'Removed programs can be installed again from the maker''s website.' 'INFO'
 }
 
 #endregion
@@ -611,24 +772,22 @@ function Get-QpRecommendedPlan {
     <# What "Quiet my PC now" would do on this PC: only recommended items that are not done yet. Read-only. #>
     $status = Get-QpPrivacyStatus
     $privacy = @((Get-QpCatalog privacy).Items | Where-Object { $_.Recommended -and $status[$_.Id] -in 'NotApplied', 'Partial' })
-    $nv = Get-QpNvidiaStatus
-    $nvIds = @()
-    if ($nv.NvidiaGpu) {
-        if ($nv.HostsBlocked -lt $nv.HostsTotal) { $nvIds += 'nv.hosts' }
-        if ($nv.FlagsSet -lt $nv.FlagsTotal) { $nvIds += 'nv.flags' }
-    }
+    # Brand and hardware items: only the recommended switch-offs. Uninstalling anything is never automatic.
+    $vendors = Get-QpVendorStatus
+    $vendorItems = @(foreach ($v in $vendors) { $v.Items | Where-Object { $_.Recommended -and $_.Status -ne 'Applied' } })
     $apps = @(Get-QpBloatApps | Where-Object { $_.Recommended })
     $clean = @(Get-QpCleanupTargets | Where-Object { $_.Recommended -and $_.SizeBytes -gt 0 })
     [pscustomobject]@{
         PrivacyIds    = @($privacy | ForEach-Object { $_.Id })
         PrivacyTitles = @($privacy | ForEach-Object { $_.Title })
-        NvidiaIds     = @($nvIds)
-        HasNvidia     = [bool]$nv.NvidiaGpu
+        VendorIds     = @($vendorItems | ForEach-Object { $_.Id })
+        VendorTitles  = @($vendorItems | ForEach-Object { $_.Title })
+        VendorNames   = @($vendors | Where-Object { @($_.Items | Where-Object { $_.Recommended -and $_.Status -ne 'Applied' }).Count } | ForEach-Object { $_.Name })
         AppNames      = @($apps | ForEach-Object { $_.Name })
         AppTitles     = @($apps | ForEach-Object { $_.Title })
         CleanupIds    = @($clean | ForEach-Object { $_.Id })
         CleanupBytes  = [int64](($clean | Measure-Object -Property SizeBytes -Sum).Sum)
-        IsEmpty       = (-not $privacy -and -not $nvIds -and -not $apps -and -not $clean)
+        IsEmpty       = (-not $privacy -and -not $vendorItems -and -not $apps -and -not $clean)
     }
 }
 
@@ -644,8 +803,9 @@ function Invoke-QpRecommended {
     }
     Start-QpSession 'one-click'
     $restore = $script:Session.Path
+    $before = Get-QpSystemUsage
     if ($plan.PrivacyIds.Count) { Invoke-QpPrivacy -Ids $plan.PrivacyIds }
-    if ($plan.NvidiaIds.Count)  { Invoke-QpNvidia -Ids $plan.NvidiaIds }
+    if ($plan.VendorIds.Count)  { Invoke-QpVendor -Ids $plan.VendorIds }
     if ($plan.AppNames.Count)   { Invoke-QpRemoveApps -Names $plan.AppNames -Deprovision }
     $freed = 0
     if ($plan.CleanupIds.Count) {
@@ -653,12 +813,19 @@ function Invoke-QpRecommended {
         if ($r) { $freed = $r.BytesFreed }
     }
     $entries = @($script:Session.Entries)
+    # Services and startup items that were switched off release memory straight away; a restart frees more.
+    Start-Sleep -Seconds 2
+    $after = Get-QpSystemUsage
+    $memFreed = [int64][Math]::Max(0, $before.MemUsed - $after.MemUsed)
+    if ($memFreed -gt 0) { Write-QpLog ("Memory in use dropped by about {0}. A restart usually frees more." -f (Format-QpBytes $memFreed)) 'OK' }
+    Add-QpTotals -MemoryBytes $memFreed -CountRun
     $summary = [pscustomobject]@{
         Nothing       = $false
         Settings      = $plan.PrivacyIds.Count
         AppsRemoved   = @($entries | Where-Object { $_.Type -eq 'Appx' }).Count
-        NvidiaBlocked = ($plan.NvidiaIds.Count -gt 0)
+        BrandsQuieted = @($plan.VendorNames)
         BytesFreed    = [int64]$freed
+        MemoryFreed   = $memFreed
         RestorePoint  = $restore
     }
     Stop-QpSession
@@ -968,8 +1135,21 @@ function Invoke-QpAudit {
     $open = @((Get-QpCatalog privacy).Items | Where-Object { $status[$_.Id] -in 'NotApplied', 'Partial' -and $_.Recommended })
     if ($open.Count) { Add-Finding 'Privacy & telemetry' 'Medium' "$($open.Count) recommended privacy setting(s) are not fully applied yet" (($open | ForEach-Object { "- $($_.Title)" + $(if ($status[$_.Id] -eq 'Partial') { ' (partly done)' } else { '' }) }) -join "`n") }
     else { Add-Finding 'Privacy & telemetry' 'Info' 'All recommended privacy settings are applied' '' }
-    $nv = Get-QpNvidiaStatus
-    if ($nv.NvidiaAppInstalled -and $nv.HostsBlocked -lt $nv.HostsTotal) { Add-Finding 'Privacy & telemetry' 'Medium' "NVIDIA telemetry is not blocked ($($nv.HostsBlocked)/$($nv.HostsTotal) servers)" 'Use the NVIDIA tab. Do NOT delete NVIDIA''s telemetry plugin - that breaks NVIDIA App.' }
+    # ---- 10b. Brand and hardware software (whatever came with this PC)
+    Write-QpLog 'Looking for brand software that came with this PC...' 'INFO'
+    foreach ($v in (Get-QpVendorStatus)) {
+        $open = @($v.Items | Where-Object { $_.Status -ne 'Applied' })
+        if ($open.Count) {
+            $detail = (($open | ForEach-Object { "- $($_.Title)" }) -join "`n") + "`n`n" + $v.Note + "`nSwitch these off in the Telemetry tab, or use the one-click button on the Home screen."
+            Add-Finding 'Brand & hardware software' 'Medium' "$($v.Name): $($open.Count) background item(s) still switched on" $detail
+        } else {
+            Add-Finding 'Brand & hardware software' 'Info' "$($v.Name): background tracking is already switched off" $v.Note
+        }
+        if ($v.Junk.Count) {
+            $detail = (($v.Junk | ForEach-Object { "- $($_.Name): $($_.Why)" }) -join "`n") + "`nThese are ordinary programs. Quietpane only removes one if you ask it to, and removing cannot be undone."
+            Add-Finding 'Brand & hardware software' 'Info' "$($v.Name): $($v.Junk.Count) extra program(s) you could remove" $detail
+        }
+    }
 
     # ---- 11. Performance snapshot
     Write-QpLog 'Taking a performance snapshot...' 'INFO'
@@ -1069,17 +1249,18 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
             [void]$sb.Append(('<div class="f {0}"><span class="sev">{0}</span>{1}{2}</div>' -f $f.Severity, (& $enc $f.Title), $(if ($f.Detail) { '<pre>' + (& $enc $f.Detail) + '</pre>' } else { '' })))
         }
     }
-    [void]$sb.Append(('<footer>High = act on it &middot; Medium = review it &middot; Info = for your information.<br>This report was created on this PC and was not sent anywhere. It describes your PC, so review it before sharing it with anyone.<br>Quietpane {0} &middot; free and open source (MIT) &middot; Developed by <a href="{1}" rel="noopener noreferrer">KomodoWorks.com</a> &middot; <a href="mailto:{2}">{2}</a></footer></div></main></body></html>' -f $script:AppVersion, $brandUrl, $script:Brand.Email))
+    [void]$sb.Append(('<footer>High = act on it &middot; Medium = review it &middot; Info = for your information.<br>This report was created on this PC and was not sent anywhere. It describes your PC, so review it before sharing it with anyone.<br><b>A good start, not a guarantee.</b> This check looks at the places problems usually hide, but it cannot promise a PC is clean. If yours still feels wrong, run a deeper scan with a dedicated security tool as well.<br>Quietpane {0} &middot; free and open source (MIT) &middot; Developed by <a href="{1}" rel="noopener noreferrer">KomodoWorks.com</a> &middot; <a href="mailto:{2}">{2}</a></footer></div></main></body></html>' -f $script:AppVersion, $brandUrl, $script:Brand.Email))
     return $sb.ToString()
 }
 
 #endregion
 
 Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes,
+    Get-QpSystemUsage, Get-QpTotals,
     Get-QpRestorePoints, Invoke-QpUndo,
     Get-QpPrivacyStatus, Invoke-QpPrivacy,
     Get-QpBloatApps, Invoke-QpRemoveApps,
     Get-QpCleanupTargets, Invoke-QpCleanup,
-    Get-QpNvidiaStatus, Invoke-QpNvidia,
+    Get-QpVendorStatus, Invoke-QpVendor, Invoke-QpVendorUninstall,
     Get-QpRecommendedPlan, Invoke-QpRecommended,
     Invoke-QpAudit

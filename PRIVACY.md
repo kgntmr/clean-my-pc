@@ -21,8 +21,10 @@ The app runs only on your PC, only when you start it, and only does what you cli
 | Feature | What it reads or changes | Where results are kept |
 |---|---|---|
 | **Scan** (read-only) | Startup entries, scheduled tasks, services, selected registry values, the hosts file, proxy and DNS settings, names and digital signatures of program files in user folders, browser **extension manifests** and **notification permission lists**, Microsoft Defender and firewall status, the running-process list, folder sizes | An HTML report saved on **your** Desktop |
-| **Privacy, NVIDIA, Apps** (only when you click Apply) | The settings, services, tasks, apps and hosts-file entries you ticked | Restore points and logs in `%ProgramData%\Quietpane\restore\` on your PC. These hold the previous values, so Undo can put them back. |
+| **Telemetry tab** | Your PC's maker and graphics chip, the list of installed programs, services and scheduled tasks, to recognise brand software | Shown on screen only |
+| **Privacy, Telemetry, Apps** (only when you click Apply) | The settings, services, tasks, apps and hosts-file entries you ticked | Restore points and logs in `%ProgramData%\Quietpane\restore\` on your PC. These hold the previous values, so Undo can put them back. |
 | **Clean up space** (only when you click Apply) | The folders you ticked | Files are moved to **your Recycle Bin** |
+| **Home screen bars** | Free space on your system drive, and how much memory is in use, read from Windows | Shown on screen. Totals of what the app has freed are kept in `%ProgramData%\Quietpane\totals.json` (two numbers, a count of runs and the date of the last one). Nothing else is recorded, and none of it leaves your PC. |
 
 **What the scan does not read:** your browsing history, passwords, cookies, emails, messages, documents or the contents of web pages.
 
@@ -34,7 +36,7 @@ All processing happens locally on your own device, under your control, for your 
 
 You can remove everything the app has stored at any time:
 - **Scan reports:** delete `Quietpane-Report-*.html` from your Desktop.
-- **Restore points and logs:** delete the folder `%ProgramData%\Quietpane`, and `%ProgramData%\CleanMyPC` if you used the app under its former name. Do this after you're sure you won't need Undo.
+- **Restore points, logs and the totals file:** delete the folder `%ProgramData%\Quietpane`, and `%ProgramData%\CleanMyPC` if you used the app under its former name. Do this after you're sure you won't need Undo.
 - **The app itself:** delete the folder you extracted it to. There is no installer and nothing else to remove.
 
 ## When you leave the app

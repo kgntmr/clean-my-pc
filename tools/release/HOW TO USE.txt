@@ -20,6 +20,16 @@ STEP 3 - CLICK ONE BUTTON
    Click the big "Quiet my PC now" button, then "Yes".
    It takes about a minute. Restart your PC when it says "All done!".
 
+   It also quietens the extras your laptop maker left running - MSI, ASUS,
+   Dell, HP, Lenovo, Acer - and the Intel, AMD or NVIDIA reporting bits,
+   if your PC has any. Your drivers are never touched.
+
+
+A GOOD START, NOT A GUARANTEE
+   Quietpane clears out the usual troublemakers, but it cannot promise a
+   PC is clean. If yours still feels wrong afterwards, run a deeper scan
+   with a dedicated security tool too.
+
 
 CHANGED YOUR MIND?
    Click "Undo everything" straight away, or open Quietpane again later
