@@ -18,11 +18,13 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.6.0'
+$script:AppVersion  = '1.7.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
 $script:LogFile     = $null
+$script:ProgressSink = $null      # where "where the check has got to" is sent, if anyone is listening
+$script:CancelCheck = $null       # how the engine asks whether the user has pressed Stop
 $script:Session     = $null
 $script:CatalogRoot = Join-Path $PSScriptRoot 'catalog'
 $script:DataRoot    = Join-Path $env:ProgramData 'Quietpane'
@@ -64,6 +66,42 @@ function Write-QpLog {
     $line = '[{0}] {1,-7} {2}' -f (Get-Date -Format 'HH:mm:ss'), $Level, $Message
     if ($script:LogFile) { try { Add-Content -Path $script:LogFile -Value $line -Encoding UTF8 } catch { } }
     if ($script:LogSink) { & $script:LogSink $line } else { Write-Host $line }
+}
+
+function Set-QpProgressSink {
+    <# Where the engine says how far along it is. Purely for show - it changes nothing. #>
+    param([scriptblock]$Sink)
+    $script:ProgressSink = $Sink
+}
+
+function Write-QpProgress {
+    <# One update: which step, what is being looked at, how much has been looked at so far. #>
+    param(
+        [string]$Stage = '', [int]$Step = 0, [int]$Of = 0,
+        [string]$Object = '', [int]$Scanned = 0, [int]$Found = 0
+    )
+    if (-not $script:ProgressSink) { return }
+    # A progress update must never be able to break a check, so it is never allowed to throw.
+    try {
+        & $script:ProgressSink ([pscustomobject]@{
+            Stage = $Stage; Step = $Step; Of = $Of; Object = $Object
+            Scanned = $Scanned; Found = $Found; At = (Get-Date)
+        })
+    } catch { }
+}
+
+function Set-QpCancelCheck {
+    <#
+        Gives the engine a way to ask "has the user pressed Stop?". It is polled between steps, so a
+        check always stops at a safe point - never half way through writing anything.
+    #>
+    param([scriptblock]$Check)
+    $script:CancelCheck = $Check
+}
+
+function Test-QpCancelled {
+    if (-not $script:CancelCheck) { return $false }
+    try { return [bool](& $script:CancelCheck) } catch { return $false }
 }
 
 function Test-QpAdmin {
@@ -996,14 +1034,36 @@ function Invoke-QpThreatScan {
     }
     if ($state.ThirdParty.Count) { Write-QpLog $state.Note 'INFO' }
     $sw = [Diagnostics.Stopwatch]::StartNew()
+    $scanArgs = @{ ErrorAction = 'Stop' }
+    if ($Type -eq 'Custom') {
+        if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { Write-QpLog 'That folder could not be found - nothing scanned.' 'WARN'; return [pscustomobject]@{ Ran = $false; Findings = @(); State = $state } }
+        Write-QpLog "Asking Defender to scan $Path ..." 'STEP'
+        $scanArgs['ScanType'] = 'CustomScan'; $scanArgs['ScanPath'] = $Path
+    } else {
+        Write-QpLog "Asking Defender to run a $($Type.ToLower()) scan. This is Defender's own engine, not ours." 'STEP'
+        $scanArgs['ScanType'] = "$($Type)Scan"
+    }
+    # Run it as a job where we can, so the window stays responsive and Stop works while Defender is busy.
+    $canJob = [bool]((Get-Command Start-MpScan -ErrorAction SilentlyContinue).Parameters.ContainsKey('AsJob'))
     try {
-        if ($Type -eq 'Custom') {
-            if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { Write-QpLog 'That folder could not be found - nothing scanned.' 'WARN'; return [pscustomobject]@{ Ran = $false; Findings = @(); State = $state } }
-            Write-QpLog "Asking Defender to scan $Path ..." 'STEP'
-            Start-MpScan -ScanType CustomScan -ScanPath $Path -ErrorAction Stop
+        if ($canJob) {
+            $job = Start-MpScan @scanArgs -AsJob
+            while ($job.State -eq 'Running') {
+                if (Test-QpCancelled) {
+                    Stop-Job $job -ErrorAction SilentlyContinue
+                    Remove-Job $job -Force -ErrorAction SilentlyContinue
+                    # Defender may carry on in the background for a bit. That is Defender's own scan,
+                    # it is safe to leave, and Quietpane has changed nothing.
+                    Write-QpLog 'Stopped waiting for Defender at your request. Nothing was changed.' 'WARN'
+                    return [pscustomobject]@{ Ran = $false; Cancelled = $true; Findings = @(); State = $state }
+                }
+                Write-QpProgress -Stage 'Microsoft Defender is scanning' -Step 1 -Of 2 -Object ('{0:N0} seconds so far' -f $sw.Elapsed.TotalSeconds)
+                Start-Sleep -Milliseconds 700
+            }
+            Receive-Job $job -ErrorAction SilentlyContinue | Out-Null
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
         } else {
-            Write-QpLog "Asking Defender to run a $($Type.ToLower()) scan. This is Defender's own engine, not ours." 'STEP'
-            Start-MpScan -ScanType "$($Type)Scan" -ErrorAction Stop
+            Start-MpScan @scanArgs
         }
         Write-QpLog ("Defender finished in {0:N0} seconds." -f $sw.Elapsed.TotalSeconds) 'OK'
     } catch {
@@ -1319,7 +1379,7 @@ function Invoke-QpRemediate {
         Write-QpAudit -FindingId $Finding.Id -Action 'Remove' -Result 'AlreadyHandled' -Object $Finding.Path -Note ($tried -join ' + ')
         return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Removed'; Ok = $true; Note = 'Defender had already dealt with this one.' }
     }
-    $note = 'Defender did not remove it. Open Windows Security > Protection history and act there, or leave it and we will offer quarantine in the next version.'
+    $note = 'Defender did not remove it. Try "Remove it" again and choose Quarantine, or open Windows Security > Protection history and act there.'
     Write-QpLog "Defender did not remove $($Finding.Path). Nothing was changed by Quietpane." 'WARN'
     Write-QpAudit -FindingId $Finding.Id -Action 'Remove' -Result 'Failed' -Object $Finding.Path -Note ("tried: " + ($tried -join ' + '))
     [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = $note }
@@ -1328,6 +1388,65 @@ function Invoke-QpRemediate {
 #endregion
 
 #region ---------------------------------------------------------------- scan (read-only)
+
+function New-QpScanSummary {
+    <#
+        What the window says once a check has finished: how much was looked at, what turned up, what
+        was done about it, and the one thing worth doing next. It lives here so it can be tested, and
+        so the window and the log always say the same thing.
+    #>
+    param(
+        $Counts, $Tally, [int]$Scanned = 0, [int]$Seconds = 0,
+        [int]$Outstanding = 0, [bool]$IsAdmin = $true, [bool]$Cancelled = $false
+    )
+    $num = {
+        param($bag, $key)
+        if ($null -eq $bag) { return 0 }
+        if ($bag -is [System.Collections.IDictionary]) { if ($bag.Contains($key)) { return [int]$bag[$key] } return 0 }
+        $p = $bag.PSObject.Properties[$key]
+        if ($p) { return [int]$p.Value }
+        return 0
+    }
+    $took = if ($Seconds -ge 60) { '{0} min {1} sec' -f [int][math]::Floor($Seconds / 60), ($Seconds % 60) } else { "$Seconds seconds" }
+    $lines = @()
+    $lines += if ($Cancelled) {
+        'Stopped after {0}. {1:N0} things had been looked at. Nothing on this PC was changed.' -f $took, $Scanned
+    } else {
+        'Looked at {0:N0} things in {1}. Nothing was changed while we looked.' -f $Scanned, $took
+    }
+    $sev = foreach ($s in 'Critical', 'High', 'Medium', 'Low', 'Info') {
+        '{0} {1}' -f (& $num $Counts $s), $(if ($s -eq 'Info') { 'for information' } else { $s.ToLower() })
+    }
+    $total = 0; foreach ($s in 'Critical', 'High', 'Medium', 'Low', 'Info') { $total += (& $num $Counts $s) }
+    $lines += 'Found {0}: {1}.' -f $(if ($total -eq 1) { '1 thing' } else { "$total things" }), (($sev -join ', ') -replace ', ([^,]+)$', ' and $1')
+
+    # What the user has actually done about it so far, in their own words rather than status codes.
+    $done = @()
+    $removed = (& $num $Tally 'Removed'); $quar = (& $num $Tally 'Quarantined'); $bin = (& $num $Tally 'Recycled')
+    $deleted = (& $num $Tally 'Deleted'); $left = (& $num $Tally 'Allowed'); $failed = (& $num $Tally 'Failed')
+    if ($removed) { $done += "$removed removed by Defender" }
+    if ($quar)    { $done += "$quar in Quietpane's quarantine" }
+    if ($bin)     { $done += "$bin in the Recycle Bin" }
+    if ($deleted) { $done += "$deleted deleted for good" }
+    if ($left)    { $done += "$left left alone on purpose" }
+    if ($failed)  { $done += "$failed that did not work" }
+    if ($done.Count) { $lines += 'Dealt with: ' + (($done -join ', ') -replace ', ([^,]+)$', ' and $1') + '.' }
+
+    $next = if ($Cancelled) {
+        'Next: run the check again when you have a few minutes, so nothing is missed.'
+    } elseif ($failed -gt 0 -and -not $IsAdmin) {
+        'Next: some actions did not work because Quietpane was not started as administrator. Close it, start it again with "Start Quietpane", and try those again.'
+    } elseif ($Outstanding -gt 0) {
+        'Next: deal with the {0} serious item{1} above. "Remove it" is the safest start - Defender keeps its own copy, and quarantine can be undone.' -f $Outstanding, $(if ($Outstanding -eq 1) { '' } else { 's' })
+    } elseif ($failed -gt 0) {
+        'Next: some actions did not work. Open "Show details" at the bottom to see why, then try those again.'
+    } elseif (((& $num $Counts 'Medium') + (& $num $Counts 'Low')) -gt 0) {
+        'Next: nothing urgent. Have a look at the {0} item(s) marked medium or low when you have a minute.' -f ((& $num $Counts 'Medium') + (& $num $Counts 'Low'))
+    } else {
+        'Next: nothing needs doing. Run this again in a month, or after installing something you are unsure about.'
+    }
+    [pscustomobject]@{ Lines = @($lines); NextStep = $next; Failed = $failed; Total = $total }
+}
 
 function Invoke-QpAudit {
     <#
@@ -1338,6 +1457,26 @@ function Invoke-QpAudit {
 
     $findings = New-Object System.Collections.ArrayList
     $isAdmin = Test-QpAdmin
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $scanned = 0          # how many things have been looked at, for the progress line
+    $defender = $null
+    $steps = 14
+
+    function Write-Step([int]$Step, [string]$Stage, [string]$Object = '') {
+        # The window shows this while it works. Nothing here reads or changes the PC.
+        Write-QpProgress -Stage $Stage -Step $Step -Of $steps -Object $Object -Scanned $scanned `
+            -Found @($findings | Where-Object { $_.Severity -in 'Critical', 'High' }).Count
+    }
+    function New-Stopped {
+        # Stop is always taken at a safe point, between steps. Nothing is half-done.
+        Write-QpLog 'Stopped at your request. Nothing on this PC was changed.' 'WARN'
+        [pscustomobject]@{
+            Cancelled = $true; Critical = 0; High = 0; Medium = 0; Low = 0; Info = 0
+            Counts = $null; Total = 0; Findings = @(); Defender = $defender; Report = $null
+            Scanned = $scanned; Seconds = [int]$sw.Elapsed.TotalSeconds
+        }
+    }
+
     function Add-Finding([string]$Section, [string]$Severity, [string]$Title, [string]$Detail = '') {
         # Quietpane's own checks. They are heuristics: useful signals, never proof, and never a family name.
         $confidence = if ($Severity -eq 'Info') { 'Informational' } else { 'Heuristic' }
@@ -1365,15 +1504,18 @@ function Invoke-QpAudit {
     Write-QpLog 'Scan started (read-only - nothing will be changed)' 'STEP'
 
     # ---- 0. What Microsoft Defender has found. Defender names threats; Quietpane only explains them.
+    Write-Step 1 'Asking Microsoft Defender what it has found'
     Write-QpLog 'Asking Microsoft Defender what it has found...' 'INFO'
     $defender = Get-QpDefenderState
-    foreach ($f in @(Get-QpDefenderFindings)) { [void]$findings.Add($f) }
+    foreach ($f in @(Get-QpDefenderFindings)) { [void]$findings.Add($f); $scanned++ }
     if ($defender.Note) { Add-Finding 'Threats' 'Medium' 'Antivirus cover is not complete' $defender.Note }
     if ($defender.Available -and -not @($findings | Where-Object { $_.Source -eq 'Microsoft Defender' }).Count) {
         Add-Finding 'Threats' 'Info' 'Microsoft Defender has no threats on record for this PC' 'Nothing has been detected or quarantined. Quietpane cannot confirm a PC is clean on its own - it only reports what Defender knows plus its own checks below.'
     }
 
     # ---- 1. Startup entries
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 2 'Checking startup entries'
     Write-QpLog 'Checking startup entries...' 'INFO'
     # Each Run key is paired with the key where Task Manager records whether that entry is switched off.
     $sa = 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved'
@@ -1411,7 +1553,7 @@ function Invoke-QpAudit {
         if (-not $p) { continue }
         $off = Get-DisabledNames $rk.Approved
         foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' })) {
-            $startupTotal++
+            $startupTotal++; $scanned++
             $disabled = $off.ContainsKey($prop.Name)
             $exists = Test-StartupTarget $prop.Value
             if (-not $disabled -and $exists) { $startupOn++ }
@@ -1430,7 +1572,7 @@ function Invoke-QpAudit {
     $shell = New-Object -ComObject WScript.Shell
     foreach ($folder in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('CommonStartup'))) {
         Get-ChildItem -Path $folder -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' } | ForEach-Object {
-            $startupTotal++
+            $startupTotal++; $scanned++
             $disabled = $folderOff.ContainsKey($_.Name)
             $targetExe = $_.FullName
             $target = $_.FullName
@@ -1445,8 +1587,11 @@ function Invoke-QpAudit {
     }
 
     # ---- 2. Scheduled tasks
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 3 'Checking scheduled tasks'
     Write-QpLog 'Checking scheduled tasks...' 'INFO'
     foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+        $scanned++
         $actions = (@($t.Actions) | ForEach-Object { ("{0} {1}" -f $_.Execute, $_.Arguments).Trim() }) -join ' ; '
         $id = "$($t.TaskPath)$($t.TaskName)"
         if ($actions -match $suspiciousTask) {
@@ -1465,6 +1610,8 @@ function Invoke-QpAudit {
     }
 
     # ---- 3. Other persistence tricks
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 4 'Checking the other places things hide'
     Write-QpLog 'Checking other persistence locations...' 'INFO'
     foreach ($cls in 'CommandLineEventConsumer', 'ActiveScriptEventConsumer') {
         Get-CimInstance -Namespace root\subscription -ClassName $cls -ErrorAction SilentlyContinue | ForEach-Object {
@@ -1482,9 +1629,12 @@ function Invoke-QpAudit {
     if ($appinit.AppInit_DLLs -and $appinit.LoadAppInit_DLLs -eq 1) { Add-Finding 'Startup & persistence' 'High' 'AppInit_DLLs is loading extra DLLs into every program' $appinit.AppInit_DLLs }
 
     # ---- 4. Network hijacks
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 5 'Checking the hosts file, proxy and DNS'
     Write-QpLog 'Checking hosts file, proxy and DNS...' 'INFO'
     $blockedHosts = New-Object System.Collections.ArrayList
     foreach ($line in @(Get-Content $script:HostsPath -ErrorAction SilentlyContinue)) {
+        $scanned++
         $l = $line.Trim()
         if (-not $l -or $l.StartsWith('#')) { continue }
         $parts = $l -split '\s+'
@@ -1498,8 +1648,11 @@ function Invoke-QpAudit {
     if ($dns) { Add-Finding 'Network' 'Info' 'DNS servers in use' ($dns -join "`n") }
 
     # ---- 5. Services running from unusual places
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 6 'Checking services'
     Write-QpLog 'Checking services...' 'INFO'
     Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { $_.PathName } | ForEach-Object {
+        $scanned++
         # Only look at the executable itself, not its arguments (arguments often mention AppData legitimately).
         $exePath = if ($_.PathName -match '^\s*"([^"]+)"') { $matches[1] } elseif ($_.PathName -match '^\s*(\S+?\.exe)\b') { $matches[1] } else { $_.PathName }
         if ($exePath -match '(?i)\\AppData\\|\\Temp\\|\\Users\\Public\\') {
@@ -1508,6 +1661,8 @@ function Invoke-QpAudit {
     }
 
     # ---- 6. Unsigned programs in user-writable folders
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 7 'Checking programs in your own folders'
     Write-QpLog 'Checking programs in user folders for missing/invalid signatures (this can take a minute)...' 'INFO'
     $skip = '(?i)\\node_modules\\|\\npm-cache\\|\\\.vscode\\|\\Programs\\Python\\|\\go\\pkg\\|\\Android\\Sdk\\|\\\.gradle\\|\\\.m2\\|\\\.cargo\\|\\\.rustup\\|\\WindowsApps\\|\\Packages\\|\\Microsoft\\WindowsApps\\'
     $scanRoots = @($env:LOCALAPPDATA, $env:APPDATA, (Join-Path $env:USERPROFILE 'AppData\LocalLow'), (Join-Path $env:USERPROFILE 'Downloads'), $env:PUBLIC, $env:TEMP) | Where-Object { $_ -and (Test-Path $_) }
@@ -1516,7 +1671,16 @@ function Invoke-QpAudit {
     # Folders that hold a validly signed program: an unsigned file next to one is usually that app's own helper.
     $signedIn = @{}
     function Get-SignerName($Sig) { try { $Sig.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } catch { 'unknown publisher' } }
+    $abort = $false
+    $seenFiles = 0
     $unsigned = foreach ($f in $exe) {
+        $seenFiles++; $scanned++
+        # The long part of the check, so it says where it has got to - and it is the one place where
+        # Stop is polled inside a loop rather than between steps.
+        if (($seenFiles % 25) -eq 0) {
+            if (Test-QpCancelled) { $abort = $true; break }
+            Write-Step 7 'Checking programs in your own folders' ('{0:N0} of {1:N0}: {2}' -f $seenFiles, $exe.Count, $f.Name)
+        }
         $sig = Get-AuthenticodeSignature -FilePath $f.FullName -ErrorAction SilentlyContinue
         if (-not $sig) { continue }
         if ($sig.Status -eq 'Valid') {
@@ -1526,6 +1690,7 @@ function Invoke-QpAudit {
         }
         else { [pscustomobject]@{ File = $f.FullName; Dir = $f.DirectoryName; Status = [string]$sig.Status; Date = $f.LastWriteTime } }
     }
+    if ($abort) { return (New-Stopped) }
     function Get-SignedSibling([string]$Dir) {
         if ($signedIn.ContainsKey($Dir)) { return $signedIn[$Dir] }
         $found = $null
@@ -1549,6 +1714,8 @@ function Invoke-QpAudit {
     if ($help.Count) { Add-Finding 'Files' 'Info' "$($help.Count) unsigned helper file(s) belonging to signed programs" ((($help | ForEach-Object { "{0:yyyy-MM-dd}  {1}`n            next to {2}" -f $_.U.Date, $_.U.File, $_.Sibling }) -join "`n") + "`nMany apps ship small unsigned helpers (for example crash reporters) next to their signed main program. Lower risk.") }
 
     # ---- 7. Unofficial / cracked software indicators
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 8 'Looking for unofficial software'
     Write-QpLog 'Looking for signs of cracked/unofficial software...' 'INFO'
     # Only unambiguous names - generic words (codex, rune, plaza, reloaded...) collide with legitimate software.
     $crackNames = '(?i)^(nodvd|crack|cracked|codex-rune|empress|skidrow|fitgirl|fitgirl repacks|dodi|dodi repacks|anadius|goldberg|goldberg_emu|steam_emu|smartsteamemu|creamapi|cream_api|tenoke)$'
@@ -1564,6 +1731,8 @@ function Invoke-QpAudit {
     }
 
     # ---- 8. Browsers
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 9 'Checking browser add-ons and notifications'
     Write-QpLog 'Checking browser extensions and notification permissions...' 'INFO'
     $browsers = @{ 'Chrome' = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'; 'Edge' = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'; 'Brave' = Join-Path $env:LOCALAPPDATA 'BraveSoftware\Brave-Browser\User Data' }
     foreach ($b in $browsers.Keys) {
@@ -1583,6 +1752,7 @@ function Invoke-QpAudit {
                 } catch { }
             }
             foreach ($ext in @(Get-ChildItem (Join-Path $prof.FullName 'Extensions') -Directory -ErrorAction SilentlyContinue)) {
+                $scanned++
                 $manifest = Get-ChildItem $ext.FullName -Recurse -Depth 1 -Filter manifest.json -ErrorAction SilentlyContinue | Select-Object -First 1
                 if (-not $manifest) { continue }
                 try { $j = Get-Content $manifest.FullName -Raw | ConvertFrom-Json } catch { continue }
@@ -1617,6 +1787,8 @@ function Invoke-QpAudit {
     }
 
     # ---- 9. Security basics
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 10 'Checking Defender and the firewall'
     Write-QpLog 'Checking Microsoft Defender and firewall...' 'INFO'
     $mp = Get-MpComputerStatus -ErrorAction SilentlyContinue
     if ($mp) {
@@ -1636,6 +1808,8 @@ function Invoke-QpAudit {
     Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { -not $_.Enabled } | ForEach-Object { Add-Finding 'Security' 'High' "Windows Firewall is off for the $($_.Name) profile" '' }
 
     # ---- 10. Telemetry status
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 11 'Checking what is reporting home'
     Write-QpLog 'Checking telemetry status...' 'INFO'
     $status = Get-QpPrivacyStatus
     $open = @((Get-QpCatalog privacy).Items | Where-Object { $status[$_.Id] -in 'NotApplied', 'Partial' -and $_.Recommended })
@@ -1658,6 +1832,8 @@ function Invoke-QpAudit {
     }
 
     # ---- 11. Performance snapshot
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 12 'Taking a performance snapshot'
     Write-QpLog 'Taking a performance snapshot...' 'INFO'
     $os = Get-CimInstance Win32_OperatingSystem
     $usedGB = ($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1MB
@@ -1665,19 +1841,26 @@ function Invoke-QpAudit {
     Add-Finding 'Performance' 'Info' ("RAM in use: {0:N1} of {1:N1} GB, {2} processes, {3} program(s) start at sign-in" -f $usedGB, ($os.TotalVisibleMemorySize / 1MB), @(Get-Process).Count, $startupOn) ((($top | ForEach-Object { '{0,6} MB  {1} (x{2})' -f $_.MB, $_.Name, $_.Count }) -join "`n") + ("`n{0} startup entries in total; the rest are switched off in Task Manager or point to programs that no longer exist." -f $startupTotal))
 
     # ---- 12. Disk space
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 13 'Measuring space you could free up'
     Write-QpLog 'Measuring reclaimable space...' 'INFO'
     $targets = @(Get-QpCleanupTargets | Where-Object SizeBytes -gt 0)
     if ($targets.Count) { Add-Finding 'Disk space' 'Info' ("Reclaimable with the Clean-up tab: about {0}" -f (Format-QpBytes (($targets | Measure-Object SizeBytes -Sum).Sum))) (($targets | ForEach-Object { '{0,10}  {1}' -f (Format-QpBytes $_.SizeBytes), $_.Title }) -join "`n") }
     if (Test-Path 'C:\Windows.old') { Add-Finding 'Disk space' 'Info' 'C:\Windows.old exists (previous Windows version)' 'Remove it with Settings > System > Storage > Temporary files > "Previous Windows installation(s)".' }
 
     # ---- 13. Possibly leftover folders
+    if (Test-QpCancelled) { return (New-Stopped) }
+    Write-Step 14 'Looking for folders left behind'
     Write-QpLog 'Looking for folders left behind by uninstalled programs...' 'INFO'
     $cutoff = (Get-Date).AddDays(-180)
     $old = foreach ($r in @($env:LOCALAPPDATA, $env:APPDATA, (Join-Path $env:USERPROFILE 'AppData\LocalLow'), $env:ProgramData)) {
+        if (Test-QpCancelled) { $abort = $true; break }
+        Write-Step 14 'Looking for folders left behind' $r
         Get-ChildItem -Path $r -Directory -Force -ErrorAction SilentlyContinue |
             Where-Object { $_.LastWriteTime -lt $cutoff -and $_.CreationTime -lt $cutoff -and $_.Name -notmatch '^(Microsoft|Packages|Temp|Comms|ConnectedDevicesPlatform|Programs|Application Data|History|Temporary Internet Files|Package Cache|USOPrivate|USOShared|ssh|regid\..*|Desktop|Documents|Start Menu|Templates|Favorites|VirtualStore|Publishers|PlaceholderTileLogoFolder)$' } |
             ForEach-Object {
                 $dir = $_
+                $scanned++
                 # A folder's own date doesn't change when files inside it change, so look inside too.
                 # Stop at the first recent item - a folder with anything changed in the last 6 months is still in use.
                 $recent = Get-ChildItem -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue |
@@ -1693,10 +1876,11 @@ function Invoke-QpAudit {
     if ($old.Count) { Add-Finding 'Disk space' 'Info' 'Folders where nothing has changed for 6+ months (review before deleting - may belong to uninstalled programs)' ((($old | ForEach-Object { '{0,10}  {1:yyyy-MM-dd}  {2}' -f (Format-QpBytes $_.Size), $_.Last, $_.Path }) -join "`n") + "`nThe date is the last time anything inside the folder changed. Check what a folder belongs to before deleting it - some apps you still use rarely write to their folders.") }
 
     # ---- Report
+    if ($abort) { return (New-Stopped) }
     $counts = [ordered]@{}
     foreach ($s in 'Critical', 'High', 'Medium', 'Low', 'Info') { $counts[$s] = @($findings | Where-Object { $_.Severity -eq $s }).Count }
     $high = $counts['High']; $med = $counts['Medium']
-    $html = New-QpReportHtml -Findings $findings -Counts $counts -IsAdmin $isAdmin
+    $html = New-QpReportHtml -Findings $findings -Counts $counts -IsAdmin $isAdmin -Scanned $scanned
     try {
         $dir = Split-Path -Path $OutFile -Parent
         if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -1706,13 +1890,14 @@ function Invoke-QpAudit {
         Set-Content -Path $OutFile -Value $html -Encoding UTF8
         Write-QpLog "Could not save the report to the chosen location - saved to $OutFile instead" 'WARN'
     }
-    Write-QpLog ("Check finished: {0} critical, {1} high, {2} medium, {3} low, {4} for information. Report: {5}" -f $counts['Critical'], $counts['High'], $counts['Medium'], $counts['Low'], $counts['Info'], $OutFile) 'OK'
+    Write-QpLog ("Check finished: {0:N0} things looked at, {1} critical, {2} high, {3} medium, {4} low, {5} for information. Report: {6}" -f $scanned, $counts['Critical'], $counts['High'], $counts['Medium'], $counts['Low'], $counts['Info'], $OutFile) 'OK'
     [pscustomobject]@{
         Critical = $counts['Critical']; High = $high; Medium = $med; Low = $counts['Low']; Info = $counts['Info']
         Counts = $counts; Total = @($findings).Count
         Findings = @($findings)
         Defender = $defender
         Report = $OutFile
+        Scanned = $scanned; Seconds = [int]$sw.Elapsed.TotalSeconds; Cancelled = $false
     }
 }
 
@@ -1755,7 +1940,7 @@ function New-QpDonutSvg {
 }
 
 function New-QpReportHtml {
-    param($Findings, [System.Collections.IDictionary]$Counts, [bool]$IsAdmin)
+    param($Findings, [System.Collections.IDictionary]$Counts, [bool]$IsAdmin, [int]$Scanned = 0)
     $enc = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
     # The logo is embedded as a data URI so the report makes no network requests at all
     # (no web fonts, no CDNs, no images from the internet).
@@ -1798,7 +1983,8 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
     if ($logo) { [void]$sb.Append(('<img src="{0}" alt="KomodoWorks emblem">' -f $logo)) }
     [void]$sb.Append(('<div><h1>Quietpane &ndash; scan report</h1><p class="by">Developed by <a href="{0}" rel="noopener noreferrer">KomodoWorks.com</a></p></div></div></header><main><div class="wrap">' -f $brandUrl))
     $adminNote = if (-not $IsAdmin) { ' &middot; run as administrator for the full scan' } else { '' }
-    [void]$sb.Append(('<p class="meta">{0} &middot; version {1} &middot; read-only scan, nothing was changed{2}</p>' -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $script:AppVersion, $adminNote))
+    $lookedAt = if ($Scanned -gt 0) { ' &middot; {0:N0} things looked at' -f $Scanned } else { '' }
+    [void]$sb.Append(('<p class="meta">{0} &middot; version {1} &middot; read-only scan, nothing was changed{2}{3}</p>' -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $script:AppVersion, $lookedAt, $adminNote))
     # Severity doughnut plus a written legend: the chart never carries meaning through colour alone.
     $colours = @{ Critical = '#7b1d1d'; High = '#a83232'; Medium = '#9a6700'; Low = '#8a8578'; Info = '#117a68' }
     $meaning = @{ Critical = 'act now'; High = 'act on it'; Medium = 'worth a look'; Low = 'minor'; Info = 'just so you know' }
@@ -1837,6 +2023,7 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
 #endregion
 
 Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes,
+    Set-QpProgressSink, Write-QpProgress, Set-QpCancelCheck, Test-QpCancelled, New-QpScanSummary,
     Get-QpSystemUsage, Get-QpTotals,
     Get-QpRestorePoints, Invoke-QpUndo,
     Get-QpPrivacyStatus, Invoke-QpPrivacy,

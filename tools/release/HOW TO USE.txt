@@ -48,6 +48,11 @@ JUST WANT A CHECK-UP THAT CHANGES NOTHING?
    Recycle Bin, or delete it for good. Only that last one cannot be
    undone, and you are asked twice before it happens.
 
+   It says where it has got to while it works, and in the window "Stop"
+   ends it at any point without changing a thing. When it finishes, a
+   short summary says what it looked at, what it found, what you have
+   dealt with and the one thing worth doing next.
+
 A WINDOW FULL OF CODE OPENED, OR WINDOWS ASKED "HOW DO YOU WANT TO OPEN THIS FILE?"
    You opened one of the app's own files. Close it (pick nothing) and
    double-click "Start Quietpane" instead.

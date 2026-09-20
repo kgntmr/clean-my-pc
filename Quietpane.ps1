@@ -62,7 +62,16 @@ if ($Scan) {
     Write-Host '  Quietpane - read-only scan' -ForegroundColor Yellow
     Write-Host '  Developed by KomodoWorks.com  |  free and open source  |  nothing leaves this PC' -ForegroundColor DarkCyan
     Write-Host ''
+    # One line that says where it has got to, rewritten in place so the window stays tidy.
+    Set-QpProgressSink {
+        param($p)
+        $text = '  Step {0} of {1}: {2}' -f $p.Step, $p.Of, $p.Stage
+        if ($p.Object) { $text += " - $($p.Object)" }
+        $text += ' ({0:N0} looked at)' -f $p.Scanned
+        Write-Host ("`r" + $text.PadRight(112).Substring(0, 112)) -NoNewline -ForegroundColor DarkCyan
+    }
     $result = @(Invoke-QpAudit)[-1]
+    Write-Host ''
     if ($result) { Open-AsUser $result.Report }
     Write-Host ''
     Write-Host "  Questions or feedback: $($info.BrandUrl)  |  $($info.BrandEmail)" -ForegroundColor DarkCyan
@@ -438,12 +447,28 @@ $btnScan = New-Button 'Check this PC' -Primary
 $btnScanDeep = New-Button 'Check and ask Defender to scan'
 $btnOpenReport = New-Button 'Open last report'
 $btnOpenReport.IsEnabled = $false
-foreach ($b in $btnScan, $btnScanDeep, $btnOpenReport) { [void]$scanButtons.Children.Add($b) }
+# Stop stays enabled while everything else is greyed out - it is the one button a busy app must keep.
+$btnStopScan = New-Button 'Stop'
+$btnStopScan.Visibility = 'Collapsed'
+$btnStopScan.ToolTip = 'Stop looking. Nothing on your PC is changed either way.'
+foreach ($b in $btnScan, $btnScanDeep, $btnOpenReport, $btnStopScan) { [void]$scanButtons.Children.Add($b) }
 [void]$scanPanel.Children.Add($scanButtons)
 $scanSummary = New-Text 'No check yet.' 15 'SemiBold' '#0F1B1C' '0,6,0,6' 'Fraunces, Georgia'
 [void]$scanPanel.Children.Add($scanSummary)
 $script:ScanProgress = New-Text '' 12.5 'Normal' '#4B5B5C' '0,0,0,6'
 [void]$scanPanel.Children.Add($script:ScanProgress)
+
+# What happened, in full, once the check has finished: looked at, found, dealt with, what next.
+$script:SummaryPanel = New-Object System.Windows.Controls.Border
+$script:SummaryPanel.Visibility = 'Collapsed'
+$script:SummaryPanel.Background = Get-Brush '#EAF5F1'
+$script:SummaryPanel.BorderBrush = Get-Brush '#117A68'
+$script:SummaryPanel.BorderThickness = Get-Thick '4,0,0,0'
+$script:SummaryPanel.Padding = Get-Thick '16,12'
+$script:SummaryPanel.Margin = Get-Thick '0,2,0,12'
+$script:SummaryStack = New-Object System.Windows.Controls.StackPanel
+$script:SummaryPanel.Child = $script:SummaryStack
+[void]$scanPanel.Children.Add($script:SummaryPanel)
 
 # Severity doughnut: colour, label and count, so it never depends on colour alone.
 $script:SevColours = [ordered]@{ Critical = '#7B1D1D'; High = '#A83232'; Medium = '#9A6700'; Low = '#8A8578'; Info = '#117A68' }
@@ -636,13 +661,19 @@ $btnData.Add_Click({
 })
 
 # ------------------------------------------------------------------ background worker
-$script:Sync = [hashtable]::Synchronized(@{ Queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'; Result = $null })
+$script:Sync = [hashtable]::Synchronized(@{ Queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'; Result = $null; Progress = $null; Cancel = $false })
 $script:Job = $null
 $script:FirstLoad = $true
 $script:LastReport = $null
 $script:LastRestorePoint = $null
 $script:HomeCounts = $null
 $script:LogVisible = $false
+$script:ScanRunning = $false
+$script:ScanStarted = Get-Date
+$script:ScanSeconds = 0
+$script:LastScanResult = $null
+# What has actually been done to findings since the last check, for the summary at the end.
+$script:ActionTally = [ordered]@{ Removed = 0; Quarantined = 0; Recycled = 0; Deleted = 0; Allowed = 0; Failed = 0 }
 
 function Update-Buttons {
     $key = [string]$ui.Tabs.SelectedItem.Tag
@@ -671,6 +702,8 @@ function Start-Work {
     param([scriptblock]$Work, [hashtable]$Params = @{}, [scriptblock]$OnDone, [string]$StatusText = 'Working...')
     if ($script:Job) { return }
     $script:Sync.Result = $null
+    $script:Sync.Progress = $null
+    $script:Sync.Cancel = $false
     $rs = [runspacefactory]::CreateRunspace()
     $rs.ApartmentState = 'STA'
     $rs.ThreadOptions = 'ReuseThread'
@@ -684,6 +717,9 @@ function Start-Work {
         try {
             Import-Module $ModulePath -Force
             Set-QpLogSink { param($line) $Sync.Queue.Enqueue($line) }
+            # Where the work says how far it has got, and how it asks whether Stop has been pressed.
+            Set-QpProgressSink { param($p) $Sync.Progress = $p }
+            Set-QpCancelCheck { [bool]$Sync.Cancel }
             $Sync.Result = & ([scriptblock]::Create($WorkText)) @Params
         } catch {
             $Sync.Queue.Enqueue(('[{0}] ERROR   {1}' -f (Get-Date -Format 'HH:mm:ss'), $_.Exception.Message))
@@ -701,6 +737,7 @@ $timer.Add_Tick({
     $got = $false
     while ($script:Sync.Queue.TryDequeue([ref]$line)) { $ui.LogBox.AppendText($line + [Environment]::NewLine); $got = $true }
     if ($got) { $ui.LogBox.ScrollToEnd() }
+    if ($script:Job -and $script:ScanRunning) { Update-ScanProgress }
     if ($script:Job -and $script:Job.Handle.IsCompleted) {
         $job = $script:Job
         $script:Job = $null
@@ -1115,7 +1152,8 @@ function New-FindingCard($f) {
     if ($f.Recommended) { [void]$sp.Children.Add((New-Text ('What to do: ' + $f.Recommended) 13 'SemiBold' '#117A68' '0,6,0,0')) }
 
     # Anything with a real file behind it can be acted on. Findings without a file are information only.
-    $actionable = ($f.Status -in 'Detected', 'Allowed') -and (($f.Source -eq 'Microsoft Defender') -or ($f.Path -and (Test-Path -LiteralPath $f.Path -PathType Leaf)))
+    # Failed counts as actionable: if an attempt did not work, the thing is still there to try again.
+    $actionable = ($f.Status -in 'Detected', 'Allowed', 'Failed') -and (($f.Source -eq 'Microsoft Defender') -or ($f.Path -and (Test-Path -LiteralPath $f.Path -PathType Leaf)))
     if ($actionable) {
         $btns = New-Object System.Windows.Controls.WrapPanel
         $btns.Margin = Get-Thick '0,10,0,0'
@@ -1205,6 +1243,7 @@ function Invoke-FindingAction([string]$Id, [string]$Action) {
             [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane')
             Show-Findings
             Update-QuarantineList
+            Add-ActionTally $r
         }
     }
 }
@@ -1264,11 +1303,62 @@ function Invoke-QuarantineAction([string]$Id, [string]$What) {
     }
 }
 
+function Update-ScanProgress {
+    <# While a check runs: which step, what it is looking at, how much it has seen, how long so far. #>
+    $secs = [int]((Get-Date) - $script:ScanStarted).TotalSeconds
+    $clock = '{0}:{1:00}' -f [int][math]::Floor($secs / 60), ($secs % 60)
+    if ($script:Sync.Cancel) { $script:ScanProgress.Text = "Stopping as soon as it is safe to...   |   $clock"; return }
+    $p = $script:Sync.Progress
+    if (-not $p) { $script:ScanProgress.Text = "Getting started...   |   $clock"; return }
+    $bits = @()
+    if ([int]$p.Of -gt 0) { $bits += 'Step {0} of {1}: {2}' -f $p.Step, $p.Of, $p.Stage } elseif ($p.Stage) { $bits += [string]$p.Stage }
+    if ($p.Object) { $bits += [string]$p.Object }
+    if ([int]$p.Scanned -gt 0) { $bits += '{0:N0} things looked at' -f [int]$p.Scanned }
+    if ([int]$p.Found -gt 0) { $bits += '{0} worth attention so far' -f [int]$p.Found }
+    $bits += $clock
+    $script:ScanProgress.Text = $bits -join '   |   '
+}
+
+function Update-ScanSummary {
+    <# The panel at the end of a check. Wording comes from the engine, so the log agrees with the window. #>
+    if (-not $script:LastScanResult) { $script:SummaryPanel.Visibility = 'Collapsed'; return }
+    $r = $script:LastScanResult
+    # Something that failed to be dealt with is still there, so it still counts as outstanding.
+    $outstanding = @($script:ScanFindings | Where-Object { $_.Severity -in 'Critical', 'High' -and $_.Status -in 'Detected', 'Failed' }).Count
+    $s = New-QpScanSummary -Counts $r.Counts -Tally $script:ActionTally -Scanned ([int]$r.Scanned) `
+        -Seconds ([int]$script:ScanSeconds) -Outstanding $outstanding -IsAdmin (Test-IsAdmin) -Cancelled ([bool]$r.Cancelled)
+    $script:SummaryStack.Children.Clear()
+    [void]$script:SummaryStack.Children.Add((New-Text 'How it went' 16 'SemiBold' '#117A68' '0,0,0,6' 'Fraunces, Georgia'))
+    foreach ($l in $s.Lines) { [void]$script:SummaryStack.Children.Add((New-Text $l 13.5 'Normal' '#0F1B1C' '0,0,0,3')) }
+    [void]$script:SummaryStack.Children.Add((New-Text $s.NextStep 13.5 'SemiBold' '#117A68' '0,8,0,0'))
+    $script:SummaryPanel.Visibility = 'Visible'
+}
+
+function Add-ActionTally($r) {
+    <# Keeps count of what has been done to findings since this check started. #>
+    if (-not $r) { return }
+    $key = ''
+    if ($r.Status -eq 'Failed') { $key = 'Failed' }
+    elseif ($r.Action -eq 'Allow') { $key = 'Allowed' }
+    elseif ($r.Action -eq 'Quarantine') { $key = 'Quarantined' }
+    elseif ($r.Action -eq 'RecycleBin') { $key = 'Recycled' }
+    elseif ($r.Action -eq 'Delete') { $key = 'Deleted' }
+    elseif ($r.Action -eq 'Defender') { $key = 'Removed' }
+    if ($key) { $script:ActionTally[$key] = [int]$script:ActionTally[$key] + 1 }
+    Update-ScanSummary
+}
+
 function Start-SafetyScan([bool]$AskDefender = $false) {
     $ui.LogBox.AppendText([Environment]::NewLine)
     $script:ScanStarted = Get-Date
+    $script:ScanRunning = $true
+    $script:LastScanResult = $null
+    foreach ($k in @($script:ActionTally.Keys)) { $script:ActionTally[$k] = 0 }
+    $script:SummaryPanel.Visibility = 'Collapsed'
+    $btnStopScan.Visibility = 'Visible'
+    $btnStopScan.IsEnabled = $true
     $scanSummary.Text = 'Having a look around...'
-    $script:ScanProgress.Text = if ($AskDefender) { 'Step 1 of 2: Microsoft Defender is scanning. This can take a few minutes.' } else { 'Reading what Defender knows, then checking the usual hiding places. A minute or three.' }
+    $script:ScanProgress.Text = if ($AskDefender) { 'Asking Microsoft Defender to scan first. This can take a few minutes - Stop works at any point.' } else { 'Getting started...' }
     $script:CardAdware.Value.Text = 'Checking...'
     $script:CardAdware.Caption.Text = 'Nothing is changed while we look'
     Start-Work -StatusText 'Looking for threats and problems (nothing is changed)...' -Params @{ Deep = $AskDefender } -Work {
@@ -1278,16 +1368,35 @@ function Start-SafetyScan([bool]$AskDefender = $false) {
     } -OnDone {
         param($r)
         $r = @($r | Where-Object { $_ -and $_.PSObject.Properties['Report'] })[-1]
+        $script:ScanRunning = $false
+        $btnStopScan.Visibility = 'Collapsed'
+        $script:ScanSeconds = [int]((Get-Date) - $script:ScanStarted).TotalSeconds
+        if ($r -and $r.Cancelled) {
+            $script:LastScanResult = $r
+            $script:ScanFindings = @()
+            $script:ChartPanel.Visibility = 'Collapsed'
+            $script:FindingsPanel.Children.Clear()
+            $scanSummary.Text = 'Stopped. Nothing on your PC was changed.'
+            $script:ScanProgress.Text = ''
+            $script:CardAdware.Value.Text = 'Stopped'
+            $script:CardAdware.Value.Foreground = Get-Brush '#0F1B1C'
+            $script:CardAdware.Caption.Text = 'Run the check again when you have a few minutes'
+            Update-ScanSummary
+            Update-Buttons
+            return
+        }
         if ($r -and $r.Report) {
             $script:LastReport = $r.Report
+            $script:LastScanResult = $r
             $script:ScanFindings = @($r.Findings)
             foreach ($k in @($script:SevCounts.Keys)) { $script:SevCounts[$k] = [int]$r.Counts[$k] }
             $script:SevFilter = 'All'
             $script:ChartPanel.Visibility = 'Visible'
             Draw-SeverityChart
             Show-Findings
-            $secs = [int]((Get-Date) - $script:ScanStarted).TotalSeconds
-            $scanSummary.Text = ('Checked {0} things in {1} seconds. {2} critical, {3} high, {4} medium, {5} low, {6} for information.' -f $r.Total, $secs, $r.Critical, $r.High, $r.Medium, $r.Low, $r.Info)
+            Update-ScanSummary
+            $secs = $script:ScanSeconds
+            $scanSummary.Text = ('Looked at {0:N0} things in {1} seconds, and found {2} worth reporting.' -f [int]$r.Scanned, $secs, $r.Total)
             $worst = @('Critical', 'High', 'Medium', 'Low', 'Info') | Where-Object { [int]$r.Counts[$_] -gt 0 } | Select-Object -First 1
             $script:ScanProgress.Text = if ($r.Defender -and $r.Defender.Note) { $r.Defender.Note } else { 'The full report also opened in your browser and is saved on your Desktop.' }
             if ($worst -in 'Critical', 'High') {
@@ -1308,6 +1417,12 @@ function Start-SafetyScan([bool]$AskDefender = $false) {
         }
     }
 }
+$btnStopScan.Add_Click({
+    # Stop is a request, not a kill: the check finishes the step it is on and then stops cleanly.
+    $script:Sync.Cancel = $true
+    $btnStopScan.IsEnabled = $false
+    $script:ScanProgress.Text = 'Stopping as soon as it is safe to...'
+})
 $btnScan.Add_Click({ Start-SafetyScan $false })
 $btnScanDeep.Add_Click({ Start-SafetyScan $true })
 $btnHomeScan.Add_Click({ $ui.Tabs.SelectedIndex = 1; Start-SafetyScan $false })

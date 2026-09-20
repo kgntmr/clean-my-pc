@@ -79,6 +79,8 @@ NVIDIA is a special case: deleting its telemetry plugin breaks NVIDIA App, so Qu
 ### Safety scan
 Two things at once: **what Microsoft Defender has found**, and Quietpane's own look around for the tricks adware uses. Looking changes nothing.
 
+While it runs, a line shows which step it's on, what it's looking at, how many things it has seen and how long it's been going. **Stop** ends it cleanly at the next safe point, changes nothing and writes no report.
+
 Results come back as a doughnut chart with a written legend, and a card for each finding. Click a severity to show only those. Every card says **who found it** and **how sure that is**:
 
 - **Microsoft Defender** - a real detection with a real threat name. Quietpane translates the name into plain words and sorts it into Critical, High, Medium, Low or Info. Defender's own name and classification stay on the card.
@@ -91,6 +93,8 @@ Each finding with a real file behind it gets three buttons:
 - **Leave it for now** warns that it stays on the PC. It's a note in Quietpane only: **it never creates a Defender exclusion** and never weakens a future scan.
 
 Before anything is moved or deleted, Quietpane re-checks that the file is still there and still the same file, and refuses outright in Windows, Program Files and driver folders. Every action, including every failure, is written to `%ProgramData%\Quietpane\audit.log`.
+
+When it's done, a short summary says what was looked at, what was found by severity, what you've dealt with so far - removed, quarantined, recycled, deleted, left alone, or failed - and the one thing worth doing next.
 
 **Quietpane cannot identify a malware family by itself.** Without Defender, only the heuristics run, and the scan says so rather than implying the PC is clean.
 
@@ -191,7 +195,8 @@ Removing it doesn't undo its changes: click **Undo** first if you want your PC b
 - **Run from source:** clone and double-click `Start Quietpane.cmd` (or `Safety scan only.cmd`).
 - **Build the download:** `powershell -ExecutionPolicy Bypass -File tools\build-release.ps1` creates `dist\Quietpane.zip` and prints its SHA256. The ZIP holds exactly the files in this repo; nothing is compiled.
 - **Test safely:** `.\Quietpane.ps1 -SelfTest` builds the window without showing it; add `-Snapshot file.png -SnapshotTab 0` to render it.
-- **Run the tests:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`, or add `-Live` to include the EICAR check. No real malware is used anywhere; the EICAR string is built at runtime, so it is never stored in this repository.
+- **Run the tests:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`, or add `-Live` to include the EICAR check. Run it from an elevated window to include the quarantine tests. No real malware is used anywhere; the EICAR string is built at runtime, so it is never stored in this repository.
+- **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what a person still has to test in a browser and in the window, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files, and it makes no network requests.
 - **Contribute:** the lists are plain data files in [`src/catalog/`](src/catalog), so adding a setting, app, folder or brand needs no code. Describe side effects honestly and test with **Preview** first.
 
 ---

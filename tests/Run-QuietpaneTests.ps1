@@ -272,6 +272,95 @@ Test-Case 'quarantine actions are all written to the audit log' {
     ($log -join "`n") -match 'Quarantine' -and ($log -join "`n") -match 'DeletePermanently'
 }
 
+Section 'Stopping a check, and saying where it has got to'
+Test-Case 'nothing is treated as stopped when nobody is asking' {
+    Set-QpCancelCheck $null
+    -not (Test-QpCancelled)
+}
+Test-Case 'the engine sees Stop the moment the window sets it' {
+    $box = @{ Stop = $false }
+    Set-QpCancelCheck { $box.Stop }
+    $before = Test-QpCancelled
+    $box.Stop = $true
+    $after = Test-QpCancelled
+    Set-QpCancelCheck $null
+    -not $before -and $after
+}
+Test-Case 'a progress update can never break a check' {
+    Set-QpProgressSink { throw 'the window fell over' }
+    try { Write-QpProgress -Stage 'x' -Step 1 -Of 14; $true } catch { $false } finally { Set-QpProgressSink $null }
+}
+
+# One stopped check, looked at from several angles below.
+$seen = New-Object System.Collections.ArrayList
+$stoppedReport = Join-Path $env:TEMP ('qp-stopped-' + [guid]::NewGuid().ToString('N') + '.html')
+Set-QpProgressSink { param($p) [void]$seen.Add($p) }
+Set-QpCancelCheck { $true }
+$stopped = Invoke-QpAudit -OutFile $stoppedReport
+Set-QpCancelCheck $null
+Set-QpProgressSink $null
+
+Test-Case 'a stopped check says it was stopped' { [bool]$stopped.Cancelled }
+Test-Case 'a stopped check reports nothing rather than half a picture' { @($stopped.Findings).Count -eq 0 -and $stopped.Total -eq 0 }
+Test-Case 'a stopped check writes no report' { -not (Test-Path -LiteralPath $stoppedReport) }
+Test-Case 'a stopped check still says how long it ran and how much it saw' {
+    $stopped.PSObject.Properties['Seconds'] -and $stopped.PSObject.Properties['Scanned'] -and [int]$stopped.Scanned -ge 0
+}
+Test-Case 'progress says which step of how many, and what it is doing' {
+    $first = @($seen)[0]
+    $null -ne $first -and $first.Of -eq 14 -and $first.Step -ge 1 -and [string]$first.Stage -ne ''
+}
+
+Section 'The summary at the end of a check'
+$sumCounts = [ordered]@{ Critical = 1; High = 2; Medium = 0; Low = 0; Info = 5 }
+Test-Case 'it says how much was looked at, in words a person reads' {
+    $s = New-QpScanSummary -Counts $sumCounts -Tally @{} -Scanned 1234 -Seconds 75 -Outstanding 3
+    $s.Lines[0] -match '1,234' -and $s.Lines[0] -match '1 min 15 sec'
+}
+Test-Case 'every severity is named, including the empty ones' {
+    $s = New-QpScanSummary -Counts $sumCounts -Tally @{} -Scanned 10 -Seconds 5 -Outstanding 3
+    ($s.Lines -join ' ') -match 'critical' -and ($s.Lines -join ' ') -match '0 medium' -and ($s.Lines -join ' ') -match '0 low'
+}
+Test-Case 'what was done about it is counted' {
+    $s = New-QpScanSummary -Counts $sumCounts -Tally @{ Removed = 1; Quarantined = 2; Recycled = 1; Deleted = 1; Allowed = 1; Failed = 1 } -Scanned 10 -Seconds 5 -Outstanding 0
+    $dealt = @($s.Lines | Where-Object { $_ -match '^Dealt with' })[0]
+    $dealt -match '1 removed by Defender' -and $dealt -match '2 in Quietpane' -and $dealt -match '1 in the Recycle Bin' -and $dealt -match '1 deleted for good' -and $dealt -match '1 left alone' -and $dealt -match 'did not work'
+}
+Test-Case 'nothing done means no "dealt with" line at all' {
+    $s = New-QpScanSummary -Counts $sumCounts -Tally @{} -Scanned 10 -Seconds 5 -Outstanding 3
+    @($s.Lines | Where-Object { $_ -match 'Dealt with' }).Count -eq 0
+}
+Test-Case 'serious findings get a next step that points at them' {
+    (New-QpScanSummary -Counts $sumCounts -Tally @{} -Scanned 10 -Seconds 5 -Outstanding 3).NextStep -match '3 serious item'
+}
+Test-Case 'a failed action without admin rights explains why' {
+    $s = New-QpScanSummary -Counts $sumCounts -Tally @{ Failed = 1 } -Scanned 10 -Seconds 5 -Outstanding 1 -IsAdmin $false
+    $s.NextStep -match 'administrator'
+}
+Test-Case 'a clean check ends calmly rather than inventing work' {
+    $clean = [ordered]@{ Critical = 0; High = 0; Medium = 0; Low = 0; Info = 12 }
+    $s = New-QpScanSummary -Counts $clean -Tally @{} -Scanned 900 -Seconds 40 -Outstanding 0
+    $s.NextStep -match 'nothing needs doing'
+}
+Test-Case 'a stopped check is never dressed up as a finished one' {
+    $s = New-QpScanSummary -Counts $null -Tally @{} -Scanned 120 -Seconds 9 -Outstanding 0 -Cancelled $true
+    $s.Lines[0] -match 'Stopped' -and $s.Lines[0] -match 'Nothing on this PC was changed' -and $s.NextStep -match 'run the check again'
+}
+
+Section 'The checks a person has to do by hand'
+Test-Case 'the manual test pages are written down, including the AMTSO ones' {
+    $doc = Join-Path $root 'docs\manual-checks.md'
+    if (-not (Test-Path $doc)) { return $false }
+    $text = Get-Content $doc -Raw
+    $text -match 'AMTSO' -and $text -match 'amtso\.org' -and $text -match 'EICAR'
+}
+Test-Case 'the app itself never downloads a test file' {
+    # AMTSO checks are done in a browser on purpose: Quietpane makes no network requests at all.
+    $lines = @(Get-Content (Join-Path $root 'src\Quietpane.psm1')) + @(Get-Content (Join-Path $root 'Quietpane.ps1')) |
+        Where-Object { $_ -notmatch '\$suspicious(Cmd|Task)\s*=' }   # those two lines are what a scan looks FOR
+    [regex]::Matches(($lines -join "`n"), '(?i)Invoke-WebRequest|Invoke-RestMethod|DownloadFile|DownloadString|WebClient|HttpClient').Count -eq 0
+}
+
 Section 'With the real antivirus (needs -Live and administrator rights)'
 if (-not $Live) {
     Write-Host '  SKIP  EICAR detection (run with -Live to include it)' -ForegroundColor DarkGray
