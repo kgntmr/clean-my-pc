@@ -474,6 +474,16 @@ $script:ChartPanel.Child = $chartRow
 
 $script:FindingsPanel = New-Object System.Windows.Controls.StackPanel
 [void]$scanPanel.Children.Add($script:FindingsPanel)
+
+# Whatever Quietpane is holding in quarantine, with a way back out.
+$script:QuarantineBox = New-Object System.Windows.Controls.Expander
+$script:QuarantineBox.Header = New-Text 'In quarantine' 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+$script:QuarantineBox.Margin = Get-Thick '0,16,0,0'
+$script:QuarantineBox.Visibility = 'Collapsed'
+$script:QuarantinePanel = New-Object System.Windows.Controls.StackPanel
+$script:QuarantinePanel.Margin = Get-Thick '8,6,0,8'
+$script:QuarantineBox.Content = $script:QuarantinePanel
+[void]$scanPanel.Children.Add($script:QuarantineBox)
 [void]$scanPanel.Children.Add((New-Text 'A good start, not a guarantee: this looks where problems usually hide, and it cannot promise a PC is clean. If yours still feels wrong, run a deeper scan with a dedicated security tool too.' 12.5 'Normal' '#9A6700' '0,14,0,0'))
 
 # 2. Privacy & telemetry - one collapsed section per group, so nothing shouts at you
@@ -560,7 +570,7 @@ foreach ($line in @(
         'Collects nothing: no accounts, analytics, telemetry, crash reports, ads, cookies or tracking.',
         'Connects to nothing: the app makes no network requests. Links only open when you click them.',
         'Changes nothing without you: every change is previewed, confirmed, recorded and can be undone.',
-        'Deletes nothing permanently: files go to your Recycle Bin, scheduled tasks are disabled, not deleted.',
+        'Tidying up never deletes for good: files go to your Recycle Bin and scheduled tasks are switched off, not deleted. Only a threat you choose to delete is gone for good, and we ask twice first.',
         'Hides nothing: plain-text PowerShell you can read line by line. No installer, nothing hidden.',
         'Free and open source under the MIT License. Not affiliated with Microsoft, NVIDIA, Intel or Google.')) {
     [void]$aboutPanel.Children.Add((New-Text ('-  ' + $line) 13 'Normal' '#0F1B1C' '4,4,0,0'))
@@ -749,6 +759,7 @@ function Update-FromState($state) {
         [void]$script:UndoList.Items.Add($li)
     }
     if ($script:UndoList.Items.Count -eq 0) { [void]$script:UndoList.Items.Add('No restore points yet.') }
+    Update-QuarantineList
     Update-HomeCards $state
     if ($script:FirstLoad) {
         foreach ($k in 'privacy', 'vendors', 'apps', 'cleanup') { Select-Recommended $k }
@@ -1039,6 +1050,42 @@ function Draw-SeverityChart {
     }
 }
 
+function Show-ChoiceDialog {
+    <# A small window offering several ways forward, safest first. Returns the chosen key, or $null. #>
+    param([string]$Title, [string]$Message, [object[]]$Options)
+    $dlg = New-Object System.Windows.Window
+    $dlg.Title = $Title
+    $dlg.SizeToContent = 'WidthAndHeight'
+    $dlg.WindowStartupLocation = 'CenterOwner'
+    $dlg.ResizeMode = 'NoResize'
+    $dlg.Background = Get-Brush '#FAF6EC'
+    if ($window -and $window.IsVisible) { $dlg.Owner = $window }
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $sp.Margin = Get-Thick '22,18'
+    $sp.MaxWidth = 560
+    [void]$sp.Children.Add((New-Text $Message 13.5 'Normal' '#0F1B1C' '0,0,0,14'))
+    $script:ChoiceResult = $null
+    foreach ($o in $Options) {
+        $b = if ($o.Primary) { New-Button $o.Label -Primary } else { New-Button $o.Label }
+        $b.Margin = Get-Thick '0,0,0,4'
+        $b.Padding = Get-Thick '16,10'
+        $b.HorizontalContentAlignment = 'Left'
+        $b.HorizontalAlignment = 'Stretch'
+        $b.Tag = $o.Key
+        $b.Add_Click({ $script:ChoiceResult = [string]$this.Tag; $script:ChoiceDialog.Close() })
+        [void]$sp.Children.Add($b)
+        if ($o.Note) { [void]$sp.Children.Add((New-Text $o.Note 12 'Normal' '#4B5B5C' '4,0,0,10')) }
+    }
+    $cancel = New-Button 'Cancel'
+    $cancel.Margin = Get-Thick '0,6,0,0'
+    $cancel.Add_Click({ $script:ChoiceResult = $null; $script:ChoiceDialog.Close() })
+    [void]$sp.Children.Add($cancel)
+    $dlg.Content = $sp
+    $script:ChoiceDialog = $dlg
+    [void]$dlg.ShowDialog()
+    return $script:ChoiceResult
+}
+
 function New-FindingCard($f) {
     $b = New-Object System.Windows.Controls.Border
     $b.Background = Get-Brush '#FFFDF8'
@@ -1067,15 +1114,18 @@ function New-FindingCard($f) {
     if ($f.Path) { [void]$sp.Children.Add((New-Text ('Where: ' + $f.Path) 12.5 'Normal' '#4B5B5C' '0,6,0,0')) }
     if ($f.Recommended) { [void]$sp.Children.Add((New-Text ('What to do: ' + $f.Recommended) 13 'SemiBold' '#117A68' '0,6,0,0')) }
 
-    if ($f.Source -eq 'Microsoft Defender' -and $f.Status -eq 'Detected') {
+    # Anything with a real file behind it can be acted on. Findings without a file are information only.
+    $actionable = ($f.Status -in 'Detected', 'Allowed') -and (($f.Source -eq 'Microsoft Defender') -or ($f.Path -and (Test-Path -LiteralPath $f.Path -PathType Leaf)))
+    if ($actionable) {
         $btns = New-Object System.Windows.Controls.WrapPanel
         $btns.Margin = Get-Thick '0,10,0,0'
         $remove = New-Button 'Remove it'
         $remove.Tag = $f.Id
-        $remove.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Defender' })
+        $remove.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Choose' })
         $quar = New-Button 'Quarantine'
-        $quar.IsEnabled = $false
-        $quar.ToolTip = 'Quietpane''s own quarantine arrives in the next version. For now, Remove hands it to Defender, which keeps its own copy you can restore from Windows Security.'
+        $quar.Tag = $f.Id
+        $quar.ToolTip = 'Move it into Quietpane''s own quarantine, where it cannot run. You can put it back later.'
+        $quar.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Quarantine' })
         $leave = New-Button 'Leave it for now'
         $leave.Tag = $f.Id
         $leave.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Allow' })
@@ -1120,22 +1170,96 @@ function Show-Findings {
 function Invoke-FindingAction([string]$Id, [string]$Action) {
     $f = @($script:ScanFindings | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
     if (-not $f) { return }
+    $where = if ($f.Path) { "`n$($f.Path)" } else { '' }
+    $force = $false
     if ($Action -eq 'Allow') {
-        $msg = "Leave this on your PC?`n`n$($f.Title)`n$($f.Path)`n`nIt stays exactly where it is and may still be a risk. Quietpane will keep showing it, and your antivirus is not changed in any way."
+        $msg = "Leave this on your PC?`n`n$($f.Title)$where`n`nIt stays exactly where it is and may still be a risk. Quietpane will keep showing it, and your antivirus is not changed in any way."
         if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Warning') -ne 'Yes') { return }
-    } else {
-        $msg = "Ask Microsoft Defender to remove this?`n`n$($f.Title)`n$($f.Path)`n`nDefender keeps its own copy, so you can restore it from Windows Security if it turns out to be a mistake."
+    } elseif ($Action -eq 'Quarantine') {
+        $msg = "Move this into Quietpane's quarantine?`n`n$($f.Title)$where`n`nThe file is moved somewhere it cannot run, and you can put it back from this tab whenever you like."
         if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
+    } elseif ($Action -eq 'Choose') {
+        $options = @()
+        if ($f.Source -eq 'Microsoft Defender') {
+            $options += @{ Key = 'Defender'; Label = 'Let Microsoft Defender handle it'; Primary = $true; Note = 'The safest choice. Defender keeps its own copy, and Windows Security can put it back.' }
+        }
+        $options += @{ Key = 'Quarantine'; Label = 'Quarantine it with Quietpane'; Primary = ($f.Source -ne 'Microsoft Defender'); Note = 'Moved somewhere it cannot run. You can restore it from this tab.' }
+        $options += @{ Key = 'RecycleBin'; Label = 'Move it to the Recycle Bin'; Note = 'Stays on your PC until you empty the bin.' }
+        $options += @{ Key = 'Delete'; Label = 'Delete it permanently'; Note = 'Gone for good. Quietpane cannot undo this one.' }
+        $chosen = Show-ChoiceDialog -Title 'Quietpane' -Message "What should happen to this?`n`n$($f.Title)$where" -Options $options
+        if (-not $chosen) { return }
+        $Action = $chosen
+        if ($Action -eq 'Delete') {
+            $msg = "Delete this file permanently?`n`n$($f.Path)`n`nThis cannot be undone by Quietpane. It does not go to the Recycle Bin and there is no restore. Quarantine is safer if you are unsure."
+            if ([System.Windows.MessageBox]::Show($msg, 'Delete for good?', 'YesNo', 'Warning') -ne 'Yes') { return }
+            $force = $true
+        }
     }
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true
-    Start-Work -StatusText 'Dealing with it...' -Params @{ Finding = $f; Action = $Action } -Work { param($Finding, $Action) Invoke-QpRemediate -Finding $Finding -Action $Action } -OnDone {
+    Start-Work -StatusText 'Dealing with it...' -Params @{ Finding = $f; Action = $Action; Force = $force } -Work { param($Finding, $Action, $Force) Invoke-QpRemediate -Finding $Finding -Action $Action -Force:$Force } -OnDone {
         param($r)
         $r = @($r)[-1]
         if ($r) {
             $f.Status = $r.Status
             [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane')
             Show-Findings
+            Update-QuarantineList
+        }
+    }
+}
+
+function Update-QuarantineList {
+    <# Everything Quietpane is currently holding, with a way back out. #>
+    $items = @(Get-QpQuarantineItems)
+    $script:QuarantinePanel.Children.Clear()
+    if (-not $items.Count) {
+        $script:QuarantineBox.Visibility = 'Collapsed'
+        return
+    }
+    $script:QuarantineBox.Visibility = 'Visible'
+    $script:QuarantineBox.Header = New-Text ('In quarantine ({0})' -f $items.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    [void]$script:QuarantinePanel.Children.Add((New-Text 'These files were moved somewhere they cannot run. They are still on this PC until you delete them.' 12.5 'Normal' '#4B5B5C' '0,0,0,8'))
+    foreach ($i in $items) {
+        $row = New-Object System.Windows.Controls.Border
+        $row.BorderBrush = Get-Brush '#E6DFCC'; $row.BorderThickness = Get-Thick '0,0,0,1'
+        $row.Padding = Get-Thick '0,8'
+        $sp = New-Object System.Windows.Controls.StackPanel
+        [void]$sp.Children.Add((New-Text $i.FileName 13.5 'SemiBold' '#0F1B1C' '0'))
+        [void]$sp.Children.Add((New-Text ('{0}   |   was at {1}   |   quarantined {2}' -f $(if ($i.ThreatName) { $i.ThreatName } else { 'Quietpane check' }), $i.OriginalPath, $i.QuarantinedAt) 12 'Normal' '#4B5B5C' '0,2,0,0'))
+        $btns = New-Object System.Windows.Controls.WrapPanel
+        $btns.Margin = Get-Thick '0,6,0,0'
+        $restore = New-Button 'Put it back'
+        $restore.Tag = $i.Id
+        $restore.Add_Click({ Invoke-QuarantineAction ([string]$this.Tag) 'Restore' })
+        $del = New-Button 'Delete for good'
+        $del.Tag = $i.Id
+        $del.Add_Click({ Invoke-QuarantineAction ([string]$this.Tag) 'Delete' })
+        foreach ($x in $restore, $del) { $x.Margin = Get-Thick '0,0,8,0'; [void]$btns.Children.Add($x) }
+        [void]$sp.Children.Add($btns)
+        $row.Child = $sp
+        [void]$script:QuarantinePanel.Children.Add($row)
+    }
+}
+
+function Invoke-QuarantineAction([string]$Id, [string]$What) {
+    $item = @(Get-QpQuarantineItems | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
+    if (-not $item) { return }
+    if ($What -eq 'Restore') {
+        $msg = "Put this file back where it was?`n`n$($item.FileName)`nback to: $($item.OriginalPath)`n`nIf it really was a threat, it will be a threat again. Your antivirus may catch it straight away."
+        if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Warning') -ne 'Yes') { return }
+        Start-Work -StatusText 'Putting it back...' -Params @{ Id = $Id } -Work { param($Id) Restore-QpQuarantineItem -Id $Id } -OnDone {
+            param($r); $r = @($r)[-1]
+            if ($r) { [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane') }
+            Update-QuarantineList
+        }
+    } else {
+        $msg = "Delete this permanently?`n`n$($item.FileName)`nfrom: $($item.OriginalPath)`n`nThis cannot be undone. The file does not go to the Recycle Bin and cannot be restored afterwards."
+        if ([System.Windows.MessageBox]::Show($msg, 'Delete for good?', 'YesNo', 'Warning') -ne 'Yes') { return }
+        Start-Work -StatusText 'Deleting it...' -Params @{ Id = $Id } -Work { param($Id) Remove-QpQuarantineItem -Id $Id -Force } -OnDone {
+            param($r); $r = @($r)[-1]
+            if ($r) { [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane') }
+            Update-QuarantineList
         }
     }
 }

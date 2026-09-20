@@ -178,6 +178,100 @@ Test-Case 'every action is written to the audit log' {
     (Test-Path $log) -and ((Get-Content $log -Tail 5) -join "`n") -match 'Allow'
 }
 
+Section 'Quarantine, restore and delete'
+function New-TestFile([string]$Content = 'harmless test content') {
+    $p = Join-Path $env:TEMP ('qp-quar-' + [guid]::NewGuid().ToString('N') + '.txt')
+    [IO.File]::WriteAllText($p, $Content)
+    return $p
+}
+function New-TestFinding([string]$Path) {
+    New-QpFinding -Severity Medium -ThreatName 'Test:Win32/Harmless' -Source 'Quietpane check' -Confidence Heuristic `
+        -Object (Split-Path $Path -Leaf) -Path $Path -Sha256 (Get-QpFileHash $Path) -Title 'test item'
+}
+$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+Test-Case 'protected Windows folders are refused' {
+    (Test-QpProtectedPath (Join-Path $env:WINDIR 'System32\kernel32.dll')) -and
+    (Test-QpProtectedPath (Join-Path $env:ProgramFiles 'anything.exe')) -and
+    -not (Test-QpProtectedPath (Join-Path $env:TEMP 'something.exe'))
+}
+Test-Case 'a folder is never treated as a file to remove' { Test-QpProtectedPath $env:TEMP }
+Test-Case 'a drive root is refused' { Test-QpProtectedPath 'C:\' }
+Test-Case 'a finding whose file has changed is refused' {
+    $p = New-TestFile
+    $f = New-TestFinding $p
+    [IO.File]::WriteAllText($p, 'something else entirely')
+    $r = Test-QpFindingStillTrue $f
+    Remove-Item $p -Force
+    -not $r.Ok -and $r.Why -match 'changed'
+}
+Test-Case 'a finding whose file is gone is refused' {
+    $p = New-TestFile
+    $f = New-TestFinding $p
+    Remove-Item $p -Force
+    -not (Test-QpFindingStillTrue $f).Ok
+}
+Test-Case 'quarantine round trip puts back a byte-identical file' {
+    if (-not $admin) { return 'skip' }
+    $p = New-TestFile 'round trip content'
+    $before = Get-QpFileHash $p
+    $f = New-TestFinding $p
+    $q = Invoke-QpRemediate -Finding $f -Action Quarantine
+    $gone = -not (Test-Path -LiteralPath $p)
+    $item = @(Get-QpQuarantineItems | Where-Object { $_.OriginalPath -eq $p }) | Select-Object -First 1
+    $stored = $item -and (Test-Path (Join-Path $item.Folder 'payload.bin')) -and -not (Test-Path (Join-Path $item.Folder $item.FileName))
+    $r = Restore-QpQuarantineItem -Id $item.Id
+    $after = Get-QpFileHash $p
+    Remove-Item $p -Force -ErrorAction SilentlyContinue
+    $q.Ok -and $gone -and $stored -and $r.Ok -and $before -eq $after
+}
+Test-Case 'quarantined files are stored where they cannot run' {
+    if (-not $admin) { return 'skip' }
+    $p = New-TestFile
+    $f = New-TestFinding $p
+    Invoke-QpRemediate -Finding $f -Action Quarantine | Out-Null
+    $item = @(Get-QpQuarantineItems | Where-Object { $_.OriginalPath -eq $p }) | Select-Object -First 1
+    $ok = $item -and $item.FileName -like '*.txt' -and (Get-ChildItem $item.Folder | Where-Object { $_.Name -eq 'payload.bin' })
+    Remove-QpQuarantineItem -Id $item.Id -Force | Out-Null
+    $ok
+}
+Test-Case 'permanent deletion refuses without an explicit confirmation' {
+    if (-not $admin) { return 'skip' }
+    $p = New-TestFile
+    $f = New-TestFinding $p
+    $r = Invoke-QpRemediate -Finding $f -Action Delete      # no -Force
+    $stillThere = Test-Path -LiteralPath $p
+    Remove-Item $p -Force -ErrorAction SilentlyContinue
+    -not $r.Ok -and $stillThere
+}
+Test-Case 'permanent deletion works when it is confirmed' {
+    if (-not $admin) { return 'skip' }
+    $p = New-TestFile
+    $f = New-TestFinding $p
+    $r = Invoke-QpRemediate -Finding $f -Action Delete -Force
+    $r.Ok -and -not (Test-Path -LiteralPath $p)
+}
+Test-Case 'the Recycle Bin keeps the file rather than destroying it' {
+    if (-not $admin) { return 'skip' }
+    $p = New-TestFile
+    $f = New-TestFinding $p
+    $r = Invoke-QpRemediate -Finding $f -Action RecycleBin
+    $r.Ok -and -not (Test-Path -LiteralPath $p) -and $r.Note -match 'Recycle Bin'
+}
+Test-Case 'a file in a protected folder is refused, not deleted' {
+    $f = New-QpFinding -Path (Join-Path $env:WINDIR 'System32\notepad.exe') -ThreatName 'Test:Win32/NotReally' -Source 'Quietpane check'
+    $r = Invoke-QpRemediate -Finding $f -Action Delete -Force
+    -not $r.Ok -and (Test-Path (Join-Path $env:WINDIR 'System32\notepad.exe'))
+}
+Test-Case 'restoring something that is no longer quarantined fails cleanly' {
+    (Restore-QpQuarantineItem -Id 'nothing-like-this').Ok -eq $false
+}
+Test-Case 'quarantine actions are all written to the audit log' {
+    if (-not $admin) { return 'skip' }
+    $log = Get-Content (Join-Path $env:ProgramData 'Quietpane\audit.log') -Tail 30 -ErrorAction SilentlyContinue
+    ($log -join "`n") -match 'Quarantine' -and ($log -join "`n") -match 'DeletePermanently'
+}
+
 Section 'With the real antivirus (needs -Live and administrator rights)'
 if (-not $Live) {
     Write-Host '  SKIP  EICAR detection (run with -Live to include it)' -ForegroundColor DarkGray

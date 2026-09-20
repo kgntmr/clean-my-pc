@@ -53,7 +53,7 @@ Almost everything on a modern PC reports home: Windows, browsers, graphics drive
 - 🔒 **Collects nothing.** No accounts, analytics, telemetry, crash reports, ads or tracking.
 - 🌐 **Connects to nothing.** No network requests at all: [verify it yourself](#verify-it-yourself).
 - 👀 **Tells you first.** Every item explains what it does and its side effects, and **Preview** shows exactly what would change.
-- ↩️ **Can be undone.** Every change creates a restore point, and files only go to your Recycle Bin.
+- ↩️ **Can be undone.** Every change creates a restore point, and tidying up only ever moves files to your Recycle Bin. Only a threat you choose to delete for good is gone for good, and you're asked twice.
 - 📖 **Hides nothing.** Plain-text PowerShell, no installer, no `.exe`, no obfuscation.
 - 🛡️ **Leaves your security alone.** Defender, SmartScreen, the firewall and Windows Update are never touched.
 
@@ -84,7 +84,13 @@ Results come back as a doughnut chart with a written legend, and a card for each
 - **Microsoft Defender** - a real detection with a real threat name. Quietpane translates the name into plain words and sorts it into Critical, High, Medium, Low or Info. Defender's own name and classification stay on the card.
 - **Quietpane check** - our own heuristics: odd startup entries, hidden tasks, tampered programs, cracked-software traces. These are **signals, not proof**, and they never claim a malware family.
 
-Threats Defender is still holding get three buttons: **Remove it** (Defender does the removing and keeps a copy you can restore from Windows Security), **Quarantine** (arriving in the next version) and **Leave it for now**, which warns you that it stays on the PC. Leaving something alone is recorded by Quietpane only: **it never creates a Defender exclusion** and never weakens a future scan. Every action is written to `%ProgramData%\Quietpane\audit.log`.
+Each finding with a real file behind it gets three buttons:
+
+- **Remove it** asks how: let **Defender** handle it (safest, and Windows Security can restore it), **quarantine** it with Quietpane, move it to the **Recycle Bin**, or **delete it permanently**. Permanent deletion is the only thing Quietpane cannot undo, so it asks twice and says so plainly.
+- **Quarantine** moves the file somewhere it cannot run. The original path, times and SHA256 are recorded, the folder is locked to administrators, and **Put it back** restores the file byte-for-byte after checking the hash still matches. Quarantined items are listed in the same tab.
+- **Leave it for now** warns that it stays on the PC. It's a note in Quietpane only: **it never creates a Defender exclusion** and never weakens a future scan.
+
+Before anything is moved or deleted, Quietpane re-checks that the file is still there and still the same file, and refuses outright in Windows, Program Files and driver folders. Every action, including every failure, is written to `%ProgramData%\Quietpane\audit.log`.
 
 **Quietpane cannot identify a malware family by itself.** Without Defender, only the heuristics run, and the scan says so rather than implying the PC is clean.
 
@@ -133,7 +139,7 @@ You'll find exactly two matches, both in `src/Quietpane.psm1`, where `$suspiciou
 | Blocking Microsoft servers in the hosts file | Breaks Windows Update, the Store and Defender |
 | Deleting NVIDIA's telemetry plugin | Breaks NVIDIA App. Its servers are blocked instead. |
 | Removing Microsoft Edge | Windows blocks it outside the EEA, and WebView2 must stay |
-| Permanently deleting anything | Your Recycle Bin, your decision |
+| Deleting anything behind your back | Clean-up and bloat removal always use the Recycle Bin. A confirmed threat can be deleted for good, but only when you pick that yourself and confirm it. |
 
 Windows Home and Pro treat "diagnostic data = 0" as "Required", so the switch that actually works is disabling the DiagTrack service, which this tool does. Big Windows updates can quietly turn tips back on: run it again afterwards.
 

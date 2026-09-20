@@ -10,13 +10,15 @@
     Principles
       * Scan is read-only.
       * Every change is recorded in a restore point (%ProgramData%\Quietpane\restore\...) and can be undone.
-      * Files are only ever moved to the Recycle Bin - never permanently deleted.
+      * Tidying up only ever moves files to the Recycle Bin. The single exception is a threat the
+        user chooses to delete for good, which is confirmed twice and written to the audit log.
+      * Quarantined files are moved, never altered, and can be restored byte-for-byte.
       * Scheduled tasks are disabled, never deleted.
       * Security (Defender, SmartScreen, firewall) and Windows Update are never touched.
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.5.0'
+$script:AppVersion  = '1.6.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -1046,15 +1048,228 @@ function Add-QpAllow {
     } catch { Write-QpLog "Could not record that choice: $($_.Exception.Message)" 'WARN' }
 }
 
+function Get-QpFailureReason {
+    <# Say what actually went wrong, rather than guessing. #>
+    param($Ex)
+    $name = if ($Ex) { $Ex.GetType().Name } else { '' }
+    switch -Regex ($name) {
+        'UnauthorizedAccessException' { return 'Windows would not allow it. Quietpane needs administrator rights, or the file is protected.' }
+        'FileNotFoundException|DirectoryNotFoundException' { return 'It is not there any more. Run the check again.' }
+        'IOException' { return 'The file is in use, so it could not be moved. Close whatever is using it, or restart and try again.' }
+        default { return $(if ($Ex) { $Ex.Message } else { 'It did not work.' }) }
+    }
+}
+
+function Get-QpQuarantineRoot {
+    <# The quarantine folder, locked down the first time it is needed. #>
+    $root = Join-Path $script:DataRoot 'quarantine'
+    if (-not (Test-Path $root)) {
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        try {
+            # Only SYSTEM and administrators may look inside. Inheritance off, so a wide-open
+            # ProgramData permission cannot leak in.
+            & icacls.exe $root /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
+        } catch { Write-QpLog "Could not lock down the quarantine folder: $($_.Exception.Message)" 'WARN' }
+    }
+    return $root
+}
+
+function Test-QpProtectedPath {
+    <# Places Quietpane will never move, recycle or delete, whatever a finding says. #>
+    param([string]$Path)
+    if (-not $Path) { return $true }
+    $p = ''
+    try { $p = [IO.Path]::GetFullPath($Path) } catch { return $true }
+    if ($p.Length -lt 8) { return $true }                                  # a drive root or similar
+    if (Test-Path -LiteralPath $p -PathType Container) { return $true }    # only ever single files
+    $protected = @(
+        [Environment]::GetFolderPath('Windows')
+        (Join-Path $env:WINDIR 'System32'), (Join-Path $env:WINDIR 'SysWOW64'), (Join-Path $env:WINDIR 'WinSxS')
+        (Join-Path $env:SystemDrive '\Program Files\WindowsApps')
+        $env:ProgramFiles, ${env:ProgramFiles(x86)}
+        $script:DataRoot
+    ) | Where-Object { $_ }
+    foreach ($root in $protected) {
+        if ($p -eq $root -or $p.StartsWith(($root.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Test-QpFindingStillTrue {
+    <# Before anything destructive: is this still the same file we were told about? #>
+    param($Finding)
+    if (-not $Finding.Path) { return [pscustomobject]@{ Ok = $false; Why = 'This finding has no file attached, so there is nothing to act on.' } }
+    if (-not (Test-Path -LiteralPath $Finding.Path -PathType Leaf)) { return [pscustomobject]@{ Ok = $false; Why = 'That file is not there any more. Run the check again.' } }
+    if (Test-QpProtectedPath $Finding.Path) { return [pscustomobject]@{ Ok = $false; Why = 'That file lives in a protected Windows folder. Quietpane will not touch it - use Windows Security instead.' } }
+    if ($Finding.Sha256) {
+        $now = Get-QpFileHash $Finding.Path
+        if ($now -and $now -ne $Finding.Sha256) { return [pscustomobject]@{ Ok = $false; Why = 'That file has changed since the check ran, so it may not be the same thing. Run the check again.' } }
+    }
+    return [pscustomobject]@{ Ok = $true; Why = '' }
+}
+
+function Invoke-QpQuarantine {
+    <#
+        Moves the file into Quietpane's quarantine: renamed so it cannot run, with everything needed
+        to put it back. The original folder, name, times and hash are recorded.
+    #>
+    param([Parameter(Mandatory)]$Finding)
+    $check = Test-QpFindingStillTrue $Finding
+    if (-not $check.Ok) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = $check.Why } }
+    $root = Get-QpQuarantineRoot
+    # The quarantine folder is deliberately locked to administrators. Check we can write before moving anything.
+    try {
+        $probe = Join-Path $root ('.write-test-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $probe -Force -ErrorAction Stop | Out-Null
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'The quarantine folder is locked to administrators, and Quietpane is not running as one. Start it with "Start Quietpane", which asks Windows for permission.' }
+    }
+    $id = '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $Finding.Id
+    $dir = Join-Path $root $id
+    try {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $src = Get-Item -LiteralPath $Finding.Path -Force
+        $hash = if ($Finding.Sha256) { $Finding.Sha256 } else { Get-QpFileHash $Finding.Path }
+        $meta = [pscustomobject]@{
+            Id = $id; OriginalPath = $src.FullName; FileName = $src.Name; Size = $src.Length
+            Sha256 = $hash; ThreatName = $Finding.ThreatName; Family = $Finding.Family
+            Severity = $Finding.Severity; Source = $Finding.Source; Confidence = $Finding.Confidence
+            QuarantinedAt = (Get-Date).ToString('s'); Status = 'Quarantined'
+            CreationTime = $src.CreationTime.ToString('o'); LastWriteTime = $src.LastWriteTime.ToString('o')
+            Attributes = "$($src.Attributes)"
+        }
+        $meta | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $dir 'meta.json') -Encoding UTF8
+        Move-Item -LiteralPath $src.FullName -Destination (Join-Path $dir 'payload.bin') -Force -ErrorAction Stop
+        Set-ItemProperty -LiteralPath (Join-Path $dir 'payload.bin') -Name Attributes -Value 'Normal' -ErrorAction SilentlyContinue
+        Write-QpLog "Quarantined $($src.Name). It cannot run from there, and you can put it back any time." 'OK'
+        Write-QpAudit -FindingId $Finding.Id -Action 'Quarantine' -Result 'Quarantined' -Object $src.FullName -Note $id
+        [pscustomobject]@{ Ok = $true; Status = 'Quarantined'; Note = "Moved into Quietpane's quarantine. You can restore it from the Safety scan tab."; QuarantineId = $id }
+    } catch {
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        $why = Get-QpFailureReason $_.Exception
+        Write-QpLog "Could not quarantine $($Finding.Path): $why" 'ERROR'
+        Write-QpAudit -FindingId $Finding.Id -Action 'Quarantine' -Result 'Failed' -Object $Finding.Path -Note $_.Exception.Message
+        [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = $why }
+    }
+}
+
+function Get-QpQuarantineItems {
+    $root = Join-Path $script:DataRoot 'quarantine'
+    if (-not (Test-Path $root)) { return @() }
+    @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object {
+        $metaFile = Join-Path $_.FullName 'meta.json'
+        if (-not (Test-Path $metaFile)) { return }
+        try {
+            $m = Get-Content $metaFile -Raw | ConvertFrom-Json
+            $payload = Join-Path $_.FullName 'payload.bin'
+            [pscustomobject]@{
+                Id = $m.Id; FileName = $m.FileName; OriginalPath = $m.OriginalPath; Size = [int64]$m.Size
+                Sha256 = $m.Sha256; ThreatName = $m.ThreatName; Severity = $m.Severity; Source = $m.Source
+                QuarantinedAt = $m.QuarantinedAt; Folder = $_.FullName; HasPayload = (Test-Path $payload)
+            }
+        } catch { }
+    })
+}
+
+function Restore-QpQuarantineItem {
+    <# Puts a quarantined file back exactly where it was, but only if it is still byte-for-byte the same. #>
+    param([Parameter(Mandatory)][string]$Id)
+    $item = @(Get-QpQuarantineItems | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
+    if (-not $item) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'That quarantined item is no longer there.' } }
+    $payload = Join-Path $item.Folder 'payload.bin'
+    if (-not (Test-Path $payload)) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'The quarantined file is missing.' } }
+    if ($item.Sha256) {
+        $now = Get-QpFileHash $payload
+        if ($now -and $now -ne $item.Sha256) {
+            Write-QpAudit -FindingId $Id -Action 'Restore' -Result 'Failed' -Object $item.OriginalPath -Note 'hash mismatch'
+            return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'The quarantined file does not match what was stored, so it was left alone.' }
+        }
+    }
+    try {
+        $dest = $item.OriginalPath
+        $parent = Split-Path $dest -Parent
+        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        if (Test-Path -LiteralPath $dest) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = "Something is already at $dest, so nothing was overwritten." } }
+        Move-Item -LiteralPath $payload -Destination $dest -ErrorAction Stop
+        $meta = Get-Content (Join-Path $item.Folder 'meta.json') -Raw | ConvertFrom-Json
+        try {
+            $f = Get-Item -LiteralPath $dest -Force
+            $f.CreationTime = [datetime]::Parse($meta.CreationTime)
+            $f.LastWriteTime = [datetime]::Parse($meta.LastWriteTime)
+        } catch { }
+        Remove-Item -LiteralPath $item.Folder -Recurse -Force -ErrorAction SilentlyContinue
+        Write-QpLog "Restored $($item.FileName) to $dest" 'OK'
+        Write-QpAudit -FindingId $Id -Action 'Restore' -Result 'Restored' -Object $dest
+        [pscustomobject]@{ Ok = $true; Status = 'Restored'; Note = "Put back at $dest. Your antivirus may catch it again straight away." }
+    } catch {
+        Write-QpAudit -FindingId $Id -Action 'Restore' -Result 'Failed' -Object $item.OriginalPath -Note $_.Exception.Message
+        [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = $_.Exception.Message }
+    }
+}
+
+function Remove-QpQuarantineItem {
+    <# Deletes a quarantined file for good. There is no undo, and the window asks first. #>
+    param([Parameter(Mandatory)][string]$Id, [switch]$Force)
+    if (-not $Force) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'Permanent deletion has to be confirmed.' } }
+    $item = @(Get-QpQuarantineItems | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
+    if (-not $item) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'That quarantined item is no longer there.' } }
+    try {
+        Remove-Item -LiteralPath $item.Folder -Recurse -Force -ErrorAction Stop
+        Write-QpLog "Deleted $($item.FileName) for good. This one cannot be undone." 'OK'
+        Write-QpAudit -FindingId $Id -Action 'DeletePermanently' -Result 'Deleted' -Object $item.OriginalPath -Note 'from quarantine'
+        [pscustomobject]@{ Ok = $true; Status = 'Removed'; Note = 'Deleted for good.' }
+    } catch {
+        Write-QpAudit -FindingId $Id -Action 'DeletePermanently' -Result 'Failed' -Object $item.OriginalPath -Note $_.Exception.Message
+        [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = $_.Exception.Message }
+    }
+}
+
 function Invoke-QpRemediate {
     <#
-        Stage 1 handles what Defender already owns, plus the user's explicit "leave it".
-        Quarantine, Recycle Bin and permanent delete arrive with the quarantine store.
+        What happens to a finding. Defender first for things Defender found, then Quietpane's own
+        quarantine, the Recycle Bin, or - only when the user says so outright - permanent deletion.
     #>
-    param([Parameter(Mandatory)]$Finding, [ValidateSet('Defender', 'Allow')][string]$Action = 'Defender')
+    param([Parameter(Mandatory)]$Finding, [ValidateSet('Defender', 'Quarantine', 'RecycleBin', 'Delete', 'Allow')][string]$Action = 'Defender', [switch]$Force)
     if ($Action -eq 'Allow') {
         Add-QpAllow -FindingId $Finding.Id -ThreatName $Finding.ThreatName -Path $Finding.Path
         return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Allowed'; Ok = $true; Note = 'Left in place at your request.' }
+    }
+    if ($Action -in 'Quarantine', 'RecycleBin', 'Delete') {
+        if (-not (Test-QpAdmin)) {
+            Write-QpAudit -FindingId $Finding.Id -Action $Action -Result 'Failed' -Object $Finding.Path -Note 'not running as administrator'
+            return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'Quietpane needs administrator rights for this. Start it again with "Start Quietpane", which asks Windows for permission.' }
+        }
+        if ($Action -eq 'Quarantine') {
+            $r = Invoke-QpQuarantine -Finding $Finding
+            return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = $r.Status; Ok = $r.Ok; Note = $r.Note }
+        }
+        $check = Test-QpFindingStillTrue $Finding
+        if (-not $check.Ok) {
+            Write-QpAudit -FindingId $Finding.Id -Action $Action -Result 'Failed' -Object $Finding.Path -Note $check.Why
+            return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = $check.Why }
+        }
+        if ($Action -eq 'RecycleBin') {
+            if (Move-QpToRecycleBin $Finding.Path) {
+                Write-QpLog "Moved $($Finding.Path) to the Recycle Bin. It is still on this PC until you empty the bin." 'OK'
+                Write-QpAudit -FindingId $Finding.Id -Action 'RecycleBin' -Result 'Removed' -Object $Finding.Path
+                return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Removed'; Ok = $true; Note = 'In your Recycle Bin. Empty the bin to finish the job, or restore it from there.' }
+            }
+            Write-QpAudit -FindingId $Finding.Id -Action 'RecycleBin' -Result 'Failed' -Object $Finding.Path -Note 'move failed'
+            return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'It could not be moved - it is probably in use. Close what is using it, or restart and try again.' }
+        }
+        # Delete: gone for good, and only ever when the window has asked outright.
+        if (-not $Force) { return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'Permanent deletion has to be confirmed first.' } }
+        try {
+            Remove-Item -LiteralPath $Finding.Path -Force -ErrorAction Stop
+            Write-QpLog "Deleted $($Finding.Path) for good. This one cannot be undone." 'OK'
+            Write-QpAudit -FindingId $Finding.Id -Action 'DeletePermanently' -Result 'Deleted' -Object $Finding.Path
+            return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Removed'; Ok = $true; Note = 'Deleted for good.' }
+        } catch {
+            $why = Get-QpFailureReason $_.Exception
+            Write-QpAudit -FindingId $Finding.Id -Action 'DeletePermanently' -Result 'Failed' -Object $Finding.Path -Note $_.Exception.Message
+            return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = $why }
+        }
     }
     if ($Finding.Source -ne 'Microsoft Defender') {
         Write-QpLog 'Only Defender can remove its own detections. This finding came from a Quietpane check, so there is nothing for Defender to remove.' 'WARN'
@@ -1630,5 +1845,6 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpVendorStatus, Invoke-QpVendor, Invoke-QpVendorUninstall,
     Get-QpDefenderState, Get-QpDefenderFindings, Invoke-QpThreatScan, Invoke-QpRemediate, Get-QpAllowList, Resolve-QpThreatInfo, New-QpFinding,
     New-QpDonutSvg, New-QpReportHtml, Get-QpFileHash,
+    Invoke-QpQuarantine, Get-QpQuarantineItems, Restore-QpQuarantineItem, Remove-QpQuarantineItem, Test-QpProtectedPath, Test-QpFindingStillTrue,
     Get-QpRecommendedPlan, Invoke-QpRecommended,
     Invoke-QpAudit
