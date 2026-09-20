@@ -5,6 +5,16 @@
         powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1
         powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1 -Live   (adds the EICAR test)
 
+    The quarantine tests need administrator rights, and -ExecutionPolicy Bypass does not grant them:
+    without an elevated window those six are skipped. The reliable way to get one is to paste this into
+    an ordinary PowerShell window and answer Yes to the prompt Windows shows:
+
+        Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass',
+            '-File','C:\Tools\quietpane\tests\Run-QuietpaneTests.ps1','-Live'
+
+    (all on one line). An elevated window says "Administrator:" in its title bar and starts in
+    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated: 65 checks run.
+
     No real malware is ever used. The only live test writes the EICAR string - the harmless standard file
     the antivirus industry publishes so people can check their protection works - into a temporary folder,
     and it is built at runtime so the string is never stored in this repository.

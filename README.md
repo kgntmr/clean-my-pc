@@ -195,7 +195,14 @@ Removing it doesn't undo its changes: click **Undo** first if you want your PC b
 - **Run from source:** clone and double-click `Start Quietpane.cmd` (or `Safety scan only.cmd`).
 - **Build the download:** `powershell -ExecutionPolicy Bypass -File tools\build-release.ps1` creates `dist\Quietpane.zip` and prints its SHA256. The ZIP holds exactly the files in this repo; nothing is compiled.
 - **Test safely:** `.\Quietpane.ps1 -SelfTest` builds the window without showing it; add `-Snapshot file.png -SnapshotTab 0` to render it.
-- **Run the tests:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`, or add `-Live` to include the EICAR check. Run it from an elevated window to include the quarantine tests. No real malware is used anywhere; the EICAR string is built at runtime, so it is never stored in this repository.
+- **Run the tests:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`, or add `-Live` to include the EICAR check. No real malware is used anywhere; the EICAR string is built at runtime, so it is never stored in this repository.
+- **Include the quarantine tests:** they need administrator rights, and `-ExecutionPolicy Bypass` doesn't grant them - without an elevated window those six are skipped. Paste this into an ordinary PowerShell window and answer **Yes**:
+
+  ```powershell
+  Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','C:\Tools\quietpane\tests\Run-QuietpaneTests.ps1','-Live'
+  ```
+
+  An elevated window says "Administrator:" in its title bar and starts in `C:\WINDOWS\system32`. All 65 checks run there.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what a person still has to test in a browser and in the window, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files, and it makes no network requests.
 - **Contribute:** the lists are plain data files in [`src/catalog/`](src/catalog), so adding a setting, app, folder or brand needs no code. Describe side effects honestly and test with **Preview** first.
 
