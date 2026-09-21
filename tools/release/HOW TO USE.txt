@@ -24,6 +24,9 @@ STEP 3 - CLICK ONE BUTTON
    Dell, HP, Lenovo, Acer - and the Intel, AMD or NVIDIA reporting bits,
    if your PC has any. Your drivers are never touched.
 
+   Open Quietpane again now and then. Big Windows updates sometimes switch
+   things back on, and Home will tell you what came back.
+
 
 A GOOD START, NOT A GUARANTEE
    Quietpane clears out the usual troublemakers, but it cannot promise a

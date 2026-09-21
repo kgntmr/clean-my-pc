@@ -18,7 +18,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.8.0'
+$script:AppVersion  = '1.9.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -109,9 +109,43 @@ function Test-QpAdmin {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+$script:CatalogCache = @{}
 function Get-QpCatalog {
-    param([ValidateSet('privacy', 'apps', 'cleanup', 'vendors', 'threats')][string]$Name)
-    Import-PowerShellDataFile -Path (Join-Path $script:CatalogRoot "$Name.psd1")
+    <# A catalog file, parsed once and remembered. It is read again only if the file itself changes. #>
+    param([ValidateSet('privacy', 'apps', 'cleanup', 'vendors', 'threats', 'startup')][string]$Name)
+    $path = Join-Path $script:CatalogRoot "$Name.psd1"
+    $stamp = (Get-Item -LiteralPath $path).LastWriteTimeUtc.Ticks
+    $hit = $script:CatalogCache[$Name]
+    if ($hit -and $hit.Stamp -eq $stamp) { return $hit.Data }
+    $data = Import-PowerShellDataFile -Path $path
+    $script:CatalogCache[$Name] = @{ Stamp = $stamp; Data = $data }
+    return $data
+}
+
+# While the window reads the PC's state, slow lookups are made once and shared, instead of once per
+# setting. Outside a read (when something is actually being changed) everything is asked fresh.
+$script:StateCache = $null
+function Start-QpStateCache { $script:StateCache = @{} }
+function Stop-QpStateCache { $script:StateCache = $null }
+
+function Get-QpTasksByPath {
+    # Every scheduled task in one query (about a second), rather than one query per folder (a second each).
+    if ($script:StateCache -and $script:StateCache.ContainsKey('Tasks')) { return $script:StateCache.Tasks }
+    $byPath = @{}
+    foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+        if (-not $byPath.ContainsKey($t.TaskPath)) { $byPath[$t.TaskPath] = New-Object System.Collections.ArrayList }
+        [void]$byPath[$t.TaskPath].Add($t)
+    }
+    if ($script:StateCache) { $script:StateCache.Tasks = $byPath }
+    return $byPath
+}
+
+function Get-QpAppxPackages {
+    # The installed Store apps, asked for once per read.
+    if ($script:StateCache -and $script:StateCache.ContainsKey('Appx')) { return $script:StateCache.Appx }
+    $all = @(Get-AppxPackage -ErrorAction SilentlyContinue)
+    if ($script:StateCache) { $script:StateCache.Appx = $all }
+    return $all
 }
 
 function Format-QpBytes {
@@ -326,6 +360,8 @@ function New-QpLiveMonitor {
         Available = $null; MemTotal = [double]0
         Engines = $null; EnginePrev = $null; GpuMemory = $null; GpuSensors = $false
         ZoneSeen = New-Object System.Collections.Generic.List[double]
+        Procs = $null; ProcPrev = $null; Names = @{}; Cores = [math]::Max(1, [Environment]::ProcessorCount)
+        Power = $false
     }
     # Task Manager's own processor figure first, the older one if this Windows doesn't have it.
     try { $m.Cpu = New-Object Diagnostics.PerformanceCounter('Processor Information', '% Processor Utility', '_Total', $true); [void]$m.Cpu.NextValue() }
@@ -353,8 +389,41 @@ function New-QpLiveMonitor {
     try { Add-Type -AssemblyName Microsoft.VisualBasic; $m.MemTotal = [double](New-Object Microsoft.VisualBasic.Devices.ComputerInfo).TotalPhysicalMemory } catch { }
     try { $m.Engines = New-Object Diagnostics.PerformanceCounterCategory('GPU Engine'); $m.EnginePrev = $m.Engines.ReadCategory() } catch { $m.Engines = $null }
     try { $m.GpuMemory = New-Object Diagnostics.PerformanceCounterCategory('GPU Adapter Memory') } catch { }
+    # Per-program load, for "what's using it". One read of Windows' own counters covers every program.
+    try { $m.Procs = New-Object Diagnostics.PerformanceCounterCategory('Process'); $m.ProcPrev = $m.Procs.ReadCategory() } catch { $m.Procs = $null }
+    # Battery charge and whether it's plugged in: the same figures as the battery icon by the clock.
+    try { Add-Type -AssemblyName System.Windows.Forms; $m.Power = $true } catch { }
     $m.GpuSensors = Initialize-QpGpuSensors
     return $m
+}
+
+# Windows' own processes often don't describe themselves; these are the usual ones, in plain words.
+$script:ProgramNames = @{
+    'system' = 'Windows'; 'registry' = 'Windows'; 'memory compression' = 'Windows memory'; 'dwm' = 'Windows desktop'
+    'csrss' = 'Windows'; 'svchost' = 'Windows services'; 'audiodg' = 'Windows audio'; 'searchindexer' = 'Windows search'
+    'msmpeng' = 'Microsoft Defender'; 'mpdefendercoreservice' = 'Microsoft Defender'; 'wmiprvse' = 'Windows management'
+    'nvdisplay.container' = 'NVIDIA display helper'; 'explorer' = 'Windows Explorer'; 'tiworker' = 'Windows Update'
+}
+
+function Get-QpProgramName {
+    <# A program's own name for itself ("No Man's Sky", not "nms"), remembered once found. #>
+    param([Parameter(Mandatory)]$Monitor, [string]$Instance, [int]$ProcessId)
+    if ($ProcessId -eq $PID) { return 'Quietpane (this app)' }
+    $key = $Instance.ToLower()
+    if ($Monitor.Names.ContainsKey($key)) { return $Monitor.Names[$key] }
+    $name = $script:ProgramNames[$key]
+    if (-not $name) {
+        try {
+            $p = Get-Process -Id $ProcessId -ErrorAction Stop
+            foreach ($n in [string]$p.Description, [string]$p.Product, [string]$p.MainWindowTitle) {
+                $n = $n.Trim()
+                if ($n -and $n.Length -le 40 -and $n -notmatch '(?i)operating system') { $name = $n; break }
+            }
+        } catch { }
+    }
+    if (-not $name) { $name = $Instance }
+    $Monitor.Names[$key] = $name
+    return $name
 }
 
 function Get-QpLiveReading {
@@ -402,8 +471,37 @@ function Get-QpLiveReading {
     $memUsed = $null
     if ($m.Available -and $m.MemTotal -gt 0) { try { $memUsed = [math]::Max([double]0, [double]$m.MemTotal - [double]$m.Available.NextValue()) } catch { } }
 
-    # How busy each graphics adapter is: the busiest engine wins, as in Task Manager.
+    # Which programs are using the processor. Windows counts per core, so divide by cores to match
+    # Task Manager. Programs are keyed by process id, then added up under their friendly name.
+    $pidName = @{}
+    $topCpu = @()
+    if ($m.Procs) {
+        try {
+            $now = $m.Procs.ReadCategory()
+            $cn = $now['% Processor Time']; $ids = $now['ID Process']
+            $cp = if ($m.ProcPrev) { $m.ProcPrev['% Processor Time'] } else { $null }
+            $byName = @{}
+            foreach ($inst in $cn.Keys) {
+                $instName = ("$inst" -replace '#\d+$', '')
+                if ($instName -in '_Total', 'Idle') { continue }
+                $procId = if ($ids -and $ids.Contains($inst)) { [int]$ids[$inst].RawValue } else { 0 }
+                if ($procId) { $pidName[$procId] = $instName }
+                if (-not $cp -or -not $cp.Contains($inst)) { continue }
+                $v = [Diagnostics.CounterSample]::Calculate($cp[$inst].Sample, $cn[$inst].Sample) / $m.Cores
+                if ($v -le 0) { continue }
+                $label = Get-QpProgramName -Monitor $m -Instance $instName -ProcessId $procId
+                $byName[$label] = [double]$byName[$label] + $v
+            }
+            $m.ProcPrev = $now
+            $topCpu = @($byName.GetEnumerator() | Where-Object { $_.Value -ge 1 } | Sort-Object Value -Descending | Select-Object -First 3 |
+                ForEach-Object { [pscustomobject]@{ Name = $_.Key; Pct = [math]::Round([math]::Min([double]100, $_.Value)) } })
+        } catch { }
+    }
+
+    # How busy each graphics adapter is: the busiest engine wins, as in Task Manager. The same numbers,
+    # split by program, say what is using each card.
     $busy = @{}
+    $perProgram = @{}   # "luid|pid" -> that program's busiest engine on that card
     if ($m.Engines) {
         try {
             $now = $m.Engines.ReadCategory()
@@ -413,9 +511,13 @@ function Get-QpLiveReading {
             if ($pn -and $pp) {
                 foreach ($name in $pn.Keys) {
                     if (-not $pp.Contains($name)) { continue }
-                    if ("$name" -notmatch '(?i)luid_(0x[0-9a-f]+_0x[0-9a-f]+)_phys_\d+_eng_(\d+)') { continue }
-                    $key = $matches[1].ToLower() + '|' + $matches[2]
-                    $perEngine[$key] = [double]$perEngine[$key] + [Diagnostics.CounterSample]::Calculate($pp[$name].Sample, $pn[$name].Sample)
+                    if ("$name" -notmatch '(?i)pid_(\d+)_luid_(0x[0-9a-f]+_0x[0-9a-f]+)_phys_\d+_eng_(\d+)') { continue }
+                    $procId = [int]$matches[1]; $luid = $matches[2].ToLower()
+                    $key = $luid + '|' + $matches[3]
+                    $v = [Diagnostics.CounterSample]::Calculate($pp[$name].Sample, $pn[$name].Sample)
+                    $perEngine[$key] = [double]$perEngine[$key] + $v
+                    $pk = "$luid|$procId"
+                    if ($v -gt [double]$perProgram[$pk]) { $perProgram[$pk] = $v }
                 }
             }
             $m.EnginePrev = $now
@@ -462,12 +564,43 @@ function Get-QpLiveReading {
                 DedicatedTotal = 0; DedicatedUsed = [double]$dedicated[$k]; SharedTotal = 0; SharedUsed = [double]$shared[$k]; Discrete = ([double]$dedicated[$k] -gt 0) }
         })
     }
+    # What's using each card, busiest first. Anything under 1% isn't worth a line.
+    foreach ($g in $gpus) {
+        $byName = @{}
+        foreach ($pk in @($perProgram.Keys | Where-Object { $_ -like "$($g.Luid)|*" })) {
+            $procId = [int]($pk.Split('|')[1])
+            $inst = if ($pidName.ContainsKey($procId)) { $pidName[$procId] } else { "program $procId" }
+            $label = Get-QpProgramName -Monitor $m -Instance $inst -ProcessId $procId
+            if ($perProgram[$pk] -gt [double]$byName[$label]) { $byName[$label] = $perProgram[$pk] }
+        }
+        $top = @($byName.GetEnumerator() | Where-Object { $_.Value -ge 1 } | Sort-Object Value -Descending | Select-Object -First 3 |
+            ForEach-Object { [pscustomobject]@{ Name = $_.Key; Pct = [math]::Round([math]::Min([double]100, $_.Value)) } })
+        $g | Add-Member -NotePropertyName Top -NotePropertyValue $top -Force
+    }
+
+    # The battery, as the icon by the clock sees it. 255 means "unknown"; no battery means a desktop.
+    $battery = $null
+    if ($m.Power) {
+        try {
+            $ps = [System.Windows.Forms.SystemInformation]::PowerStatus
+            $noBattery = ([int]$ps.BatteryChargeStatus -band 128) -ne 0
+            if (-not $noBattery -and $ps.BatteryLifePercent -le 1) {
+                $battery = [pscustomobject]@{
+                    Percent = [math]::Round([double]$ps.BatteryLifePercent * 100)
+                    PluggedIn = ([string]$ps.PowerLineStatus -eq 'Online')
+                    Charging = (([int]$ps.BatteryChargeStatus -band 8) -ne 0)
+                }
+            }
+        } catch { }
+    }
+
     [pscustomobject]@{
         At = Get-Date
-        CpuName = $m.CpuName; CpuUsage = $cpu
+        CpuName = $m.CpuName; CpuUsage = $cpu; CpuTop = $topCpu
         CpuTempC = $cpuTemp; CpuTempSource = $m.ZoneName; CpuTempStuck = $stuck
         CpuLimitPct = $limit; CpuThrottled = ($null -ne $limit -and $limit -lt 100)
         MemTotal = $m.MemTotal; MemUsed = $memUsed
+        Battery = $battery
         # The card with its own memory first: on a gaming laptop that's the one that matters.
         Gpus = @($gpus | Sort-Object @{ Expression = { $_.Discrete }; Descending = $true }, @{ Expression = { $_.DedicatedTotal }; Descending = $true })
     }
@@ -478,17 +611,176 @@ function Get-QpHeatWord {
         A temperature in plain words, so heat is never shown by colour alone. Laptops run hot under
         load, so the words are calm: only "very hot" is meant to catch the eye.
     #>
-    param($Celsius, $MaxC = $null)
+    param($Celsius, $MaxC = $null, [ValidateSet('Chip', 'Drive')][string]$Kind = 'Chip')
     if ($null -eq $Celsius) { return [pscustomobject]@{ Word = 'not shared'; Level = 'none' } }
     $c = [double]$Celsius
-    $veryHot = 95
-    if ($null -ne $MaxC -and [double]$MaxC -gt 60) { $veryHot = [math]::Min(95, [double]$MaxC - 10) }
-    $word, $level = if ($c -ge $veryHot) { 'very hot', 'high' }
-        elseif ($c -ge 85) { 'hot', 'warn' }
-        elseif ($c -ge 70) { 'warm', 'ok' }
-        elseif ($c -ge 50) { 'comfortable', 'ok' }
+    # Drives run much cooler than chips, and start slowing themselves down at around 70C.
+    $t = if ($Kind -eq 'Drive') { @{ VeryHot = 70; Hot = 60; Warm = 50; Comfortable = 35 } } else { @{ VeryHot = 95; Hot = 85; Warm = 70; Comfortable = 50 } }
+    if ($Kind -eq 'Chip' -and $null -ne $MaxC -and [double]$MaxC -gt 60) { $t.VeryHot = [math]::Min(95, [double]$MaxC - 10) }
+    $word, $level = if ($c -ge $t.VeryHot) { 'very hot', 'high' }
+        elseif ($c -ge $t.Hot) { 'hot', 'warn' }
+        elseif ($c -ge $t.Warm) { 'warm', 'ok' }
+        elseif ($c -ge $t.Comfortable) { 'comfortable', 'ok' }
         else { 'cool', 'ok' }
     [pscustomobject]@{ Word = $word; Level = $level }
+}
+
+function Get-QpBatteryHealth {
+    <#
+        How much a laptop battery holds now, next to what it held when new. Read-only; $null on a desktop
+        or where the battery doesn't say. Windows' own battery report is the fallback: it is written to a
+        temporary file, read, and deleted straight away.
+    #>
+    $design = 0; $full = 0; $cycles = 0
+    try {
+        $design = [double](@(Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData -ErrorAction Stop)[0].DesignedCapacity)
+        $full = [double](@(Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop)[0].FullChargedCapacity)
+        $cycles = [int](@(Get-CimInstance -Namespace root\wmi -ClassName BatteryCycleCount -ErrorAction SilentlyContinue)[0].CycleCount)
+    } catch { }
+    if ($design -le 0 -or $full -le 0) {
+        $tmp = Join-Path $env:TEMP ('Quietpane-battery-' + [guid]::NewGuid().ToString('N') + '.xml')
+        try {
+            & powercfg.exe /batteryreport /xml /output $tmp 2>$null | Out-Null
+            if (Test-Path -LiteralPath $tmp) {
+                [xml]$x = Get-Content -LiteralPath $tmp -Raw
+                $b = @($x.BatteryReport.Batteries.Battery)[0]
+                if ($b) { $design = [double]$b.DesignCapacity; $full = [double]$b.FullChargeCapacity; if (-not $cycles) { $cycles = [int]$b.CycleCount } }
+            }
+        } catch { } finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    }
+    if ($design -le 0 -or $full -le 0) { return $null }
+    [pscustomobject]@{
+        DesignWh = [math]::Round($design / 1000, 1); FullWh = [math]::Round($full / 1000, 1)
+        # A new battery can hold a touch more than its label says; that is still "100% of new".
+        Percent = [int][math]::Min(100, [math]::Round(100 * $full / $design))
+        Cycles = $(if ($cycles -gt 0) { $cycles } else { $null })   # many laptops report 0, which means "not recorded"
+    }
+}
+
+function Get-QpDriveHealth {
+    <#
+        The drive Windows runs from: Windows' own verdict on it, plus wear and temperature where the drive
+        shares them (those need administrator rights, which Quietpane has). Read-only; $null if unknown.
+    #>
+    try {
+        $letter = ($env:SystemDrive, 'C:')[[int][string]::IsNullOrEmpty($env:SystemDrive)].TrimEnd(':')
+        $num = (Get-Partition -DriveLetter $letter -ErrorAction Stop).DiskNumber
+        $disk = Get-PhysicalDisk -ErrorAction Stop | Where-Object { "$($_.DeviceId)" -eq "$num" } | Select-Object -First 1
+        if (-not $disk) { return $null }
+        $rel = $null
+        try { $rel = $disk | Get-StorageReliabilityCounter -ErrorAction Stop } catch { }
+        $temp = if ($rel -and [int]$rel.Temperature -gt 0) { [int]$rel.Temperature } else { $null }
+        $wear = if ($rel -and $null -ne $rel.Wear -and "$($rel.Wear)" -ne '') { [int]$rel.Wear } else { $null }
+        [pscustomobject]@{
+            Name = [string]$disk.FriendlyName
+            Media = $(switch ([string]$disk.MediaType) { 'SSD' { 'SSD' } 'HDD' { 'hard drive' } default { 'drive' } })
+            Health = [string]$disk.HealthStatus          # Healthy, Warning or Unhealthy - Windows' own verdict
+            WearPct = $wear                              # share of its rated life used up; SSDs only
+            TempC = $temp
+            PowerOnHours = $(if ($rel -and [int]$rel.PowerOnHours -gt 0) { [int]$rel.PowerOnHours } else { $null })
+        }
+    } catch { return $null }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- came back (what switched itself on again)
+
+# Big Windows updates and driver updates are known to switch settings back on and bring apps back.
+# Quietpane keeps a short note of what was quiet last time (setting ids, app and startup names, and the
+# Windows version - nothing personal) so it can say "these came back" instead of quietly re-counting.
+
+function Get-QpWindowsVersion {
+    $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
+    [pscustomobject]@{ Display = [string]$cv.DisplayVersion; Build = ('{0}.{1}' -f $cv.CurrentBuild, $cv.UBR) }
+}
+
+function Get-QpQuietSnapshot {
+    <# What is quiet on this PC right now, reduced to plain lists, from the window's state. #>
+    param([Parameter(Mandatory)]$State)
+    [pscustomobject]@{
+        Privacy     = @(@($State.Privacy.Keys) | Where-Object { $State.Privacy[$_] -eq 'Applied' } | Sort-Object)
+        Vendors     = @(foreach ($v in @($State.Vendors | Where-Object { $_ })) { foreach ($i in @($v.Items)) { if ($i.Status -eq 'Applied') { [string]$i.Id } } }) | Sort-Object
+        AppsPresent = @($State.Apps | Where-Object { $_ } | ForEach-Object { [string]$_.Name } | Sort-Object)
+        StartupOff  = @($State.Startup | Where-Object { $_ -and -not $_.On -and -not $_.Keep } | ForEach-Object { [string]$_.Id } | Sort-Object)
+    }
+}
+
+function Update-QpQuietNote {
+    <#
+        Compares this PC with the note from last time and says what came back. Anything that got quieter
+        is simply added to the note; only things switching themselves back ON are reported, and they keep
+        being reported until they are put right or you say "that was me" (-Accept). After your own changes
+        the window passes -Accept too, so nothing you did yourself is ever reported as "came back".
+    #>
+    param([Parameter(Mandatory)]$State, [switch]$Accept, [string]$Path = (Join-Path $script:DataRoot 'quiet-note.json'))
+    $now = Get-QpQuietSnapshot -State $State
+    $win = Get-QpWindowsVersion
+    $old = $null
+    if (-not $Accept -and (Test-Path -LiteralPath $Path)) { try { $old = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch { $old = $null } }
+    $nothing = [pscustomobject]@{ Count = 0; Privacy = @(); Vendors = @(); Apps = @(); Startup = @(); Since = $null; WindowsBefore = ''; WindowsNow = ''; WindowsUpdated = $false }
+    function Save-Note($lists, $since, $winAt) {
+        try {
+            $dir = Split-Path $Path -Parent
+            if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            [pscustomobject]@{
+                Saved = $since; Windows = $winAt
+                Privacy = @($lists.Privacy); Vendors = @($lists.Vendors); AppsPresent = @($lists.AppsPresent); StartupOff = @($lists.StartupOff)
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding UTF8
+        } catch { }
+    }
+    if (-not $old) {
+        Save-Note $now ((Get-Date).ToString('s')) $win
+        return $nothing
+    }
+    $gonePrivacy = @(@($old.Privacy) | Where-Object { $_ -and $now.Privacy -notcontains $_ })
+    $goneVendors = @(@($old.Vendors) | Where-Object { $_ -and $now.Vendors -notcontains $_ })
+    $backApps    = @($now.AppsPresent | Where-Object { $_ -and @($old.AppsPresent) -notcontains $_ })
+    # Only startup items that still exist and are on again count; one that was uninstalled hasn't "come back".
+    $backStart   = @(@($old.StartupOff) | Where-Object { $id = $_; $id -and $now.StartupOff -notcontains $id -and @($State.Startup | Where-Object { $_.Id -eq $id -and $_.On }).Count })
+    $count = $gonePrivacy.Count + $goneVendors.Count + $backApps.Count + $backStart.Count
+
+    # Keep the note: what came back stays in it (so it's reported until dealt with), improvements join it.
+    $merged = [pscustomobject]@{
+        Privacy     = @(@($old.Privacy) + $now.Privacy | Where-Object { $_ } | Sort-Object -Unique)
+        Vendors     = @(@($old.Vendors) + $now.Vendors | Where-Object { $_ } | Sort-Object -Unique)
+        AppsPresent = @(@($old.AppsPresent) | Where-Object { $_ -and $now.AppsPresent -contains $_ })
+        StartupOff  = @(@($old.StartupOff) + $now.StartupOff | Where-Object { $_ } | Sort-Object -Unique)
+    }
+    $since = if ($old.Saved) { [string]$old.Saved } else { (Get-Date).ToString('s') }
+    $winAt = if ($count -and $old.Windows) { $old.Windows } else { $win }   # remember the old version while there's something to explain
+    if (-not $count) { $since = (Get-Date).ToString('s') }
+    Save-Note $merged $since $winAt
+    if (-not $count) { return $nothing }
+
+    $privacyCat = @((Get-QpCatalog privacy).Items)
+    $vendorItems = @(foreach ($v in @($State.Vendors | Where-Object { $_ })) { @($v.Items) })
+    $wasWin = if ($old.Windows) { $old.Windows } else { $win }
+    [pscustomobject]@{
+        Count   = $count
+        Privacy = @($gonePrivacy | ForEach-Object { $id = $_; [pscustomobject]@{ Id = $id; Title = $(($privacyCat | Where-Object { $_.Id -eq $id } | Select-Object -First 1).Title) } })
+        Vendors = @($goneVendors | ForEach-Object { $id = $_; [pscustomobject]@{ Id = $id; Title = $(($vendorItems | Where-Object { $_.Id -eq $id } | Select-Object -First 1).Title) } })
+        Apps    = @($backApps | ForEach-Object { $n = $_; [pscustomobject]@{ Id = $n; Title = $(($State.Apps | Where-Object { $_.Name -eq $n } | Select-Object -First 1).Title) } })
+        Startup = @($backStart | ForEach-Object { $id = $_; [pscustomobject]@{ Id = $id; Title = $(($State.Startup | Where-Object { $_.Id -eq $id } | Select-Object -First 1).Name) } })
+        Since   = $(try { [datetime]$old.Saved } catch { $null })
+        WindowsBefore = "$($wasWin.Display) build $($wasWin.Build)".Trim()
+        WindowsNow    = "$($win.Display) build $($win.Build)".Trim()
+        WindowsUpdated = ([string]$wasWin.Build -ne [string]$win.Build)
+        # "from 24H2 to 25H2" for a big update, "from build 26200.9000 to 26200.9457" for a monthly one.
+        WindowsChange = $(if ($wasWin.Display -and $win.Display -and $wasWin.Display -ne $win.Display) { "from $($wasWin.Display) to $($win.Display)" } else { "from build $($wasWin.Build) to $($win.Build)" })
+    }
+}
+
+function Invoke-QpPutBack {
+    <# Switches off again exactly what came back - nothing else - inside one restore point. #>
+    param([string[]]$PrivacyIds, [string[]]$VendorIds, [string[]]$AppNames, [string[]]$StartupIds)
+    if (-not ($PrivacyIds -or $VendorIds -or $AppNames -or $StartupIds)) { Write-QpLog 'Nothing came back - nothing to do.' 'OK'; return }
+    Start-QpSession 'came-back'
+    if ($PrivacyIds) { Invoke-QpPrivacy -Ids $PrivacyIds }
+    if ($VendorIds)  { Invoke-QpVendor -Ids $VendorIds }
+    if ($StartupIds) { Invoke-QpStartup -Ids $StartupIds }
+    if ($AppNames)   { Invoke-QpRemoveApps -Names $AppNames -Deprovision }
+    Stop-QpSession
 }
 
 #endregion
@@ -520,6 +812,15 @@ function Add-QpUndo {
 
 function Stop-QpSession {
     if (-not $script:Session) { return }
+    if ($script:Session.Entries.Count -eq 0) {
+        # Nothing changed, so there is nothing to undo - don't leave an empty restore point in the Undo list.
+        $path = $script:Session.Path
+        $script:Session = $null
+        $script:LogFile = $null
+        Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+        Write-QpLog 'Nothing needed changing, so no restore point was kept.' 'OK'
+        return
+    }
     Save-QpSession
     Write-QpLog ("Finished. {0} change(s) recorded - they can be undone from the Undo tab." -f $script:Session.Entries.Count) 'OK'
     $script:Session = $null
@@ -532,7 +833,9 @@ function Get-QpRestorePoints {
     Get-ChildItem -Path $roots -Directory | Sort-Object Name -Descending | ForEach-Object {
         $count = 0
         $state = Join-Path $_.FullName 'state.json'
-        if (Test-Path $state) { try { $count = @((Get-Content $state -Raw | ConvertFrom-Json).Entries).Count } catch { } }
+        if (Test-Path $state) { try { $count = @((Get-Content $state -Raw | ConvertFrom-Json).Entries | Where-Object { $_ }).Count } catch { } }
+        # A restore point with nothing in it has nothing to undo, so it isn't offered (older versions made some).
+        if ($count -eq 0) { return }
         [pscustomobject]@{
             Name    = $_.Name
             Path    = $_.FullName
@@ -574,6 +877,15 @@ function Invoke-QpUndo {
                         Remove-ItemProperty -Path $e.Path -Name $e.Name -ErrorAction SilentlyContinue
                         Write-QpLog "$($e.Path)\$($e.Name) removed (was not set before)" 'OK'
                     }
+                }
+                'StartupApproved' {
+                    # Put back exactly what was there before - or nothing, if nothing was.
+                    if ($e.Existed -and $e.OldBytes) {
+                        Set-ItemProperty -Path $e.Path -Name $e.Name -Value ([Convert]::FromBase64String([string]$e.OldBytes)) -Type Binary -ErrorAction Stop
+                    } else {
+                        Remove-ItemProperty -Path $e.Path -Name $e.Name -ErrorAction SilentlyContinue
+                    }
+                    Write-QpLog "$(if ($e.Label) { $e.Label } else { $e.Name }) will start when you sign in again" 'OK'
                 }
                 'Env' {
                     [Environment]::SetEnvironmentVariable($e.Name, $e.OldValue, 'Machine')
@@ -728,7 +1040,11 @@ function Test-QpActionApplied {
             return ([string]$svc.StartType -eq [string]$Action.StartType)
         }
         'Task' {
-            $tasks = @(Get-ScheduledTask -TaskPath $Action.Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like $Action.Name })
+            $tasks = if ($script:StateCache) {
+                @((Get-QpTasksByPath)[$Action.Path] | Where-Object { $_ -and $_.TaskName -like $Action.Name })
+            } else {
+                @(Get-ScheduledTask -TaskPath $Action.Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like $Action.Name })
+            }
             if ($tasks.Count -eq 0) { return $null }
             return (@($tasks | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0)
         }
@@ -789,7 +1105,7 @@ function Test-QpProtectedApp {
 }
 
 function Get-QpBloatApps {
-    $installed = @(Get-AppxPackage -ErrorAction SilentlyContinue)
+    $installed = @(Get-QpAppxPackages)
     foreach ($item in (Get-QpCatalog apps).Items) {
         $pkg = $installed | Where-Object { $_.Name -like $item.Name } | Select-Object -First 1
         if ($pkg -and -not (Test-QpProtectedApp $pkg.Name)) {
@@ -829,6 +1145,207 @@ function Invoke-QpRemoveApps {
                     Write-QpLog "$n will not be reinstalled for new user accounts" 'OK'
                 } catch { }
             }
+        }
+    }
+    if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-QpSession }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- startup (what runs at sign-in)
+
+# Switching an item off works exactly like Task Manager's Startup tab: the entry stays where it is,
+# and Windows is told to skip it at sign-in. Nothing is deleted, the program still opens normally,
+# and Undo switches it back on.
+
+$script:StartupApprovedRoot = 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved'
+$script:AppStartupRoot = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData'
+
+function Get-QpStartupAdvice {
+    <# Whether an item must stay on, and a plain-language line about it, from the startup catalog. #>
+    param([string]$Text, $Catalog = (Get-QpCatalog startup))
+    foreach ($k in $Catalog.Keep) { if ($Text -match $k.Match) { return [pscustomobject]@{ Keep = $true; Why = $k.Why; Note = $k.Why } } }
+    foreach ($n in $Catalog.Notes) { if ($Text -match $n.Match) { return [pscustomobject]@{ Keep = $false; Why = ''; Note = $n.Note } } }
+    [pscustomobject]@{ Keep = $false; Why = ''; Note = '' }
+}
+
+function Resolve-QpCommandTarget {
+    <# The program a startup command points to, as best it can be worked out. Never throws. #>
+    param([string]$Command)
+    try {
+        $c = [Environment]::ExpandEnvironmentVariables("$Command").Trim()
+        if (-not $c) { return '' }
+        if ($c -match '^"([^"]+)"') { return $matches[1] }
+        if ($c -match '^(.+?\.(exe|com|bat|cmd|vbs|js|ps1|scr))(\s|$)') { return $matches[1] }
+        return ($c -split '\s+')[0]
+    } catch { return '' }
+}
+
+function Get-QpStartupItems {
+    <#
+        Everything that starts when you sign in - Run entries, the Startup folders and Store apps - and
+        whether each is switched on. Read-only. Policy-set entries are listed but can't be changed here.
+        The source lists can be swapped for tests, so tests never touch the real sign-in settings.
+    #>
+    param($RunSources, $FolderSources, [string]$AppRoot = $script:AppStartupRoot)
+    $cat = Get-QpCatalog startup
+    $sa = $script:StartupApprovedRoot
+    if ($null -eq $RunSources) {
+        $RunSources = @(
+            @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; Approved = "HKCU:\$sa\Run"; Everyone = $false }
+            @{ Key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'; Approved = "HKLM:\$sa\Run"; Everyone = $true }
+            @{ Key = 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'; Approved = "HKLM:\$sa\Run32"; Everyone = $true }
+        )
+    }
+    if ($null -eq $FolderSources) {
+        $FolderSources = @(
+            @{ Folder = [Environment]::GetFolderPath('Startup'); Approved = "HKCU:\$sa\StartupFolder"; Everyone = $false }
+            @{ Folder = [Environment]::GetFolderPath('CommonStartup'); Approved = "HKLM:\$sa\StartupFolder"; Everyone = $true }
+        )
+    }
+    function Test-Off($ApprovedPath, [string]$Name) {
+        # Task Manager marks a switched-off entry with an odd first byte (usually 03).
+        $v = Get-QpRegValue -Path $ApprovedPath -Name $Name
+        return ($v.Exists -and $v.Value -is [byte[]] -and $v.Value.Length -and ($v.Value[0] -band 1))
+    }
+    function Get-Publisher([string]$Path) {
+        try { if ($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) { return ([string](Get-Item -LiteralPath $Path).VersionInfo.CompanyName).Trim() } } catch { }
+        return ''
+    }
+    function Get-FriendlyName([string]$Path, [string]$Fallback) {
+        # "utweb" -> "uTorrent Web": the program's own name for itself, when it has one.
+        try {
+            if ($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                $vi = (Get-Item -LiteralPath $Path).VersionInfo
+                # Description first: Windows' own files all call their product "Microsoft Windows Operating System".
+                foreach ($n in [string]$vi.FileDescription, [string]$vi.ProductName) {
+                    $n = $n.Trim()
+                    if ($n -and $n.Length -le 60 -and $n -notmatch '(?i)operating system') { return $n }
+                }
+            }
+        } catch { }
+        return $Fallback
+    }
+    $out = New-Object System.Collections.ArrayList
+
+    foreach ($s in $RunSources) {
+        $p = Get-ItemProperty -Path $s.Key -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' })) {
+            $target = Resolve-QpCommandTarget $prop.Value
+            $advice = Get-QpStartupAdvice -Text "$($prop.Name) $($prop.Value)" -Catalog $cat
+            [void]$out.Add([pscustomobject]@{
+                Id = "$($s.Approved)|$($prop.Name)"; Name = (Get-FriendlyName $target $prop.Name); Kind = 'Run'; Everyone = [bool]$s.Everyone
+                Command = [string]$prop.Value; Target = $target; Publisher = (Get-Publisher $target)
+                On = -not (Test-Off $s.Approved $prop.Name); Locked = $false
+                Keep = $advice.Keep; KeepWhy = $advice.Why; Note = $advice.Note
+                Missing = ($target -and [IO.Path]::IsPathRooted($target) -and -not (Test-Path -LiteralPath $target))
+                ApprovedPath = $s.Approved; ApprovedName = $prop.Name; StatePath = ''
+            })
+        }
+    }
+
+    $shell = $null
+    foreach ($s in $FolderSources) {
+        if (-not $s.Folder -or -not (Test-Path -LiteralPath $s.Folder)) { continue }
+        foreach ($f in @(Get-ChildItem -LiteralPath $s.Folder -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' })) {
+            $target = $f.FullName
+            if ($f.Extension -eq '.lnk') {
+                try { if (-not $shell) { $shell = New-Object -ComObject WScript.Shell }; $target = $shell.CreateShortcut($f.FullName).TargetPath } catch { }
+            }
+            $advice = Get-QpStartupAdvice -Text "$($f.BaseName) $target" -Catalog $cat
+            [void]$out.Add([pscustomobject]@{
+                Id = "$($s.Approved)|$($f.Name)"; Name = (Get-FriendlyName $target $f.BaseName); Kind = 'Folder'; Everyone = [bool]$s.Everyone
+                Command = $f.FullName; Target = $target; Publisher = (Get-Publisher $target)
+                On = -not (Test-Off $s.Approved $f.Name); Locked = $false
+                Keep = $advice.Keep; KeepWhy = $advice.Why; Note = $advice.Note
+                Missing = ($target -and -not (Test-Path -LiteralPath $target))
+                ApprovedPath = $s.Approved; ApprovedName = $f.Name; StatePath = ''
+            })
+        }
+    }
+
+    # Store apps keep their own switch. State: 0 off, 1 switched off by you, 2 on, 3 off by policy, 4 on by policy.
+    if ($AppRoot -and (Test-Path $AppRoot)) {
+        $names = @{}
+        try { foreach ($pkg in @(Get-QpAppxPackages)) { $names[$pkg.PackageFamilyName] = $pkg } } catch { }
+        foreach ($pkgKey in @(Get-ChildItem -Path $AppRoot -ErrorAction SilentlyContinue)) {
+            foreach ($task in @(Get-ChildItem -Path $pkgKey.PSPath -ErrorAction SilentlyContinue)) {
+                $state = (Get-ItemProperty -Path $task.PSPath -ErrorAction SilentlyContinue).State
+                if ($null -eq $state) { continue }
+                $pfn = $pkgKey.PSChildName
+                $display = ''; $publisher = ''
+                $pkg = $names[$pfn]
+                if ($pkg) {
+                    try {
+                        $props = (Get-AppxPackageManifest -Package $pkg.PackageFullName -ErrorAction Stop).Package.Properties
+                        $display = [string]$props.DisplayName
+                        $publisher = [string]$props.PublisherDisplayName
+                    } catch { }
+                }
+                if ($publisher -like 'ms-resource:*') { $publisher = '' }
+                if (-not $display -or $display -like 'ms-resource:*') {
+                    # "SpotifyAB.SpotifyMusic_zpdnekdrzrea0" -> "Spotify Music"
+                    $short = (($pfn -split '_')[0] -split '\.')[-1]
+                    $display = ($short -creplace '(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', ' ').Trim()
+                }
+                $advice = Get-QpStartupAdvice -Text "$display $pfn $($task.PSChildName)" -Catalog $cat
+                [void]$out.Add([pscustomobject]@{
+                    Id = "App|$pfn|$($task.PSChildName)"; Name = $display; Kind = 'App'; Everyone = $false
+                    Command = "$pfn ($($task.PSChildName))"; Target = ''; Publisher = $publisher
+                    On = ([int]$state -in 2, 4); Locked = ([int]$state -in 3, 4)
+                    Keep = $advice.Keep; KeepWhy = $advice.Why; Note = $advice.Note
+                    Missing = $false; ApprovedPath = ''; ApprovedName = ''; StatePath = $task.PSPath
+                })
+            }
+        }
+    }
+    return @($out)
+}
+
+function Set-QpStartupApproved {
+    <# Writes the same 12 bytes Task Manager does: 03 = switched off (plus when), 02 = on. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name, [bool]$On)
+    $bytes = New-Object byte[] 12
+    $bytes[0] = $(if ($On) { 2 } else { 3 })
+    if (-not $On) { [BitConverter]::GetBytes([DateTime]::UtcNow.ToFileTimeUtc()).CopyTo($bytes, 4) }
+    if (-not (Test-Path -Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+    Set-ItemProperty -Path $Path -Name $Name -Value $bytes -Type Binary -ErrorAction Stop
+}
+
+function Invoke-QpStartup {
+    <#
+        Stops the chosen items starting at sign-in. Each change goes into a restore point first, so
+        Undo switches it back on. Items Windows or your drivers need are refused, whatever is ticked.
+    #>
+    param([string[]]$Ids, [switch]$Preview, $Items)
+    if (-not $Ids) { Write-QpLog 'Nothing selected.' 'WARN'; return }
+    $all = if ($null -ne $Items) { @($Items) } else { @(Get-QpStartupItems) }
+    $own = $false   # set once this call opens its own restore point
+    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' }
+    foreach ($id in $Ids) {
+        $it = @($all | Where-Object { $_.Id -eq $id }) | Select-Object -First 1
+        if (-not $it) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; continue }
+        if ($it.Keep) { Write-QpLog "$($it.Name) stays on: $($it.KeepWhy)" 'WARN'; continue }
+        if ($it.Locked) { Write-QpLog "$($it.Name) is set by a policy on this PC, so it can't be changed here." 'WARN'; continue }
+        if (-not $it.On) { Write-QpLog "$($it.Name) is already switched off" 'OK'; continue }
+        if ($Preview) { Write-QpLog "Would stop $($it.Name) starting when you sign in" 'PREVIEW'; continue }
+        # The restore point is opened at the first real change, so refusals never leave an empty one in Undo.
+        if (-not $script:Session) { Start-QpSession 'startup'; $own = $true }
+        try {
+            if ($it.Kind -eq 'App') {
+                $old = [int](Get-ItemProperty -Path $it.StatePath -Name State -ErrorAction Stop).State
+                Add-QpUndo @{ Type = 'Reg'; Path = $it.StatePath; Name = 'State'; Existed = $true; OldValue = $old; Kind = 'DWord' }
+                Set-ItemProperty -Path $it.StatePath -Name State -Value 1 -Type DWord -ErrorAction Stop
+            } else {
+                $cur = Get-QpRegValue -Path $it.ApprovedPath -Name $it.ApprovedName
+                $oldBytes = if ($cur.Exists -and $cur.Value -is [byte[]]) { [Convert]::ToBase64String($cur.Value) } else { '' }
+                Add-QpUndo @{ Type = 'StartupApproved'; Path = $it.ApprovedPath; Name = $it.ApprovedName; Existed = [bool]$cur.Exists; OldBytes = $oldBytes; Label = $it.Name }
+                Set-QpStartupApproved -Path $it.ApprovedPath -Name $it.ApprovedName -On $false
+            }
+            Write-QpLog "$($it.Name) won't start when you sign in any more. It still opens normally when you start it." 'OK'
+        } catch {
+            Write-QpLog "Could not switch off $($it.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
         }
     }
     if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-QpSession }
@@ -1090,8 +1607,32 @@ function Invoke-QpVendorUninstall {
 
 #region ---------------------------------------------------------------- one-click
 
+function Get-QpState {
+    <#
+        Everything the window shows about this PC, read in one pass that shares its slow lookups.
+        Read-only. Battery and drive health aren't here: the Health tab reads those itself, when open.
+    #>
+    Start-QpStateCache
+    try {
+        @{
+            Privacy = Get-QpPrivacyStatus
+            Vendors = @(Get-QpVendorStatus)
+            Apps    = @(Get-QpBloatApps)
+            Startup = @(Get-QpStartupItems)
+            Cleanup = @(Get-QpCleanupTargets)
+            Restore = @(Get-QpRestorePoints)
+        }
+    } finally { Stop-QpStateCache }
+}
+
 function Get-QpRecommendedPlan {
     <# What "Quiet my PC now" would do on this PC: only recommended items that are not done yet. Read-only. #>
+    $ownCache = -not $script:StateCache
+    if ($ownCache) { Start-QpStateCache }
+    try { return (Get-QpRecommendedPlanCore) } finally { if ($ownCache) { Stop-QpStateCache } }
+}
+
+function Get-QpRecommendedPlanCore {
     $status = Get-QpPrivacyStatus
     $privacy = @((Get-QpCatalog privacy).Items | Where-Object { $_.Recommended -and $status[$_.Id] -in 'NotApplied', 'Partial' })
     # Brand and hardware items: only the recommended switch-offs. Uninstalling anything is never automatic.
@@ -1148,7 +1689,7 @@ function Invoke-QpRecommended {
         BrandsQuieted = @($plan.VendorNames)
         BytesFreed    = [int64]$freed
         MemoryFreed   = $memFreed
-        RestorePoint  = $restore
+        RestorePoint  = $(if ($entries.Count) { $restore } else { $null })   # nothing changed means nothing to undo
     }
     Stop-QpSession
     return $summary
@@ -2306,10 +2847,12 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
 
 Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes,
     Set-QpProgressSink, Write-QpProgress, Set-QpCancelCheck, Test-QpCancelled, New-QpScanSummary,
-    Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord,
+    Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpProgramName,
+    Get-QpBatteryHealth, Get-QpDriveHealth, Get-QpWindowsVersion, Get-QpQuietSnapshot, Update-QpQuietNote, Invoke-QpPutBack,
     Get-QpRestorePoints, Invoke-QpUndo,
     Get-QpPrivacyStatus, Invoke-QpPrivacy,
     Get-QpBloatApps, Invoke-QpRemoveApps,
+    Get-QpStartupItems, Invoke-QpStartup, Set-QpStartupApproved, Get-QpStartupAdvice,
     Get-QpCleanupTargets, Invoke-QpCleanup,
     Get-QpVendorStatus, Invoke-QpVendor, Invoke-QpVendorUninstall,
     Get-QpDefenderState, Get-QpDefenderFindings, Invoke-QpThreatScan, Invoke-QpRemediate, Get-QpAllowList, Resolve-QpThreatInfo, New-QpFinding,

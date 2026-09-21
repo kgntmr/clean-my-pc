@@ -301,7 +301,7 @@ function New-TabPage {
 function New-GroupHeader([string]$Text) { New-Text $Text 16 'SemiBold' '#117A68' '0,18,0,0' 'Fraunces, Georgia' }
 
 $script:Options = @{}
-foreach ($k in 'privacy', 'vendors', 'apps', 'cleanup') { $script:Options[$k] = New-Object System.Collections.ArrayList }
+foreach ($k in 'privacy', 'vendors', 'apps', 'startup', 'cleanup') { $script:Options[$k] = New-Object System.Collections.ArrayList }
 
 function Add-Option {
     param($Panel, [string]$Key, [string]$Id, [string]$Title, [string]$Description, [bool]$Recommended)
@@ -352,6 +352,26 @@ foreach ($c in $script:CardTracking, $script:CardApps, $script:CardSpace, $scrip
 $script:CardAdware.Value.Text = 'Not checked yet'
 $script:CardAdware.Caption.Text = 'Takes about 2 minutes and changes nothing'
 [void]$homePanel.Children.Add($cards)
+
+# Things that switched themselves back on since last time - usually a Windows or driver update.
+$script:BackPanel = New-Object System.Windows.Controls.Border
+$script:BackPanel.Visibility = 'Collapsed'
+$script:BackPanel.Margin = Get-Thick '0,0,12,12'
+$script:BackPanel.Padding = Get-Thick '16,12'
+$script:BackPanel.Background = Get-Brush '#FFF4DC'
+$script:BackPanel.BorderBrush = Get-Brush '#FFB627'
+$script:BackPanel.BorderThickness = Get-Thick '4,0,0,0'
+$backStack = New-Object System.Windows.Controls.StackPanel
+$script:BackTitle = New-Text '' 17 'SemiBold' '#0F1B1C' '0,0,0,4' 'Fraunces, Georgia'
+$script:BackText = New-Text '' 13.5 'Normal' '#0F1B1C' '0,0,0,4'
+$script:BackList = New-Text '' 12.5 'Normal' '#4B5B5C' '0,0,0,10'
+$backButtons = New-Object System.Windows.Controls.WrapPanel
+$btnPutBack = New-Button 'Switch them off again' -Primary
+$btnThatWasMe = New-Button 'That was me - leave them'
+foreach ($b in $btnPutBack, $btnThatWasMe) { $b.Margin = Get-Thick '0,0,10,0'; [void]$backButtons.Children.Add($b) }
+foreach ($x in $script:BackTitle, $script:BackText, $script:BackList, $backButtons) { [void]$backStack.Children.Add($x) }
+$script:BackPanel.Child = $backStack
+[void]$homePanel.Children.Add($script:BackPanel)
 
 # Two simple bars: how full the disk is, and how much memory is in use.
 function New-Meter([string]$Title, [string]$FillColour) {
@@ -414,12 +434,15 @@ function New-LiveTile([string]$Title, [string]$FillColour) {
     [void]$sp.Children.Add($track)
     $heat = New-Text '' 12.5 'SemiBold' '#117A68' '0,7,0,0'
     $caption = New-Text '' 12 'Normal' '#4B5B5C' '0,2,0,0'
+    # "What's using it": the busiest programs right now, one per line.
+    $top = New-Text '' 11.5 'Normal' '#4B5B5C' '0,4,0,0'
+    $top.Visibility = 'Collapsed'
     $extra = New-Text '' 11.5 'Normal' '#8A9696' '0,2,0,0'
     $extra.Visibility = 'Collapsed'
     $delta = New-Text '' 12.5 'SemiBold' '#117A68' '0,4,0,0'
     $delta.Visibility = 'Collapsed'
-    foreach ($x in $heat, $caption, $extra, $delta) { [void]$sp.Children.Add($x) }
-    return [pscustomobject]@{ Border = $sp; Value = $value; Fill = $fill; Heat = $heat; Caption = $caption; Extra = $extra; Delta = $delta; TrackWidth = 140 }
+    foreach ($x in $heat, $caption, $top, $extra, $delta) { [void]$sp.Children.Add($x) }
+    return [pscustomobject]@{ Border = $sp; Value = $value; Fill = $fill; Heat = $heat; Caption = $caption; Top = $top; Extra = $extra; Delta = $delta; TrackWidth = 140 }
 }
 
 $meters = New-Object System.Windows.Controls.WrapPanel
@@ -442,10 +465,9 @@ $script:TileMemory = New-LiveTile 'MEMORY' '#FFB627'
 $script:TileVram   = New-LiveTile 'VIDEO MEMORY' '#FFB627'
 foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileVram) { [void]$liveTiles.Children.Add($t.Border) }
 [void]$liveStack.Children.Add($liveTiles)
-$script:LiveNote = New-Text 'Updates every 2 seconds while this screen is open. Nothing is recorded.' 11.5 'Normal' '#8A9696' '0,4,0,0'
+$script:LiveNote = New-Text 'Updates every 2 seconds while this tab is open. Nothing is recorded.' 11.5 'Normal' '#8A9696' '0,4,0,0'
 [void]$liveStack.Children.Add($script:LiveNote)
 $script:LivePanel.Child = $liveStack
-[void]$meters.Children.Add($script:LivePanel)
 # The memory tile carries the "freed just now" note that the old memory bar used to.
 $script:MeterMemory = $script:TileMemory
 [void]$homePanel.Children.Add($meters)
@@ -466,8 +488,10 @@ $btnHomeScan.Margin = Get-Thick '0,0,12,8'
 [void]$homeButtons.Children.Add($btnOneClick)
 [void]$homeButtons.Children.Add($btnHomeScan)
 [void]$homePanel.Children.Add($homeButtons)
-[void]$homePanel.Children.Add((New-Text 'You will see exactly what is about to change before it happens, you can undo all of it, and files only ever go to your Recycle Bin.' 12.5 'Normal' '#4B5B5C' '0,6,0,0'))
-[void]$homePanel.Children.Add((New-Text 'A good start, not a guarantee: this tidies up the usual troublemakers, but it cannot promise a PC is clean. If yours still feels wrong afterwards, run a deeper scan with a dedicated security tool too.' 12.5 'Normal' '#9A6700' '0,8,0,0'))
+$homeHint = New-Text 'You will see exactly what is about to change before it happens, you can undo all of it, and files only ever go to your Recycle Bin.' 12.5 'Normal' '#4B5B5C' '0,6,0,0'
+[void]$homePanel.Children.Add($homeHint)
+$homeDisclaimer = New-Text 'A good start, not a guarantee: this tidies up the usual troublemakers, but it cannot promise a PC is clean. If yours still feels wrong afterwards, run a deeper scan with a dedicated security tool too.' 12.5 'Normal' '#9A6700' '0,8,0,0'
+[void]$homePanel.Children.Add($homeDisclaimer)
 
 $script:ResultPanel = New-Object System.Windows.Controls.Border
 $script:ResultPanel.Visibility = 'Collapsed'
@@ -489,7 +513,34 @@ foreach ($b in $btnRestart, $btnUndoAll, $btnShowDetails) { $b.Margin = Get-Thic
 [void]$resultStack.Children.Add($resultButtons)
 $script:ResultPanel.Child = $resultStack
 [void]$homePanel.Children.Add($script:ResultPanel)
-[void]$homePanel.Children.Add((New-Text 'Rather choose yourself? The Privacy, Telemetry, Apps and Free up space tabs let you pick item by item, and Preview shows what would happen without touching anything.' 12.5 'Normal' '#4B5B5C' '0,20,0,0'))
+$homeRather = New-Text 'Rather choose yourself? The Privacy, Telemetry, Apps and Free up space tabs let you pick item by item, and Preview shows what would happen without touching anything.' 12.5 'Normal' '#4B5B5C' '0,20,0,0'
+[void]$homePanel.Children.Add($homeRather)
+
+# The order people read Home in: how things stand, the one button (and what it just did), then space.
+# The button stays in view without scrolling.
+$homeTop = @($homePanel.Children)[0..1]
+$homePanel.Children.Clear()
+$meters.Margin = Get-Thick '0,20,0,0'
+foreach ($x in @($homeTop) + @($cards, $script:BackPanel, $homeButtons, $homeHint, $script:ResultPanel, $meters, $script:TotalsText, $homeDisclaimer, $homeRather)) { [void]$homePanel.Children.Add($x) }
+
+# 1. Health - how hard the PC is working, how warm it is, and how the battery and drive are holding up.
+# Its own tab, so Home stays calm - and nothing here is read unless this tab is open.
+$healthPanel = New-TabPage 'Health' 'health' 'How hard your PC is working right now, how warm it is, and how the battery and drive are holding up. Nothing here changes anything, and it only looks while this tab is open.'
+$script:LivePanel.Margin = Get-Thick '0,4,0,12'
+[void]$healthPanel.Children.Add($script:LivePanel)
+$healthCards = New-Object System.Windows.Controls.WrapPanel
+# Laptops only: charge, plugged in or not, and how much the battery holds compared with when it was new.
+$script:BatteryCard = New-Meter 'BATTERY' '#FFB627'
+$script:BatteryHealthText = New-Text '' 12.5 'Normal' '#0F1B1C' '0,6,0,0'
+[void]$script:BatteryCard.Border.Child.Children.Add($script:BatteryHealthText)
+$script:BatteryCard.Border.Visibility = 'Collapsed'
+# The drive Windows runs from: Windows' own verdict, how much of its rated life is used, and its heat.
+$script:DriveCard = New-Meter 'THE DRIVE WINDOWS IS ON' '#117A68'
+$script:DriveHeatText = New-Text '' 12.5 'SemiBold' '#117A68' '0,6,0,0'
+[void]$script:DriveCard.Border.Child.Children.Add($script:DriveHeatText)
+$script:DriveCard.Value.Text = 'Having a look...'
+foreach ($c in $script:BatteryCard, $script:DriveCard) { [void]$healthCards.Children.Add($c.Border) }
+[void]$healthPanel.Children.Add($healthCards)
 
 # 1. Safety scan - Microsoft Defender's detections plus Quietpane's own checks
 $scanPanel = New-TabPage 'Safety scan' 'scan' ('We ask Microsoft Defender what it has found, and we look around for the tricks adware uses: odd startup entries, hidden tasks, browser add-ons and tampered programs. Nothing is changed while we look.')
@@ -595,16 +646,29 @@ $script:VendorIntro = New-Text 'Having a look at what came with this PC...' 13 '
 $script:VendorList = New-Object System.Windows.Controls.StackPanel
 [void]$vendorPanel.Children.Add($script:VendorList)
 
-# 4. Apps
-$appsPanel = New-TabPage 'Apps' 'apps' ('Apps that came with Windows or were pushed onto this PC. Your Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool and anything driver-related are never on this list. Changed your mind later? The Microsoft Store has them all.')
+# 4. Apps - what starts when you sign in, and apps you could remove
+$appsPanel = New-TabPage 'Apps' 'apps' ('What starts by itself when you sign in, and apps that came with Windows or were pushed onto this PC. Tick what you want, then Preview or Apply.')
+
+$script:StartupSection = New-Section 'Starts when you sign in'
+$script:StartupSection.Expander.IsExpanded = $true
+[void]$script:StartupSection.Content.Children.Add((New-Text 'Switching something off works like Task Manager: the program itself is untouched and still opens when you start it - it just stops starting on its own. Undo turns it back on.' 12.5 'Normal' '#4B5B5C' '0,2,0,2'))
+$script:StartupList = New-Object System.Windows.Controls.StackPanel
+[void]$script:StartupList.Children.Add((New-Text 'Looking at what starts when you sign in...' 13 'Normal' '#4B5B5C'))
+[void]$script:StartupSection.Content.Children.Add($script:StartupList)
+[void]$appsPanel.Children.Add($script:StartupSection.Expander)
+
+$script:RemoveSection = New-Section 'Apps you could remove'
+$script:RemoveSection.Expander.IsExpanded = $true
+[void]$script:RemoveSection.Content.Children.Add((New-Text 'Your Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool and anything driver-related are never on this list. Changed your mind later? The Microsoft Store has them all.' 12.5 'Normal' '#4B5B5C' '0,2,0,6'))
 $script:DeprovisionCb = New-Object System.Windows.Controls.CheckBox
 $script:DeprovisionCb.Content = New-Text 'Also stop removed apps being installed for new user accounts on this PC' 12.5 'Normal' '#0F1B1C' '2,0,0,0'
 $script:DeprovisionCb.IsChecked = $true
 $script:DeprovisionCb.Margin = Get-Thick '0,0,0,8'
-[void]$appsPanel.Children.Add($script:DeprovisionCb)
+[void]$script:RemoveSection.Content.Children.Add($script:DeprovisionCb)
 $script:AppsList = New-Object System.Windows.Controls.StackPanel
 [void]$script:AppsList.Children.Add((New-Text 'Looking for installed apps...' 13 'Normal' '#4B5B5C'))
-[void]$appsPanel.Children.Add($script:AppsList)
+[void]$script:RemoveSection.Content.Children.Add($script:AppsList)
+[void]$appsPanel.Children.Add($script:RemoveSection.Expander)
 
 # 5. Clean-up
 $cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Leftovers nobody needs: temporary files, crash dumps, old installers and caches. Everything goes to your Recycle Bin, so you have the final say. Close your games and browsers first.')
@@ -693,7 +757,7 @@ $script:LicenseExpander = New-DocExpander 'License (MIT)' 'LICENSE'
 $script:SecurityExpander = New-DocExpander 'Security & genuine copies' 'SECURITY.md'
 foreach ($e in $script:PrivacyExpander, $script:TermsExpander, $script:LicenseExpander, $script:SecurityExpander) { [void]$aboutPanel.Children.Add($e) }
 
-$script:ActionButtons = @($ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply, $btnScan, $btnUndo, $btnUndoRefresh, $btnOneClick, $btnHomeScan, $btnUndoAll, $btnRestart)
+$script:ActionButtons = @($ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply, $btnScan, $btnUndo, $btnUndoRefresh, $btnOneClick, $btnHomeScan, $btnUndoAll, $btnRestart, $btnPutBack, $btnThatWasMe)
 
 # ------------------------------------------------------------------ links
 function Show-Doc($expander) {
@@ -729,6 +793,11 @@ $script:LastScanResult = $null
 # What has actually been done to findings since the last check, for the summary at the end.
 $script:ActionTally = [ordered]@{ Removed = 0; Quarantined = 0; Recycled = 0; Deleted = 0; Allowed = 0; Failed = 0 }
 
+function Select-Tab([string]$Tag) {
+    # Tabs are found by name, not position, so adding a tab never sends a button to the wrong place.
+    foreach ($t in $ui.Tabs.Items) { if ([string]$t.Tag -eq $Tag) { $ui.Tabs.SelectedItem = $t; return } }
+}
+
 function Update-Buttons {
     $key = [string]$ui.Tabs.SelectedItem.Tag
     $optionTab = $key -in 'privacy', 'vendors', 'apps', 'cleanup'
@@ -736,7 +805,7 @@ function Update-Buttons {
     # The pick-and-choose buttons only appear on the tabs where they do something.
     $ui.AdvancedButtons.Visibility = if ($optionTab) { 'Visible' } else { 'Collapsed' }
     foreach ($b in $ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply) { $b.IsEnabled = ($optionTab -and $idle) }
-    foreach ($b in $btnScan, $btnUndo, $btnUndoRefresh, $btnOneClick, $btnHomeScan, $btnUndoAll, $btnRestart) { $b.IsEnabled = $idle }
+    foreach ($b in $btnScan, $btnUndo, $btnUndoRefresh, $btnOneClick, $btnHomeScan, $btnUndoAll, $btnRestart, $btnPutBack, $btnThatWasMe) { $b.IsEnabled = $idle }
     $btnUndoAll.IsEnabled = $idle -and [bool]$script:LastRestorePoint
     $btnOpenReport.IsEnabled = [bool]$script:LastReport
 }
@@ -788,8 +857,9 @@ function Start-Work {
 # A small reader of its own, separate from Start-Work, so the Home tiles never block a button. It only
 # reads while Home is on screen and the window isn't minimised; the rest of the time it sleeps. That
 # also matters on gaming laptops: asking the graphics card how it is doing shouldn't keep it awake.
-$script:Live = [hashtable]::Synchronized(@{ Reading = $null; Seq = 0; Active = $false; Stop = $false })
+$script:Live = [hashtable]::Synchronized(@{ Reading = $null; Seq = 0; Active = $false; Stop = $false; Health = $null; HealthSeq = 0 })
 $script:LiveSeqShown = 0
+$script:HealthSeqShown = 0
 $script:LiveJob = $null
 
 function Start-LiveSampler {
@@ -802,12 +872,20 @@ function Start-LiveSampler {
     $ps.Runspace = $rs
     [void]$ps.AddScript({
         Import-Module $ModulePath -Force
-        $monitor = New-QpLiveMonitor
-        Start-Sleep -Milliseconds 1000          # load is measured between two moments, so give it a first gap
+        $monitor = $null
+        $healthAt = [datetime]::MinValue
         while (-not $Live.Stop) {
             if ($Live.Active) {
+                # Nothing is set up until the Health tab is first opened.
+                if (-not $monitor) { $monitor = New-QpLiveMonitor; Start-Sleep -Milliseconds 1000 }   # load is measured between two moments
                 $Live.Reading = Get-QpLiveReading -Monitor $monitor
                 $Live.Seq = $Live.Seq + 1
+                # Battery and drive health change slowly: read on opening, then every five minutes.
+                if (((Get-Date) - $healthAt).TotalMinutes -ge 5) {
+                    $Live.Health = @{ Battery = Get-QpBatteryHealth; Drive = Get-QpDriveHealth }
+                    $Live.HealthSeq = $Live.HealthSeq + 1
+                    $healthAt = Get-Date
+                }
                 for ($i = 0; $i -lt 10 -and -not $Live.Stop; $i++) { Start-Sleep -Milliseconds 200 }
             } else {
                 Start-Sleep -Milliseconds 400
@@ -834,7 +912,11 @@ $timer.Add_Tick({
     while ($script:Sync.Queue.TryDequeue([ref]$line)) { $ui.LogBox.AppendText($line + [Environment]::NewLine); $got = $true }
     if ($got) { $ui.LogBox.ScrollToEnd() }
     if ($script:Job -and $script:ScanRunning) { Update-ScanProgress }
-    $script:Live.Active = ($ui.Tabs.SelectedIndex -eq 0) -and ($window.WindowState -ne 'Minimized')
+    $script:Live.Active = ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') -and ($window.WindowState -ne 'Minimized')
+    if ($script:Live.HealthSeq -ne $script:HealthSeqShown) {
+        $script:HealthSeqShown = $script:Live.HealthSeq
+        try { $script:BatteryHealth = $script:Live.Health.Battery; Update-DriveCard $script:Live.Health.Drive } catch { }
+    }
     if ($script:Live.Seq -ne $script:LiveSeqShown) {
         $script:LiveSeqShown = $script:Live.Seq
         try { Update-LiveTiles $script:Live.Reading } catch { }   # a reading must never be able to break the window
@@ -845,6 +927,9 @@ $timer.Add_Tick({
         try { [void]$job.PS.EndInvoke($job.Handle) } catch { $ui.LogBox.AppendText("ERROR: $($_.Exception.Message)" + [Environment]::NewLine) }
         $job.PS.Dispose()
         $job.RS.Dispose()
+        # Each job runs in its own worker that is thrown away afterwards; hand its memory back now rather
+        # than whenever .NET gets round to it, so the app stays small between jobs.
+        [GC]::Collect()
         while ($script:Sync.Queue.TryDequeue([ref]$line)) { $ui.LogBox.AppendText($line + [Environment]::NewLine) }
         $ui.LogBox.ScrollToEnd()
         Set-Busy $false 'All done - nothing running.'
@@ -871,11 +956,14 @@ function Select-Recommended([string]$Key) {
 
 function Update-FromState($state) {
     if (-not $state) { return }
+    $script:LastState = $state
     foreach ($o in $script:Options['privacy']) { Set-OptionStatus $o ([string]$state.Privacy[$o.Id]) }
     Update-VendorTab @($state.Vendors)
+    Update-StartupList @($state.Startup | Where-Object { $_ })
     $script:AppsList.Children.Clear()
     $script:Options['apps'].Clear()
     $apps = @($state.Apps | Where-Object { $_ })
+    $script:RemoveSection.Expander.Header = New-Text ('Apps you could remove   ({0} found)' -f $apps.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
     if ($apps.Count -eq 0) { [void]$script:AppsList.Children.Add((New-Text 'No known bloat apps found on this PC.' 13 'SemiBold' '#117A68')) }
     foreach ($a in $apps) { Add-Option -Panel $script:AppsList -Key 'apps' -Id $a.Name -Title $a.Title -Description ("{0}  ({1})" -f $a.Description, $a.Name) -Recommended ([bool]$a.Recommended) }
     $script:CleanupList.Children.Clear()
@@ -889,22 +977,107 @@ function Update-FromState($state) {
             $last.Label.Text = "$title   [nothing to clean]"
         }
     }
-    $script:UndoList.Items.Clear()
-    foreach ($r in @($state.Restore | Where-Object { $_ })) {
-        $li = New-Object System.Windows.Controls.ListBoxItem
-        $li.Content = '{0}   -   {1} change(s){2}' -f $r.Name, $r.Changes, $(if ($r.Undone) { '   (already undone)' } else { '' })
-        $li.Tag = $r.Path
-        [void]$script:UndoList.Items.Add($li)
-    }
-    if ($script:UndoList.Items.Count -eq 0) { [void]$script:UndoList.Items.Add('No restore points yet.') }
+    Update-UndoList @($state.Restore)
     Update-QuarantineList
     Update-HomeCards $state
+    # What switched itself back on since last time. Skipped in self-test, which must change nothing.
+    if (-not $SelfTest) {
+        $drift = $null
+        try { $drift = Update-QpQuietNote -State $state -Accept:$script:AcceptQuiet } catch { }
+        $script:AcceptQuiet = $false
+        Update-CameBack $drift
+    }
     if ($script:FirstLoad) {
-        foreach ($k in 'privacy', 'vendors', 'apps', 'cleanup') { Select-Recommended $k }
+        foreach ($k in 'privacy', 'vendors', 'apps', 'startup', 'cleanup') { Select-Recommended $k }
         $script:FirstLoad = $false
     } else {
-        foreach ($k in 'apps', 'cleanup', 'vendors') { Select-Recommended $k }
+        foreach ($k in 'apps', 'startup', 'cleanup', 'vendors') { Select-Recommended $k }
         foreach ($o in $script:Options['privacy']) { if ($o.Status -in 'Applied', 'NotApplicable') { $o.CheckBox.IsChecked = $false } }
+    }
+}
+
+$script:CameBack = $null
+$script:LastState = $null
+function Update-CameBack($d) {
+    <# The "welcome back" panel: what switched itself back on, since when, and the likely reason. #>
+    $script:CameBack = $d
+    if (-not $d -or -not $d.Count) { $script:BackPanel.Visibility = 'Collapsed'; return }
+    $settings = @($d.Privacy).Count + @($d.Vendors).Count
+    $what = @()
+    if ($settings) { $what += $(if ($settings -eq 1) { '1 setting' } else { "$settings settings" }) }
+    if (@($d.Apps).Count) { $what += $(if (@($d.Apps).Count -eq 1) { '1 app' } else { "$(@($d.Apps).Count) apps" }) }
+    if (@($d.Startup).Count) { $what += $(if (@($d.Startup).Count -eq 1) { '1 startup item' } else { "$(@($d.Startup).Count) startup items" }) }
+    $whatText = ($what -join ', ') -replace ', ([^,]+)$', ' and $1'
+    $script:BackTitle.Text = if ($d.Count -eq 1) { 'Welcome back - one thing switched itself back on' } else { "Welcome back - $($d.Count) things switched themselves back on" }
+    $since = if ($d.Since) { ' since {0}' -f $d.Since.ToString('d MMMM') } else { '' }
+    $why = if ($d.WindowsUpdated) { " Windows has updated in between, $($d.WindowsChange), which is the usual reason." } else { ' Updates to Windows or to your apps are the usual reason.' }
+    $script:BackText.Text = "$whatText came back on$since.$why"
+    $names = @(@($d.Privacy) + @($d.Vendors) + @($d.Apps) + @($d.Startup) | ForEach-Object { if ($_.Title) { $_.Title } else { $_.Id } })
+    $script:BackList.Text = ($names | Select-Object -First 8) -join ', '
+    if ($names.Count -gt 8) { $script:BackList.Text += (' and {0} more' -f ($names.Count - 8)) }
+    $script:BackPanel.Visibility = 'Visible'
+}
+
+$btnPutBack.Add_Click({
+    $d = $script:CameBack
+    if (-not $d -or -not $d.Count) { return }
+    $msg = "Switch these off again?`n`n" + ((@(@($d.Privacy) + @($d.Vendors) + @($d.Apps) + @($d.Startup)) | ForEach-Object { '  - ' + $(if ($_.Title) { $_.Title } else { $_.Id }) }) -join "`n") + "`n`nOnly these change, a restore point is saved first, and Undo puts them back."
+    if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
+    $ui.LogBox.AppendText([Environment]::NewLine)
+    $params = @{
+        PrivacyIds = @($d.Privacy | ForEach-Object { $_.Id }); VendorIds = @($d.Vendors | ForEach-Object { $_.Id })
+        AppNames = @($d.Apps | ForEach-Object { $_.Id }); StartupIds = @($d.Startup | ForEach-Object { $_.Id })
+    }
+    Start-Work -StatusText 'Switching them off again...' -Params $params -Work {
+        param($PrivacyIds, $VendorIds, $AppNames, $StartupIds)
+        Invoke-QpPutBack -PrivacyIds $PrivacyIds -VendorIds $VendorIds -AppNames $AppNames -StartupIds $StartupIds
+    } -OnDone { Update-StateAfterChange }
+})
+
+$btnThatWasMe.Add_Click({
+    # Your call: the note starts afresh from how things are now, and nothing is changed.
+    if ($script:LastState) { try { [void](Update-QpQuietNote -State $script:LastState -Accept) } catch { } }
+    Update-CameBack $null
+})
+
+function Update-StartupList($items) {
+    <#
+        Only what is switched on can be ticked. Everything else is summed up in a line, so the list stays
+        short: what's already off, what's always left on (and why), and what a policy controls.
+    #>
+    $script:StartupList.Children.Clear()
+    $script:Options['startup'].Clear()
+    $on     = @($items | Where-Object { $_.On -and -not $_.Keep -and -not $_.Locked } | Sort-Object Name)
+    $off    = @($items | Where-Object { -not $_.On -and -not $_.Keep } | Sort-Object Name)
+    $kept   = @($items | Where-Object { $_.Keep })
+    $locked = @($items | Where-Object { $_.Locked -and $_.On -and -not $_.Keep })
+    $script:StartupSection.Expander.Header = New-Text ('Starts when you sign in   ({0} on, {1} off)' -f ($on.Count + @($kept | Where-Object On).Count + $locked.Count), ($off.Count + @($kept | Where-Object { -not $_.On }).Count)) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    if (-not $on.Count) { [void]$script:StartupList.Children.Add((New-Text 'Nothing extra starts when you sign in. Lovely.' 13 'SemiBold' '#117A68' '0,8,0,0')) }
+    foreach ($i in $on) {
+        $bits = @()
+        if ($i.Note) { $bits += $i.Note }
+        if ($i.Missing) { $bits += 'The program it points to is gone, so this does nothing - switching it off just tidies up.' }
+        $who = if ($i.Publisher) { "From $($i.Publisher)." } else { 'The publisher isn''t recorded.' }
+        if ($i.Everyone) { $who += ' Starts for everyone who uses this PC.' }
+        $bits += $who
+        Add-Option -Panel $script:StartupList -Key 'startup' -Id $i.Id -Title $i.Name -Description ($bits -join ' ') -Recommended $false
+        $script:Options['startup'][$script:Options['startup'].Count - 1].CheckBox.ToolTip = $i.Command
+    }
+    if ($locked.Count) {
+        [void]$script:StartupList.Children.Add((New-Text ('Set by a policy on this PC, so they stay as they are: ' + (($locked | ForEach-Object { $_.Name }) -join ', ') + '.') 12.5 'Normal' '#4B5B5C' '0,12,0,0'))
+    }
+    if ($off.Count) {
+        [void]$script:StartupList.Children.Add((New-Text ('Already off: ' + (($off | ForEach-Object { $_.Name }) -join ', ') + '.') 12.5 'Normal' '#8A9696' '0,12,0,0'))
+    }
+    $keptOn = @($kept | Where-Object On)
+    if ($keptOn.Count) {
+        $t = New-Text ('Always left on: ' + (($keptOn | ForEach-Object { $_.Name }) -join ', ') + '. Windows or your drivers need these.') 12.5 'Normal' '#8A9696' '0,6,0,0'
+        $t.ToolTip = ($keptOn | ForEach-Object { "$($_.Name): $($_.KeepWhy)" }) -join "`n"
+        [void]$script:StartupList.Children.Add($t)
+    }
+    # Something important switched off by someone else: say so kindly, and leave the choice with them.
+    foreach ($k in @($kept | Where-Object { -not $_.On })) {
+        [void]$script:StartupList.Children.Add((New-Text ('{0} is switched off at sign-in. {1} If that wasn''t on purpose, turn it back on in Task Manager > Startup apps.' -f $k.Name, $k.KeepWhy) 12.5 'Normal' '#9A6700' '0,6,0,0'))
     }
 }
 
@@ -967,7 +1140,7 @@ function Remove-TickedExtras {
     $keys = @($picked | ForEach-Object { $_.Key })
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true
-    Start-Work -StatusText 'Removing the extras you picked...' -Params @{ Keys = $keys } -Work { param($Keys) Invoke-QpVendorUninstall -Keys $Keys } -OnDone { Update-State }
+    Start-Work -StatusText 'Removing the extras you picked...' -Params @{ Keys = $keys } -Work { param($Keys) Invoke-QpVendorUninstall -Keys $Keys } -OnDone { Update-StateAfterChange }
 }
 
 function Update-HomeCards($state) {
@@ -985,6 +1158,9 @@ function Update-HomeCards($state) {
     else { $script:CardTracking.Value.Text = 'All set'; $script:CardTracking.Value.Foreground = $good; $script:CardTracking.Caption.Text = 'Tracking and ads are already off' }
     if ($apps) { $script:CardApps.Value.Text = "$apps to remove"; $script:CardApps.Value.Foreground = $todo; $script:CardApps.Caption.Text = 'Pre-installed and promoted apps' }
     else { $script:CardApps.Value.Text = 'None found'; $script:CardApps.Value.Foreground = $good; $script:CardApps.Caption.Text = 'No known bloat apps on this PC' }
+    # Startup is never part of one-click (what you want at sign-in is personal), so just point to it.
+    $starting = @($state.Startup | Where-Object { $_ -and $_.On -and -not $_.Keep -and -not $_.Locked }).Count
+    if ($starting) { $script:CardApps.Caption.Text += ('. {0} start when you sign in - see Apps' -f $starting) }
     if ($bytes -gt 0) { $script:CardSpace.Value.Text = Format-QpBytes $bytes; $script:CardSpace.Value.Foreground = $todo; $script:CardSpace.Caption.Text = 'Temp files, crash dumps, old installers' }
     else { $script:CardSpace.Value.Text = 'Nothing to clean'; $script:CardSpace.Value.Foreground = $good; $script:CardSpace.Caption.Text = 'Already tidy' }
     if ($vendors.Count) {
@@ -1061,6 +1237,81 @@ function Set-HeatText($Block, $Celsius, $MaxC, [bool]$Stuck, [string]$Tip) {
     $Block.ToolTip = $Tip
 }
 
+function Set-TopText($Tile, $Top) {
+    # "No Man's Sky 94%" - the busiest programs, one per line, names kept short enough for the tile.
+    $lines = @(@($Top) | Where-Object { $_ } | ForEach-Object {
+        $n = [string]$_.Name
+        if ($n.Length -gt 22) { $n = $n.Substring(0, 21).TrimEnd() + [char]0x2026 }
+        '{0} {1}%' -f $n, $_.Pct
+    })
+    if ($lines.Count) {
+        $Tile.Top.Text = $lines -join "`n"
+        $Tile.Top.ToolTip = 'The programs using it most right now, the same way Task Manager counts them.'
+        $Tile.Top.Visibility = 'Visible'
+    } else {
+        $Tile.Top.Visibility = 'Collapsed'
+    }
+}
+
+$script:BatteryHealth = $null   # how much the battery holds compared with new - read by the Health tab
+function Update-BatteryCard($Live) {
+    <# Charge and power every reading; how much it holds compared with new whenever that's been read. #>
+    $c = $script:BatteryCard
+    if (-not $Live) { $c.Border.Visibility = 'Collapsed'; return }   # a desktop, or a battery that isn't saying
+    $c.Value.Text = '{0}%' -f $Live.Percent
+    Set-MeterFill $c ($Live.Percent / 100)
+    $c.Caption.Text = if ($Live.Charging) { 'Charging' } elseif ($Live.PluggedIn) { 'Plugged in' } else { 'On battery' }
+    $h = $script:BatteryHealth
+    if ($h) {
+        $t = $script:BatteryHealthText
+        $t.Text = 'Holds {0}% of what it did when new' -f $h.Percent
+        $t.Foreground = Get-Brush $(if ($h.Percent -lt 60) { $script:HeatColours.warn } else { '#0F1B1C' })
+        $tip = "Built to hold {0} Wh; it holds {1} Wh now. Every battery slowly loses capacity with age - below about 80% you may notice it runs out sooner. That's wear, not a fault." -f $h.DesignWh, $h.FullWh
+        if ($h.Cycles) { $tip += " It has been through about $($h.Cycles) charge cycles." }
+        $t.ToolTip = $tip
+        $t.Visibility = 'Visible'
+    } else {
+        $script:BatteryHealthText.Visibility = 'Collapsed'
+    }
+    $c.Border.Visibility = 'Visible'
+}
+
+function Update-DriveCard($d) {
+    <# Windows' own verdict on the drive it runs from, with wear and heat where the drive shares them. #>
+    $c = $script:DriveCard
+    $track = $c.Fill.Parent
+    if (-not $d) {
+        $c.Value.Text = 'Not shared'
+        $c.Caption.Text = 'Windows did not say how this drive is doing.'
+        $track.Visibility = 'Collapsed'; $script:DriveHeatText.Visibility = 'Collapsed'
+        return
+    }
+    $deg = [char]0x00B0; $dot = [char]0x00B7
+    if ($d.Health -and $d.Health -ne 'Healthy') {
+        $c.Value.Text = 'Needs attention'
+        $c.Value.Foreground = Get-Brush $script:HeatColours.high
+        $c.Caption.Text = 'Windows reports a problem with this drive. Back up your files soon.'
+    } else {
+        $c.Value.Text = 'Healthy'
+        $c.Value.Foreground = Get-Brush '#117A68'
+        $c.Caption.Text = if ($null -ne $d.WearPct) { '{0} {1} {2}% of its rated life used' -f $d.Media, $dot, $d.WearPct } else { "$($d.Media)".Substring(0, 1).ToUpper() + "$($d.Media)".Substring(1) }
+    }
+    # The bar is how much of its rated life the drive has used - only when the drive says.
+    if ($null -ne $d.WearPct) { Set-MeterFill $c ([math]::Min(100, $d.WearPct) / 100); $track.Visibility = 'Visible' } else { $track.Visibility = 'Collapsed' }
+    if ($null -ne $d.TempC) {
+        $h = Get-QpHeatWord -Celsius $d.TempC -Kind Drive
+        $script:DriveHeatText.Text = '{0}{1}C {2} {3}' -f $d.TempC, $deg, $dot, $h.Word
+        $script:DriveHeatText.Foreground = Get-Brush $script:HeatColours[$h.Level]
+        $script:DriveHeatText.Visibility = 'Visible'
+    } else {
+        $script:DriveHeatText.Visibility = 'Collapsed'
+    }
+    $tip = "$($d.Name). 'Healthy' is Windows' own verdict on the drive."
+    if ($null -ne $d.WearPct) { $tip += ' Rated life is what the maker promises for writing data; under 100% is within that.' }
+    if ($d.PowerOnHours) { $tip += " Switched on for about {0:N0} hours in total." -f $d.PowerOnHours }
+    $c.Border.ToolTip = $tip
+}
+
 function Update-LiveTiles($r) {
     <# Paints one reading onto the four tiles. Anything the PC doesn't share says so plainly. #>
     if (-not $r) { return }
@@ -1069,6 +1320,8 @@ function Update-LiveTiles($r) {
     $t = $script:TileCpu
     if ($null -ne $r.CpuUsage) { $t.Value.Text = '{0:N0}%' -f $r.CpuUsage; Set-MeterFill $t ($r.CpuUsage / 100) } else { $t.Value.Text = '-' }
     $t.Caption.Text = Get-ShortName $r.CpuName
+    Set-TopText $t $r.CpuTop
+    Update-BatteryCard $r.Battery
     $zone = if ($r.CpuTempSource) { " ($($r.CpuTempSource))" } else { '' }
     Set-HeatText $t.Heat $r.CpuTempC $null ([bool]$r.CpuTempStuck) ("From Windows' own thermal sensor$zone. On some PCs that is the processor itself, on others a sensor close to it, so treat it as a guide. Laptops often run hot when busy - it's only a worry if it stays very hot while the PC is doing nothing.")
     # Windows holding the processor back to cool it: the moment a game suddenly stutters for no reason.
@@ -1089,6 +1342,7 @@ function Update-LiveTiles($r) {
         $t.Value.Text = '{0:N0}%' -f $g.Usage
         Set-MeterFill $t ($g.Usage / 100)
         $t.Caption.Text = Get-ShortName $g.Name
+        Set-TopText $t $g.Top
         $tip = if ($g.TempMaxC) { "From the graphics driver - the same reading Task Manager shows. The driver says this card is built for up to {0:N0}{1}C." -f $g.TempMaxC, $deg } else { 'From the graphics driver - the same reading Task Manager shows.' }
         if ($null -eq $g.TempC -and -not $g.Discrete) { $tip = 'Built-in graphics share the processor''s cooling, so the driver doesn''t report its own temperature.' }
         elseif ($null -eq $g.TempC) { $tip = 'The driver isn''t sharing a temperature right now. On laptops the graphics card often sleeps when it isn''t needed.' }
@@ -1100,6 +1354,7 @@ function Update-LiveTiles($r) {
         $t.Value.Text = '-'
         $t.Caption.Text = 'not shared by this PC'
         $t.Heat.Text = ''
+        $t.Top.Visibility = 'Collapsed'
     }
 
     if ($null -ne $r.MemUsed) { Set-MemoryTile $r.MemUsed $r.MemTotal }
@@ -1146,18 +1401,33 @@ function Set-LogVisible([bool]$Visible) {
     $script:LogVisible = $Visible
 }
 
-$script:ReadState = {
-    @{
-        Privacy = Get-QpPrivacyStatus
-        Vendors = @(Get-QpVendorStatus)
-        Apps    = @(Get-QpBloatApps)
-        Cleanup = @(Get-QpCleanupTargets)
-        Restore = @(Get-QpRestorePoints)
-    }
-}
+# One pass over the PC, sharing its slow lookups (see Get-QpState). Health is read by its own tab.
+$script:ReadState = { Get-QpState }
 
 function Update-State {
     Start-Work -StatusText 'Reading the current state of this PC...' -Work $script:ReadState -OnDone { param($s) Update-FromState $s }
+}
+
+$script:AcceptQuiet = $false
+function Update-UndoList($points) {
+    $script:UndoList.Items.Clear()
+    foreach ($r in @($points | Where-Object { $_ })) {
+        $li = New-Object System.Windows.Controls.ListBoxItem
+        $li.Content = '{0}   -   {1} change(s){2}' -f $r.Name, $r.Changes, $(if ($r.Undone) { '   (already undone)' } else { '' })
+        $li.Tag = $r.Path
+        [void]$script:UndoList.Items.Add($li)
+    }
+    if ($script:UndoList.Items.Count -eq 0) { [void]$script:UndoList.Items.Add('No restore points yet.') }
+}
+
+function Update-StateAfterChange {
+    # After something you did yourself (Apply, one-click, Undo...), the "came back" note starts afresh,
+    # so your own choices are never reported as things that switched themselves back on.
+    $script:AcceptQuiet = $true
+    # The Undo list is quick to read, so it's brought up to date straight away rather than after the
+    # full re-read - the new restore point is there the moment you look.
+    try { Update-UndoList @(Get-QpRestorePoints) } catch { }
+    Update-State
 }
 
 # ------------------------------------------------------------------ actions
@@ -1168,10 +1438,17 @@ function Get-SelectedIds([string]$Key) {
 function Invoke-Selected([bool]$Preview) {
     $key = [string]$ui.Tabs.SelectedItem.Tag
     $ids = Get-SelectedIds $key
-    if ($ids.Count -eq 0) { [void][System.Windows.MessageBox]::Show('Pick at least one thing first.', 'Quietpane'); return }
+    # The Apps tab holds two lists: startup items and apps to remove. One Apply does both.
+    $startupIds = if ($key -eq 'apps') { @(Get-SelectedIds 'startup') } else { @() }
+    if ($ids.Count -eq 0 -and $startupIds.Count -eq 0) { [void][System.Windows.MessageBox]::Show('Pick at least one thing first.', 'Quietpane'); return }
     if (-not $Preview) {
         $msg = switch ($key) {
-            'apps'    { "Remove $($ids.Count) app(s)?`n`nYou can always get them back from the Microsoft Store." }
+            'apps'    {
+                $parts = @()
+                if ($startupIds.Count) { $parts += "stop $($startupIds.Count) thing(s) starting when you sign in - they still open when you start them, and Undo turns them back on" }
+                if ($ids.Count) { $parts += "remove $($ids.Count) app(s) - the Microsoft Store has them if you want them back" }
+                "Shall I " + ($parts -join ",`nand ") + "?"
+            }
             'cleanup' { "Move the ticked items to the Recycle Bin?`n`nNothing is deleted for good - you empty the bin yourself when you are happy." }
             default   { "Go ahead with the $($ids.Count) ticked item(s)?`n`nA restore point is saved first, so you can undo this from the Undo tab." }
         }
@@ -1179,14 +1456,20 @@ function Invoke-Selected([bool]$Preview) {
     }
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true   # preview/apply results are shown in the details log
-    $after = if ($Preview) { $null } else { { Update-State } }
+    $after = if ($Preview) { $null } else { { Update-StateAfterChange } }
     $verb = if ($Preview) { 'Previewing' } else { 'Applying' }
     switch ($key) {
         'privacy' { Start-Work -StatusText "$verb privacy changes..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-QpPrivacy -Ids $Ids -Preview:$Preview } }
         'vendors' { Start-Work -StatusText "$verb brand and hardware changes..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-QpVendor -Ids $Ids -Preview:$Preview } }
         'apps'    {
             $dep = [bool]$script:DeprovisionCb.IsChecked
-            Start-Work -StatusText "$verb app removal..." -Params @{ Ids = $ids; Preview = $Preview; Deprovision = $dep } -OnDone $after -Work { param($Ids, $Preview, $Deprovision) Invoke-QpRemoveApps -Names $Ids -Preview:$Preview -Deprovision:$Deprovision }
+            Start-Work -StatusText "$verb apps and startup changes..." -Params @{ Ids = $ids; Startup = $startupIds; Preview = $Preview; Deprovision = $dep } -OnDone $after -Work {
+                param($Ids, $Startup, $Preview, $Deprovision)
+                # An empty list arrives as $null, and @($null).Count is 1 - so count real entries only.
+                $Startup = @($Startup | Where-Object { $_ }); $Ids = @($Ids | Where-Object { $_ })
+                if ($Startup.Count) { Invoke-QpStartup -Ids $Startup -Preview:$Preview }
+                if ($Ids.Count) { Invoke-QpRemoveApps -Names $Ids -Preview:$Preview -Deprovision:$Deprovision }
+            }
         }
         'cleanup' { Start-Work -StatusText "$verb clean-up..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-QpCleanup -Ids $Ids -Preview:$Preview } }
     }
@@ -1194,8 +1477,14 @@ function Invoke-Selected([bool]$Preview) {
 
 $ui.BtnPreview.Add_Click({ Invoke-Selected $true })
 $ui.BtnApply.Add_Click({ Invoke-Selected $false })
-$ui.BtnRecommended.Add_Click({ Select-Recommended ([string]$ui.Tabs.SelectedItem.Tag) })
-$ui.BtnNone.Add_Click({ foreach ($o in $script:Options[[string]$ui.Tabs.SelectedItem.Tag]) { $o.CheckBox.IsChecked = $false } })
+function Get-TabOptionKeys {
+    # The Apps tab carries two lists; every other tab carries one.
+    $tag = [string]$ui.Tabs.SelectedItem.Tag
+    if ($tag -eq 'apps') { return @('startup', 'apps') }
+    return @($tag)
+}
+$ui.BtnRecommended.Add_Click({ foreach ($k in Get-TabOptionKeys) { Select-Recommended $k } })
+$ui.BtnNone.Add_Click({ foreach ($k in Get-TabOptionKeys) { foreach ($o in $script:Options[$k]) { $o.CheckBox.IsChecked = $false } } })
 
 function Draw-SeverityChart {
     <# A doughnut drawn with arcs. Each slice is also a row in the legend, with its name and count. #>
@@ -1622,7 +1911,7 @@ $btnStopScan.Add_Click({
 })
 $btnScan.Add_Click({ Start-SafetyScan $false })
 $btnScanDeep.Add_Click({ Start-SafetyScan $true })
-$btnHomeScan.Add_Click({ $ui.Tabs.SelectedIndex = 1; Start-SafetyScan $false })
+$btnHomeScan.Add_Click({ Select-Tab 'scan'; Start-SafetyScan $false })
 
 # ---- One click
 function Show-HomeResult($r) {
@@ -1670,7 +1959,7 @@ $btnOneClick.Add_Click({
     if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
     $script:ResultPanel.Visibility = 'Collapsed'
     $ui.LogBox.AppendText([Environment]::NewLine)
-    Start-Work -StatusText 'Cleaning your PC... this usually takes less than a minute.' -Work { Invoke-QpRecommended } -OnDone { param($r) Show-HomeResult $r; Update-State }
+    Start-Work -StatusText 'Cleaning your PC... this usually takes less than a minute.' -Work { Invoke-QpRecommended } -OnDone { param($r) Show-HomeResult $r; Update-StateAfterChange }
 })
 
 $btnRestart.Add_Click({
@@ -1689,7 +1978,7 @@ $btnUndoAll.Add_Click({
         $btnUndoAll.Visibility = 'Collapsed'
         $script:MeterSpace.Delta.Visibility = 'Collapsed'
         $script:MeterMemory.Delta.Visibility = 'Collapsed'
-        Update-State
+        Update-StateAfterChange
     }
 })
 
@@ -1704,7 +1993,7 @@ $btnUndo.Add_Click({
     if ([System.Windows.MessageBox]::Show("Undo all changes from:`n$($sel.Content)?", 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true
-    Start-Work -StatusText 'Undoing...' -Params @{ Path = [string]$sel.Tag } -Work { param($Path) Invoke-QpUndo -Path $Path } -OnDone { Update-State }
+    Start-Work -StatusText 'Undoing...' -Params @{ Path = [string]$sel.Tag } -Work { param($Path) Invoke-QpUndo -Path $Path } -OnDone { Update-StateAfterChange }
 })
 
 $ui.Tabs.Add_SelectionChanged({
@@ -1731,11 +2020,13 @@ if ($SelfTest) {
         $ui.Status.Text = 'Ready when you are.'
         $ui.Tabs.SelectedIndex = $SnapshotTab
         if ($SnapshotTab -eq ($ui.Tabs.Items.Count - 1)) { $script:PrivacyExpander.IsExpanded = $true }
-        if ($SnapshotTab -eq 0) {
+        if ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') {
             # A real reading for the picture: load is measured between two moments, a second apart.
             $monitor = New-QpLiveMonitor
             Start-Sleep -Milliseconds 1000
+            $script:BatteryHealth = Get-QpBatteryHealth
             Update-LiveTiles (Get-QpLiveReading -Monitor $monitor)
+            Update-DriveCard (Get-QpDriveHealth)
         }
         Update-Buttons
         $root = $window.Content

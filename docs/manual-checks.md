@@ -51,15 +51,30 @@ on the results panel when it happens; that message should appear rather than a c
 
 These need eyes, not assertions:
 
-- **Right now panel.** On Home, the four tiles change every couple of seconds. Compare the graphics
-  temperature and video memory with Task Manager > Performance > GPU: they come from the same place
-  and should match. Hover a temperature to see where it comes from.
-- **Right now pauses.** Switch to another tab, or minimise the window, and Quietpane's own CPU use in
-  Task Manager should drop to nothing: it stops reading until Home is back on screen.
+- **Health tab.** The four tiles change every couple of seconds. Compare the graphics temperature
+  and video memory with Task Manager > Performance > GPU: they come from the same place and should
+  match. Hover a temperature to see where it comes from.
+- **Health pauses.** Switch to another tab, or minimise the window, and Quietpane's own CPU use in
+  Task Manager should drop to nothing: it reads nothing until the Health tab is back on screen.
+- **Undo is up to date straight away.** Apply something, then open the Undo tab at once: the new
+  restore point is at the top, with the right number of changes. Nothing ever shows "0 change(s)".
 - **Slowing down to cool off.** Under a long, heavy game on a laptop, the processor tile may say it
   is slowing down to cool off. If it appears while the PC is idle and cool, that is a bug.
 - **Not shared.** On a PC with no dedicated graphics card or no thermal zone, the tiles say "not
   shared" or "temperature not shared" - never 0 degrees.
+- **What's using it.** The programs under the processor and graphics tiles should match the top of
+  Task Manager > Processes, sorted by CPU and by GPU. Quietpane lists itself as "Quietpane (this app)".
+- **Battery and drive.** On a laptop, the Battery card's "holds N% of what it did when new" should
+  match Windows' own report (`powercfg /batteryreport`). The Drive card should say what Windows says
+  in Settings > System > Storage > Disks & volumes. Wear and temperature need Quietpane's usual
+  administrator rights; without them the card just says "Healthy".
+- **Came back.** Switch one of Quietpane's privacy settings back on yourself in Windows Settings,
+  then open Quietpane: Home says one setting came back. "That was me" hides it for good; doing it
+  again and choosing "Switch them off again" puts exactly that one setting right, with a restore point.
+- **Startup items match Task Manager.** Apps tab > Starts when you sign in should list the same
+  things as Task Manager > Startup apps, with the same on/off state. Switch one off in Quietpane and
+  Task Manager shows it as Disabled straight away; Undo, and it shows Enabled again. Sign out and
+  back in to confirm it really stays quiet.
 - **Stop.** Start "Check this PC", press **Stop** after a few seconds. The progress line changes to
   "Stopping as soon as it is safe to...", then the summary says the check was stopped and that
   nothing was changed. No report is written to the Desktop.

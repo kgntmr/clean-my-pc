@@ -26,7 +26,7 @@ It tells you what it will do before it does anything, takes about a minute, and 
 
 > **A good start, not a guarantee.** Quietpane tidies up the usual troublemakers and switches off tracking you never agreed to. It can't promise a PC is clean. If yours still feels wrong afterwards, run a deeper scan with a dedicated security tool as well.
 
-<p align="center"><img src="docs/screenshot-home.png" width="820" alt="Quietpane home screen: live processor, graphics and memory readings with temperatures, and one big 'Quiet my PC now' button"></p>
+<p align="center"><img src="docs/screenshot-home.png" width="820" alt="Quietpane home screen with one big 'Quiet my PC now' button"></p>
 
 **Windows will ask a few questions first.** That's normal for new free software:
 
@@ -64,9 +64,14 @@ It grew out of a real clean-up of a gaming laptop, where adware kept re-installi
 ## What's inside
 
 ### Home
-Cards show what could be better on this PC, a bar shows free space, and a **Right now** panel shows how hard the processor, graphics card and memory are working and how warm they are, every 2 seconds while Home is open. Temperatures come from Windows' own thermal sensor and from the graphics driver, which is the same reading Task Manager shows. Reading a processor's core sensors needs a kernel driver, and Quietpane won't install one, so the processor figure is a guide. If Windows starts holding the processor back to cool it down, the tile says so - the usual reason a game suddenly stutters. Anything a PC doesn't share says **not shared** instead of guessing.
+Cards show what could be better on this PC, a bar shows free space, and one button does the lot. **Quiet my PC now** applies only the recommended items that aren't done yet, all inside **one** restore point, so **Undo everything** really does undo everything. It never uninstalls a program on its own.
 
-One button does the lot. **Quiet my PC now** applies only the recommended items that aren't done yet, all inside **one** restore point, so **Undo everything** really does undo everything. It never uninstalls a program on its own.
+**If things switch themselves back on**, Home says so next time you open it: which settings, apps or startup items came back, since when, and whether Windows updated in between, which is the usual reason. Big Windows updates are known to do this. **Switch them off again** changes exactly those items and nothing else, and **That was me** leaves them be.
+
+### Health
+How hard the processor, graphics card and memory are working right now, how warm they are, and which programs are using them most, every 2 seconds and only while the tab is open. On a laptop, the battery's charge and how much it holds compared with when it was new. And the drive Windows runs from: Windows' own verdict on it, how much of its rated life it has used, and its temperature.
+
+Temperatures come from Windows' own thermal sensor and from the graphics driver, which is the same reading Task Manager shows. Reading a processor's core sensors needs a kernel driver, and Quietpane won't install one, so the processor figure is a guide. If Windows starts holding the processor back to cool it down, the tile says so - the usual reason a game suddenly stutters. Anything a PC doesn't share says **not shared** instead of guessing.
 
 ### Telemetry: the extras your PC came with
 Laptop makers and chip makers leave software running in the background. Quietpane looks for what's actually on **your** PC and lists only that, so nothing shows up for brands you don't have.
@@ -113,8 +118,13 @@ When it's done, a short summary says what was looked at, what was found by sever
 | Brand software | What your laptop and chip makers left running, and extras you could remove |
 | Performance and space | Memory use, what really starts at sign-in, space you could reclaim, folders nothing has touched in 6+ months |
 
-### Apps, Free up space, Undo, About
-**Apps** offers only known bloat that's actually installed; Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool and anything driver-related are never offered. **Free up space** lists temp files, crash dumps, caches and old installers with their sizes, and moves them to the Recycle Bin. **Undo** restores services, tasks, registry values, environment variables, VS Code settings and hosts entries exactly as they were. **About** holds the policies, readable offline.
+### Apps: what starts when you sign in, and what you could remove
+**Starts when you sign in** lists what launches by itself, from the usual startup places, the Startup folders and Store apps, with who made it and a plain word on whether it's safe to switch off. Switching an item off works exactly like Task Manager: the program is untouched and still opens when you start it, and **Undo** turns it back on. Windows Security and the helpers your sound, touchpad and Bluetooth drivers need are never offered, and if one of them has been switched off, Quietpane says so kindly. Startup is never part of one-click: what you want at sign-in is your call.
+
+**Apps you could remove** offers only known bloat that's actually installed; Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool and anything driver-related are never offered.
+
+### Free up space, Undo, About
+**Free up space** lists temp files, crash dumps, caches and old installers with their sizes, and moves them to the Recycle Bin. **Undo** restores services, tasks, registry values, startup items, environment variables, VS Code settings and hosts entries exactly as they were. **About** holds the policies, readable offline.
 
 ---
 
@@ -204,7 +214,7 @@ Removing it doesn't undo its changes: click **Undo** first if you want your PC b
   Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','C:\Tools\quietpane\tests\Run-QuietpaneTests.ps1','-Live'
   ```
 
-  An elevated window says "Administrator:" in its title bar and starts in `C:\WINDOWS\system32`. All 74 checks run there.
+  An elevated window says "Administrator:" in its title bar and starts in `C:\WINDOWS\system32`. All 109 checks run there.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what a person still has to test in a browser and in the window, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files, and it makes no network requests.
 - **Contribute:** the lists are plain data files in [`src/catalog/`](src/catalog), so adding a setting, app, folder or brand needs no code. Describe side effects honestly and test with **Preview** first.
 
