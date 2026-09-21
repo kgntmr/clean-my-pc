@@ -42,7 +42,7 @@ Just want a check-up that changes nothing? Double-click **Safety scan only** ins
 - **Tells you first.** Every item explains what it does and its side effects, and **Preview** shows exactly what would change.
 - **Can be undone.** Changes go into a restore point, and clean-up only moves files to your Recycle Bin. The three exceptions say so before you confirm: removing an app, uninstalling a brand extra, and deleting a threat for good.
 - **Leaves your security alone.** Defender, SmartScreen, the firewall and Windows Update are never touched.
-- **Hides nothing.** Plain-text PowerShell you can read, plus a few lines of C# that ask the graphics driver for its temperature. No installer, no `.exe`.
+- **Hides nothing.** Plain-text PowerShell you can read, plus a few lines of C# that ask the graphics driver for its temperature and put the KomodoWorks emblem on the taskbar. No installer, no `.exe`.
 
 ## What's inside
 
@@ -75,7 +75,7 @@ Every finding says who found it: **Microsoft Defender** (a real detection, named
 
 ## Verify it yourself
 
-1. **Read it.** The app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The only non-PowerShell code is a short C# block in the engine. It asks the graphics driver three read-only questions: list the adapters, ask each one, close it.
+1. **Read it.** The app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The only non-PowerShell code is a short C# block in the engine. It asks the graphics driver three read-only questions: list the adapters, ask each one, close it. The window adds one line, which names the app to Windows so the taskbar shows its own icon instead of PowerShell's.
 2. **Search for network code.** In the folder, run:
    ```powershell
    Select-String -Path .\Quietpane.ps1, .\src\Quietpane.psm1 -Pattern 'Invoke-WebRequest|Invoke-RestMethod|WebClient|HttpClient|BitsTransfer|TcpClient|curl|wget|DownloadString'

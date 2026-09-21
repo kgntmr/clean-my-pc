@@ -82,6 +82,16 @@ if ($Scan) {
 # ------------------------------------------------------------------ window
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
+# Give the app its own button on the taskbar. Without this, Windows files the window under
+# PowerShell and shows PowerShell's icon; with it, the taskbar shows the KomodoWorks emblem.
+# It has to happen before the first window exists. It only names this app to Windows and changes nothing.
+if (-not $SelfTest) {
+    try {
+        Add-Type -Namespace Quietpane -Name Taskbar -MemberDefinition '[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);'
+        [void][Quietpane.Taskbar]::SetCurrentProcessExplicitAppUserModelID('KomodoWorks.Quietpane')
+    } catch { }
+}
+
 # KomodoWorks palette (from komodoworks.com): bg #FAF6EC, anchor #0F1B1C, accent #FFB627,
 # secondary #1FA187 / readable #117A68, error #A83232. Headings Fraunces, body Sora
 # (falls back to Georgia / Segoe UI when those fonts are not installed - no web fonts are downloaded).
@@ -259,6 +269,8 @@ function Get-Bitmap([string]$Path) {
 }
 $logo = Get-Bitmap $info.LogoPath
 if ($logo) { $ui.HeaderLogo.Source = $logo; $window.Icon = $logo }
+# The .ico holds every size Windows asks for (title bar, Alt+Tab, taskbar), so each one stays sharp.
+try { $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([Uri]$info.IconPath, 'None', 'OnLoad') } catch { }
 $ui.VersionRun.Text = "   |   v$($info.Version)   |   No data leaves this PC"
 
 function New-Text {
@@ -1583,6 +1595,7 @@ function Show-ChoiceDialog {
     $dlg.ResizeMode = 'NoResize'
     $dlg.Background = Get-Brush '#FAF6EC'
     if ($window -and $window.IsVisible) { $dlg.Owner = $window }
+    if ($window) { $dlg.Icon = $window.Icon }
     $sp = New-Object System.Windows.Controls.StackPanel
     $sp.Margin = Get-Thick '22,18'
     $sp.MaxWidth = 560
@@ -2043,7 +2056,8 @@ if ($SelfTest) {
         $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
         $fs = [IO.File]::Create($Snapshot); $enc.Save($fs); $fs.Close()
     }
-    '{0} tabs, {1} privacy items, logo loaded: {2}, window built OK' -f $ui.Tabs.Items.Count, $script:Options['privacy'].Count, [bool]$logo
+    $iconSizes = if ($window.Icon.Decoder) { @($window.Icon.Decoder.Frames).Count } else { 0 }
+    '{0} tabs, {1} privacy items, logo loaded: {2}, icon sizes: {3}, window built OK' -f $ui.Tabs.Items.Count, $script:Options['privacy'].Count, [bool]$logo, $iconSizes
     return
 }
 

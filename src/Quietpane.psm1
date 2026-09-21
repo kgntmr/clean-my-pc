@@ -18,7 +18,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.9.1'
+$script:AppVersion  = '1.9.2'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -49,6 +49,7 @@ function Get-QpInfo {
         BrandEmail = $script:Brand.Email
         RepoUrl    = $script:Brand.Repo
         LogoPath   = Join-Path $script:AssetsRoot 'komodoworks-logo.png'
+        IconPath   = Join-Path $script:AssetsRoot 'quietpane.ico'
         DataRoot   = $script:DataRoot
     }
 }

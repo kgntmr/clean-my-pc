@@ -13,7 +13,7 @@
             '-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
 
     (all on one line). An elevated window says "Administrator:" in its title bar and starts in
-    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated: 109 checks run.
+    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated: 112 checks run.
 
     No real malware is ever used. The only live test writes the EICAR string - the harmless standard file
     the antivirus industry publishes so people can check their protection works - into a temporary folder,
@@ -678,6 +678,29 @@ Test-Case 'an empty restore point is never offered in Undo' {
     $listed = @(Get-QpRestorePoints | Where-Object { $_.Name -eq '19990101-000000-quietpane-test' }).Count
     Remove-Item -LiteralPath $fake -Recurse -Force    # the test's own folder
     $listed -eq 0
+}
+
+Section 'The app icon'
+Add-Type -AssemblyName PresentationCore
+Test-Case 'the icon has every size Windows asks for' {
+    $ico = (Get-QpInfo).IconPath
+    $dec = New-Object System.Windows.Media.Imaging.IconBitmapDecoder ([Uri]$ico), 'None', 'OnLoad'
+    $sizes = @($dec.Frames | ForEach-Object { $_.PixelWidth } | Sort-Object)
+    ($sizes -join ',') -eq '16,20,24,32,40,48,64,256'
+}
+Test-Case 'the icon is the KomodoWorks emblem, on a see-through background' {
+    $dec = New-Object System.Windows.Media.Imaging.IconBitmapDecoder ([Uri](Get-QpInfo).IconPath), 'None', 'OnLoad'
+    $big = New-Object System.Windows.Media.Imaging.FormatConvertedBitmap ($dec.Frames | Where-Object { $_.PixelWidth -eq 256 }), ([System.Windows.Media.PixelFormats]::Bgra32), $null, 0
+    $px = New-Object byte[] (256 * 256 * 4)
+    $big.CopyPixels($px, 256 * 4, 0)
+    function Get-Px([int]$x, [int]$y) { $i = ($y * 256 + $x) * 4; '{0},{1},{2},{3}' -f $px[$i + 2], $px[$i + 1], $px[$i], $px[$i + 3] }
+    # corner clear, dark square in the KomodoWorks anchor colour, teal square peeking out bottom-right
+    (Get-Px 0 0).EndsWith(',0') -and (Get-Px 40 40) -eq '15,27,28,255' -and (Get-Px 240 240) -eq '23,155,131,255'
+}
+Test-Case 'the window''s only call into Windows names the app for the taskbar' {
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $calls = @([regex]::Matches($src, 'DllImport\("(\w+)\.dll"[^\]]*\)\]\s*public static extern int (\w+)') | ForEach-Object { '{0}!{1}' -f $_.Groups[1].Value, $_.Groups[2].Value })
+    ($calls -join ';') -eq 'shell32!SetCurrentProcessExplicitAppUserModelID'
 }
 
 Section 'The checks a person has to do by hand'
