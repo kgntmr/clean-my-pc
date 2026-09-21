@@ -26,7 +26,7 @@ It tells you what it will do before it does anything, takes about a minute, and 
 
 > **A good start, not a guarantee.** Quietpane tidies up the usual troublemakers and switches off tracking you never agreed to. It can't promise a PC is clean. If yours still feels wrong afterwards, run a deeper scan with a dedicated security tool as well.
 
-<p align="center"><img src="docs/screenshot-home.png" width="820" alt="Quietpane home screen with one big 'Quiet my PC now' button"></p>
+<p align="center"><img src="docs/screenshot-home.png" width="820" alt="Quietpane home screen: live processor, graphics and memory readings with temperatures, and one big 'Quiet my PC now' button"></p>
 
 **Windows will ask a few questions first.** That's normal for new free software:
 
@@ -54,7 +54,7 @@ Almost everything on a modern PC reports home: Windows, browsers, graphics drive
 - 🌐 **Connects to nothing.** No network requests at all: [verify it yourself](#verify-it-yourself).
 - 👀 **Tells you first.** Every item explains what it does and its side effects, and **Preview** shows exactly what would change.
 - ↩️ **Can be undone.** Every change creates a restore point, and tidying up only ever moves files to your Recycle Bin. Only a threat you choose to delete for good is gone for good, and you're asked twice.
-- 📖 **Hides nothing.** Plain-text PowerShell, no installer, no `.exe`, no obfuscation.
+- 📖 **Hides nothing.** Plain-text PowerShell (plus a few readable lines of C# that ask the graphics driver for its temperature), no installer, no `.exe`, no obfuscation.
 - 🛡️ **Leaves your security alone.** Defender, SmartScreen, the firewall and Windows Update are never touched.
 
 It grew out of a real clean-up of a gaming laptop, where adware kept re-installing itself from a scheduled task that came in with a cracked game. Those [lessons](docs/LESSONS-LEARNED.md) are built into the tool.
@@ -64,7 +64,9 @@ It grew out of a real clean-up of a gaming laptop, where adware kept re-installi
 ## What's inside
 
 ### Home
-Cards show what could be better on this PC, two bars show free space and memory in use, and one button does the lot. **Quiet my PC now** applies only the recommended items that aren't done yet, all inside **one** restore point, so **Undo everything** really does undo everything. It never uninstalls a program on its own.
+Cards show what could be better on this PC, a bar shows free space, and a **Right now** panel shows how hard the processor, graphics card and memory are working and how warm they are, every 2 seconds while Home is open. Temperatures come from Windows' own thermal sensor and from the graphics driver, which is the same reading Task Manager shows. Reading a processor's core sensors needs a kernel driver, and Quietpane won't install one, so the processor figure is a guide. If Windows starts holding the processor back to cool it down, the tile says so - the usual reason a game suddenly stutters. Anything a PC doesn't share says **not shared** instead of guessing.
+
+One button does the lot. **Quiet my PC now** applies only the recommended items that aren't done yet, all inside **one** restore point, so **Undo everything** really does undo everything. It never uninstalls a program on its own.
 
 ### Telemetry: the extras your PC came with
 Laptop makers and chip makers leave software running in the background. Quietpane looks for what's actually on **your** PC and lists only that, so nothing shows up for brands you don't have.
@@ -118,7 +120,7 @@ When it's done, a short summary says what was looked at, what was found by sever
 
 ## Verify it yourself
 
-**1. Read it.** The whole app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands).
+**1. Read it.** The whole app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The only non-PowerShell code is a short C# block in the engine that asks the graphics driver three read-only questions: list the adapters, ask each one, close it. It's compiled on your PC from that same readable text.
 
 **2. Search for network code.** In the folder, run:
 ```powershell
@@ -202,7 +204,7 @@ Removing it doesn't undo its changes: click **Undo** first if you want your PC b
   Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','C:\Tools\quietpane\tests\Run-QuietpaneTests.ps1','-Live'
   ```
 
-  An elevated window says "Administrator:" in its title bar and starts in `C:\WINDOWS\system32`. All 65 checks run there.
+  An elevated window says "Administrator:" in its title bar and starts in `C:\WINDOWS\system32`. All 74 checks run there.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what a person still has to test in a browser and in the window, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files, and it makes no network requests.
 - **Contribute:** the lists are plain data files in [`src/catalog/`](src/catalog), so adding a setting, app, folder or brand needs no code. Describe side effects honestly and test with **Preview** first.
 

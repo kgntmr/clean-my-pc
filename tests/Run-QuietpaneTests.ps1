@@ -13,7 +13,7 @@
             '-File','C:\Tools\quietpane\tests\Run-QuietpaneTests.ps1','-Live'
 
     (all on one line). An elevated window says "Administrator:" in its title bar and starts in
-    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated: 65 checks run.
+    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated: 74 checks run.
 
     No real malware is ever used. The only live test writes the EICAR string - the harmless standard file
     the antivirus industry publishes so people can check their protection works - into a temporary folder,
@@ -355,6 +355,71 @@ Test-Case 'a clean check ends calmly rather than inventing work' {
 Test-Case 'a stopped check is never dressed up as a finished one' {
     $s = New-QpScanSummary -Counts $null -Tally @{} -Scanned 120 -Seconds 9 -Outstanding 0 -Cancelled $true
     $s.Lines[0] -match 'Stopped' -and $s.Lines[0] -match 'Nothing on this PC was changed' -and $s.NextStep -match 'run the check again'
+}
+
+Section 'Live readings on Home'
+Test-Case 'heat is always put into words, not left to colour' {
+    (Get-QpHeatWord 40).Word -eq 'cool' -and (Get-QpHeatWord 60).Word -eq 'comfortable' -and (Get-QpHeatWord 75).Word -eq 'warm' -and
+    (Get-QpHeatWord 88).Word -eq 'hot' -and (Get-QpHeatWord 97).Word -eq 'very hot'
+}
+Test-Case 'a driver''s own limit brings "very hot" forward' { (Get-QpHeatWord 82 -MaxC 90).Word -eq 'very hot' }
+Test-Case 'a missing temperature says "not shared", never zero' {
+    $h = Get-QpHeatWord $null
+    $h.Word -eq 'not shared' -and $h.Level -eq 'none'
+}
+Test-Case 'setting up the readers never throws' { $null -ne (New-QpLiveMonitor) }
+Test-Case 'a reading stays within believable ranges' {
+    $m = New-QpLiveMonitor
+    Start-Sleep -Milliseconds 1000
+    $r = Get-QpLiveReading -Monitor $m
+    $cpuOk = ($null -eq $r.CpuUsage) -or ($r.CpuUsage -ge 0 -and $r.CpuUsage -le 100)
+    $tempOk = ($null -eq $r.CpuTempC) -or ($r.CpuTempC -gt 5 -and $r.CpuTempC -lt 130)
+    $memOk = ($null -eq $r.MemUsed) -or ($r.MemUsed -ge 0 -and $r.MemUsed -le $r.MemTotal)
+    $gpuOk = @($r.Gpus | Where-Object { $_.Usage -lt 0 -or $_.Usage -gt 100 -or ($null -ne $_.TempC -and ($_.TempC -le 0 -or $_.TempC -ge 130)) }).Count -eq 0
+    $cpuOk -and $tempOk -and $memOk -and $gpuOk
+}
+Test-Case 'a thermal sensor that never moves is flagged rather than shown as live' {
+    function New-FakeMonitor([scriptblock]$Kelvin) {
+        $zone = [pscustomobject]@{}
+        $zone | Add-Member -MemberType ScriptMethod -Name NextValue -Value $Kelvin
+        [pscustomobject]@{ Cpu = $null; CpuName = ''; Zone = $zone; ZoneName = '\_TZ.TEST'; Limits = @(); Available = $null; MemTotal = [double]0
+            Engines = $null; EnginePrev = $null; GpuMemory = $null; GpuSensors = $false; ZoneSeen = New-Object System.Collections.Generic.List[double] }
+    }
+    $stuck = New-FakeMonitor { 3252 }
+    $moving = New-FakeMonitor { 3200 + (Get-Random -Minimum 0 -Maximum 100) }
+    1..24 | ForEach-Object { $a = Get-QpLiveReading -Monitor $stuck; $b = Get-QpLiveReading -Monitor $moving }
+    $a.CpuTempStuck -and -not $b.CpuTempStuck -and [math]::Abs($a.CpuTempC - 52.05) -lt 0.1
+}
+Test-Case 'Windows slowing the processor to cool it is noticed, and only then' {
+    function New-LimitMonitor([double[]]$Values) {
+        $limits = foreach ($v in $Values) {
+            $c = [pscustomobject]@{ V = $v }
+            $c | Add-Member -MemberType ScriptMethod -Name NextValue -Value { $this.V }
+            $c
+        }
+        [pscustomobject]@{ Cpu = $null; CpuName = ''; Zone = $null; ZoneName = ''; Limits = @($limits); Available = $null; MemTotal = [double]0
+            Engines = $null; EnginePrev = $null; GpuMemory = $null; GpuSensors = $false; ZoneSeen = New-Object System.Collections.Generic.List[double] }
+    }
+    $slowed = Get-QpLiveReading -Monitor (New-LimitMonitor 100, 80)     # two zones: the lower one counts
+    $full = Get-QpLiveReading -Monitor (New-LimitMonitor 100)
+    $unknown = Get-QpLiveReading -Monitor (New-LimitMonitor 0)          # 0 means "not reported", not "stopped"
+    $none = Get-QpLiveReading -Monitor (New-LimitMonitor)
+    $slowed.CpuThrottled -and $slowed.CpuLimitPct -eq 80 -and
+    -not $full.CpuThrottled -and -not $unknown.CpuThrottled -and $null -eq $unknown.CpuLimitPct -and -not $none.CpuThrottled
+}
+Test-Case 'the graphics-driver code only asks questions' {
+    # Only enumerate, query and close. Nothing that sets, escapes to the driver, or changes anything.
+    $src = Get-Content (Join-Path $root 'src\Quietpane.psm1') -Raw
+    $calls = @([regex]::Matches($src, 'DllImport\("gdi32\.dll"\)\]\s*static extern int (\w+)') | ForEach-Object { $_.Groups[1].Value })
+    $calls.Count -eq 3 -and @($calls | Where-Object { $_ -notin 'D3DKMTEnumAdapters2', 'D3DKMTQueryAdapterInfo', 'D3DKMTCloseAdapter' }).Count -eq 0
+}
+Test-Case 'live readings write nothing to disk' {
+    $data = Join-Path $env:ProgramData 'Quietpane'
+    $before = @(Get-ChildItem $data -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName)|$($_.LastWriteTimeUtc.Ticks)" }) -join "`n"
+    $m = New-QpLiveMonitor
+    1..2 | ForEach-Object { Get-QpLiveReading -Monitor $m | Out-Null }
+    $after = @(Get-ChildItem $data -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName)|$($_.LastWriteTimeUtc.Ticks)" }) -join "`n"
+    $before -eq $after
 }
 
 Section 'The checks a person has to do by hand'

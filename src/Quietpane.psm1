@@ -18,7 +18,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.7.0'
+$script:AppVersion  = '1.8.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -210,6 +210,288 @@ function Add-QpTotals {
         $new | ConvertTo-Json | Set-Content -Path (Join-Path $script:DataRoot 'totals.json') -Encoding UTF8
     } catch { Write-QpLog "Could not record the totals: $($_.Exception.Message)" 'WARN' }
 }
+
+#region ---------------------------------------------------------------- live readings (read-only)
+
+# Processor, graphics and memory load, plus temperatures, for the Home screen. Everything here only
+# reads: Windows performance counters, Windows' own thermal sensor, and the graphics driver's own
+# sensor - the same one Task Manager shows. No driver is installed, nothing is downloaded, nothing is
+# written, and no reading is stored or leaves this PC.
+#
+# Why not the processor's own core sensors? Reading those needs a kernel driver (the kind other
+# monitoring tools ship, and which Microsoft now flags as a security risk). Quietpane will not
+# install one, so the processor figure comes from Windows' thermal zone and says so.
+
+$script:GpuSensorSource = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+// Read-only questions to the graphics driver through gdi32.dll: the calls Task Manager uses for its
+// GPU temperature and memory figures. Nothing here changes a setting or keeps a handle open.
+public static class QuietpaneGpuSensors {
+    [StructLayout(LayoutKind.Sequential)] struct LUID { public uint LowPart; public int HighPart; }
+    [StructLayout(LayoutKind.Sequential)] struct ADAPTERINFO { public uint hAdapter; public LUID AdapterLuid; public uint NumOfSources; public int bPrecisePresentRegionsPreferred; }
+    [StructLayout(LayoutKind.Sequential)] struct ENUMADAPTERS2 { public uint NumAdapters; public IntPtr pAdapters; }
+    [StructLayout(LayoutKind.Sequential)] struct QUERYADAPTERINFO { public uint hAdapter; public int Type; public IntPtr pPrivateDriverData; public uint PrivateDriverDataSize; }
+    [StructLayout(LayoutKind.Sequential)] struct CLOSEADAPTER { public uint hAdapter; }
+    [StructLayout(LayoutKind.Sequential)] struct PERFDATA {
+        public uint PhysicalAdapterIndex; public ulong MemoryFrequency; public ulong MaxMemoryFrequency; public ulong MaxMemoryFrequencyOC;
+        public ulong MemoryBandwidth; public ulong PCIEBandwidth; public uint FanRPM; public uint Power; public uint Temperature; public byte PowerStateOverride; }
+    [StructLayout(LayoutKind.Sequential)] struct PERFDATACAPS {
+        public uint PhysicalAdapterIndex; public ulong MaxMemoryBandwidth; public ulong MaxPCIEBandwidth; public uint MaxFanRPM; public uint TemperatureMax; public uint TemperatureWarning; }
+    [StructLayout(LayoutKind.Sequential)] struct SEGMENTSIZEINFO { public ulong DedicatedVideoMemorySize; public ulong DedicatedSystemMemorySize; public ulong SharedSystemMemorySize; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct REGISTRYINFO {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string AdapterString;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string BiosString;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string DacType;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string ChipType; }
+
+    // Question numbers from the Windows driver kit (KMTQUERYADAPTERINFOTYPE).
+    const int SEGMENT_SIZE = 3, REGISTRY_INFO = 8, PERF_DATA = 62, PERF_DATA_CAPS = 63;
+
+    [DllImport("gdi32.dll")] static extern int D3DKMTEnumAdapters2(ref ENUMADAPTERS2 p);
+    [DllImport("gdi32.dll")] static extern int D3DKMTQueryAdapterInfo(ref QUERYADAPTERINFO p);
+    [DllImport("gdi32.dll")] static extern int D3DKMTCloseAdapter(ref CLOSEADAPTER p);
+
+    public class Adapter {
+        public string Luid;              // matches the name Windows' GPU counters use
+        public string Name;
+        public ulong DedicatedBytes;     // the graphics card's own memory
+        public ulong SharedBytes;        // system memory it may borrow
+        public double TemperatureC;      // 0 when the driver does not share one
+        public double TemperatureMaxC;   // 0 when the driver does not say
+    }
+
+    static bool Query<T>(uint handle, int type, ref T value) where T : struct {
+        int size = Marshal.SizeOf(typeof(T));
+        IntPtr buffer = Marshal.AllocHGlobal(size);
+        try {
+            Marshal.StructureToPtr(value, buffer, false);
+            var q = new QUERYADAPTERINFO { hAdapter = handle, Type = type, pPrivateDriverData = buffer, PrivateDriverDataSize = (uint)size };
+            if (D3DKMTQueryAdapterInfo(ref q) != 0) return false;
+            value = (T)Marshal.PtrToStructure(buffer, typeof(T));
+            return true;
+        } finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    // One pass over every graphics adapter. Every handle is closed again before this returns.
+    public static List<Adapter> Read() {
+        var result = new List<Adapter>();
+        var e = new ENUMADAPTERS2();
+        if (D3DKMTEnumAdapters2(ref e) != 0 || e.NumAdapters == 0) return result;
+        int itemSize = Marshal.SizeOf(typeof(ADAPTERINFO));
+        e.pAdapters = Marshal.AllocHGlobal(itemSize * (int)e.NumAdapters);
+        try {
+            if (D3DKMTEnumAdapters2(ref e) != 0) return result;
+            for (int i = 0; i < e.NumAdapters; i++) {
+                var a = (ADAPTERINFO)Marshal.PtrToStructure(new IntPtr(e.pAdapters.ToInt64() + i * itemSize), typeof(ADAPTERINFO));
+                try {
+                    var reg = new REGISTRYINFO();
+                    if (!Query(a.hAdapter, REGISTRY_INFO, ref reg) || string.IsNullOrEmpty(reg.AdapterString)) continue;
+                    if (reg.AdapterString.IndexOf("Basic Render", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    var item = new Adapter {
+                        Luid = string.Format("0x{0:x8}_0x{1:x8}", (uint)a.AdapterLuid.HighPart, a.AdapterLuid.LowPart),
+                        Name = reg.AdapterString.Trim()
+                    };
+                    var seg = new SEGMENTSIZEINFO();
+                    if (Query(a.hAdapter, SEGMENT_SIZE, ref seg)) { item.DedicatedBytes = seg.DedicatedVideoMemorySize; item.SharedBytes = seg.SharedSystemMemorySize; }
+                    var perf = new PERFDATA();
+                    if (Query(a.hAdapter, PERF_DATA, ref perf)) item.TemperatureC = perf.Temperature / 10.0;
+                    var caps = new PERFDATACAPS();
+                    if (Query(a.hAdapter, PERF_DATA_CAPS, ref caps)) item.TemperatureMaxC = caps.TemperatureMax / 10.0;
+                    result.Add(item);
+                } finally {
+                    var c = new CLOSEADAPTER { hAdapter = a.hAdapter };
+                    D3DKMTCloseAdapter(ref c);
+                }
+            }
+        } finally { Marshal.FreeHGlobal(e.pAdapters); }
+        return result;
+    }
+}
+'@
+
+function Initialize-QpGpuSensors {
+    <# Makes the graphics-driver questions above available. Returns $false, quietly, where it can't. #>
+    if ('QuietpaneGpuSensors' -as [type]) { return $true }
+    try { Add-Type -TypeDefinition $script:GpuSensorSource -Language CSharp -ErrorAction Stop; return $true }
+    catch { return $false }   # e.g. a locked-down PC that doesn't allow it: usage still works, heat just isn't shown
+}
+
+function New-QpLiveMonitor {
+    <# Sets the readers up once, so every reading after that is cheap. Never throws. #>
+    $m = [pscustomobject]@{
+        Cpu = $null; CpuName = ''; Zone = $null; ZoneName = ''; Limits = @()
+        Available = $null; MemTotal = [double]0
+        Engines = $null; EnginePrev = $null; GpuMemory = $null; GpuSensors = $false
+        ZoneSeen = New-Object System.Collections.Generic.List[double]
+    }
+    # Task Manager's own processor figure first, the older one if this Windows doesn't have it.
+    try { $m.Cpu = New-Object Diagnostics.PerformanceCounter('Processor Information', '% Processor Utility', '_Total', $true); [void]$m.Cpu.NextValue() }
+    catch {
+        try { $m.Cpu = New-Object Diagnostics.PerformanceCounter('Processor', '% Processor Time', '_Total', $true); [void]$m.Cpu.NextValue() } catch { $m.Cpu = $null }
+    }
+    try { $m.CpuName = ([string](Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' -ErrorAction Stop).ProcessorNameString).Trim() } catch { }
+    # Windows' thermal zones: prefer one named after the processor, otherwise the warmest one.
+    try {
+        $zones = @((New-Object Diagnostics.PerformanceCounterCategory('Thermal Zone Information')).GetInstanceNames())
+        $best = $null; $bestValue = -1
+        foreach ($z in $zones) {
+            # Every zone's cooling brake is watched, whichever one gives the temperature.
+            try { $m.Limits += New-Object Diagnostics.PerformanceCounter('Thermal Zone Information', '% Passive Limit', $z, $true) } catch { }
+        }
+        foreach ($z in $zones) {
+            $pc = New-Object Diagnostics.PerformanceCounter('Thermal Zone Information', 'High Precision Temperature', $z, $true)
+            $v = [double]$pc.NextValue()
+            if ($z -match '(?i)cpu|pkg|core') { $best = $pc; $m.ZoneName = $z; break }
+            if ($v -gt $bestValue) { $best = $pc; $bestValue = $v; $m.ZoneName = $z }
+        }
+        $m.Zone = $best
+    } catch { $m.Zone = $null }
+    try { $m.Available = New-Object Diagnostics.PerformanceCounter('Memory', 'Available Bytes', '', $true) } catch { }
+    try { Add-Type -AssemblyName Microsoft.VisualBasic; $m.MemTotal = [double](New-Object Microsoft.VisualBasic.Devices.ComputerInfo).TotalPhysicalMemory } catch { }
+    try { $m.Engines = New-Object Diagnostics.PerformanceCounterCategory('GPU Engine'); $m.EnginePrev = $m.Engines.ReadCategory() } catch { $m.Engines = $null }
+    try { $m.GpuMemory = New-Object Diagnostics.PerformanceCounterCategory('GPU Adapter Memory') } catch { }
+    $m.GpuSensors = Initialize-QpGpuSensors
+    return $m
+}
+
+function Get-QpLiveReading {
+    <#
+        One reading of load and heat. Read-only, a few milliseconds, and it never throws: anything this
+        PC doesn't share comes back empty rather than guessed.
+    #>
+    param([Parameter(Mandatory)]$Monitor)
+    $m = $Monitor
+
+    $cpu = $null
+    if ($m.Cpu) { try { $cpu = [math]::Round([math]::Min([double]100, [math]::Max([double]0, [double]$m.Cpu.NextValue())), 1) } catch { } }
+
+    # The thermal zone reports tenths of a kelvin. Anything outside a believable range is ignored.
+    $cpuTemp = $null
+    if ($m.Zone) {
+        try {
+            $c = [math]::Round([double]$m.Zone.NextValue() / 10 - 273.15, 1)
+            if ($c -gt 5 -and $c -lt 130) {
+                $cpuTemp = $c
+                $m.ZoneSeen.Add($c)
+                if ($m.ZoneSeen.Count -gt 60) { $m.ZoneSeen.RemoveAt(0) }
+            }
+        } catch { }
+    }
+    # Some PCs report a thermal zone that never moves. Say so rather than showing a stale number as live.
+    $stuck = $false
+    if ($m.ZoneSeen.Count -ge 20) {
+        $s = $m.ZoneSeen | Measure-Object -Minimum -Maximum
+        $stuck = ($s.Maximum - $s.Minimum) -lt 0.2
+    }
+
+    # Windows' own cooling brake. 100 means full speed; lower means Windows is holding the processor
+    # back to shed heat. 0 or nonsense is treated as "not reported", never as fully throttled.
+    # Throttling done inside the chip itself is invisible to Windows, so this can't catch every case.
+    $limit = $null
+    foreach ($lc in @($m.Limits)) {
+        try {
+            $v = [double]$lc.NextValue()
+            if ($v -gt 0 -and $v -le 100 -and ($null -eq $limit -or $v -lt $limit)) { $limit = $v }
+        } catch { }
+    }
+
+    # [double] on both sides: Max(0, big) picks the Int32 overload and overflows on gigabytes.
+    $memUsed = $null
+    if ($m.Available -and $m.MemTotal -gt 0) { try { $memUsed = [math]::Max([double]0, [double]$m.MemTotal - [double]$m.Available.NextValue()) } catch { } }
+
+    # How busy each graphics adapter is: the busiest engine wins, as in Task Manager.
+    $busy = @{}
+    if ($m.Engines) {
+        try {
+            $now = $m.Engines.ReadCategory()
+            $pn = $now['Utilization Percentage']
+            $pp = if ($m.EnginePrev) { $m.EnginePrev['Utilization Percentage'] } else { $null }
+            $perEngine = @{}
+            if ($pn -and $pp) {
+                foreach ($name in $pn.Keys) {
+                    if (-not $pp.Contains($name)) { continue }
+                    if ("$name" -notmatch '(?i)luid_(0x[0-9a-f]+_0x[0-9a-f]+)_phys_\d+_eng_(\d+)') { continue }
+                    $key = $matches[1].ToLower() + '|' + $matches[2]
+                    $perEngine[$key] = [double]$perEngine[$key] + [Diagnostics.CounterSample]::Calculate($pp[$name].Sample, $pn[$name].Sample)
+                }
+            }
+            $m.EnginePrev = $now
+            foreach ($key in $perEngine.Keys) {
+                $luid = $key.Split('|')[0]
+                if ($perEngine[$key] -gt [double]$busy[$luid]) { $busy[$luid] = $perEngine[$key] }
+            }
+        } catch { }
+    }
+
+    # Graphics memory in use, per adapter.
+    $dedicated = @{}; $shared = @{}
+    if ($m.GpuMemory) {
+        try {
+            $all = $m.GpuMemory.ReadCategory()
+            foreach ($pair in @(@('Dedicated Usage', $dedicated), @('Shared Usage', $shared))) {
+                $col = $all[$pair[0]]
+                if (-not $col) { continue }
+                foreach ($name in $col.Keys) {
+                    if ("$name" -match '(?i)luid_(0x[0-9a-f]+_0x[0-9a-f]+)') { $k = $matches[1].ToLower(); $pair[1][$k] = [double]$pair[1][$k] + [double]$col[$name].RawValue }
+                }
+            }
+        } catch { }
+    }
+
+    $adapters = @()
+    if ($m.GpuSensors) { try { $adapters = @(('QuietpaneGpuSensors' -as [type])::Read()) } catch { } }
+    $gpus = @(foreach ($a in $adapters) {
+        $k = ([string]$a.Luid).ToLower()
+        [pscustomobject]@{
+            Name = [string]$a.Name; Luid = $k
+            Usage = [math]::Round([math]::Min([double]100, [double]$busy[$k]), 1)
+            TempC = $(if ($a.TemperatureC -gt 0) { [math]::Round([double]$a.TemperatureC, 1) } else { $null })
+            TempMaxC = $(if ($a.TemperatureMaxC -gt 0) { [double]$a.TemperatureMaxC } else { $null })
+            DedicatedTotal = [double]$a.DedicatedBytes; DedicatedUsed = [double]$dedicated[$k]
+            SharedTotal = [double]$a.SharedBytes; SharedUsed = [double]$shared[$k]
+            Discrete = ([double]$a.DedicatedBytes -ge 512MB)
+        }
+    })
+    if (-not $gpus.Count -and $busy.Count) {
+        # The driver questions aren't available here: still show how busy graphics is, just without names.
+        $gpus = @(foreach ($k in $busy.Keys) {
+            [pscustomobject]@{ Name = 'Graphics'; Luid = $k; Usage = [math]::Round([math]::Min([double]100, [double]$busy[$k]), 1); TempC = $null; TempMaxC = $null
+                DedicatedTotal = 0; DedicatedUsed = [double]$dedicated[$k]; SharedTotal = 0; SharedUsed = [double]$shared[$k]; Discrete = ([double]$dedicated[$k] -gt 0) }
+        })
+    }
+    [pscustomobject]@{
+        At = Get-Date
+        CpuName = $m.CpuName; CpuUsage = $cpu
+        CpuTempC = $cpuTemp; CpuTempSource = $m.ZoneName; CpuTempStuck = $stuck
+        CpuLimitPct = $limit; CpuThrottled = ($null -ne $limit -and $limit -lt 100)
+        MemTotal = $m.MemTotal; MemUsed = $memUsed
+        # The card with its own memory first: on a gaming laptop that's the one that matters.
+        Gpus = @($gpus | Sort-Object @{ Expression = { $_.Discrete }; Descending = $true }, @{ Expression = { $_.DedicatedTotal }; Descending = $true })
+    }
+}
+
+function Get-QpHeatWord {
+    <#
+        A temperature in plain words, so heat is never shown by colour alone. Laptops run hot under
+        load, so the words are calm: only "very hot" is meant to catch the eye.
+    #>
+    param($Celsius, $MaxC = $null)
+    if ($null -eq $Celsius) { return [pscustomobject]@{ Word = 'not shared'; Level = 'none' } }
+    $c = [double]$Celsius
+    $veryHot = 95
+    if ($null -ne $MaxC -and [double]$MaxC -gt 60) { $veryHot = [math]::Min(95, [double]$MaxC - 10) }
+    $word, $level = if ($c -ge $veryHot) { 'very hot', 'high' }
+        elseif ($c -ge 85) { 'hot', 'warn' }
+        elseif ($c -ge 70) { 'warm', 'ok' }
+        elseif ($c -ge 50) { 'comfortable', 'ok' }
+        else { 'cool', 'ok' }
+    [pscustomobject]@{ Word = $word; Level = $level }
+}
+
+#endregion
 
 #region ---------------------------------------------------------------- restore points
 
@@ -2024,7 +2306,7 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
 
 Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes,
     Set-QpProgressSink, Write-QpProgress, Set-QpCancelCheck, Test-QpCancelled, New-QpScanSummary,
-    Get-QpSystemUsage, Get-QpTotals,
+    Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord,
     Get-QpRestorePoints, Invoke-QpUndo,
     Get-QpPrivacyStatus, Invoke-QpPrivacy,
     Get-QpBloatApps, Invoke-QpRemoveApps,

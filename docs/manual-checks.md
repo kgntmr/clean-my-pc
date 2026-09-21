@@ -51,6 +51,15 @@ on the results panel when it happens; that message should appear rather than a c
 
 These need eyes, not assertions:
 
+- **Right now panel.** On Home, the four tiles change every couple of seconds. Compare the graphics
+  temperature and video memory with Task Manager > Performance > GPU: they come from the same place
+  and should match. Hover a temperature to see where it comes from.
+- **Right now pauses.** Switch to another tab, or minimise the window, and Quietpane's own CPU use in
+  Task Manager should drop to nothing: it stops reading until Home is back on screen.
+- **Slowing down to cool off.** Under a long, heavy game on a laptop, the processor tile may say it
+  is slowing down to cool off. If it appears while the PC is idle and cool, that is a bug.
+- **Not shared.** On a PC with no dedicated graphics card or no thermal zone, the tiles say "not
+  shared" or "temperature not shared" - never 0 degrees.
 - **Stop.** Start "Check this PC", press **Stop** after a few seconds. The progress line changes to
   "Stopping as soon as it is safe to...", then the summary says the check was stopped and that
   nothing was changed. No report is written to the Desktop.

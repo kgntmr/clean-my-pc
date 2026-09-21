@@ -389,11 +389,65 @@ function New-Meter([string]$Title, [string]$FillColour) {
     $b.Child = $sp
     return [pscustomobject]@{ Border = $b; Value = $value; Fill = $fill; Caption = $caption; Delta = $delta; TrackWidth = 272 }
 }
+# Live tiles: how hard the PC is working right now, and how warm it is. Same shape as a meter, so the
+# same fill and gain helpers work on them.
+function New-LiveTile([string]$Title, [string]$FillColour) {
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $sp.Width = 150
+    $sp.Margin = Get-Thick '0,0,18,4'
+    [void]$sp.Children.Add((New-Text $Title 11 'SemiBold' '#4B5B5C' '0,0,0,2'))
+    $value = New-Text '...' 21 'SemiBold' '#0F1B1C' '0,0,0,6' 'Fraunces, Georgia'
+    [void]$sp.Children.Add($value)
+    $track = New-Object System.Windows.Controls.Border
+    $track.Height = 10
+    $track.Width = 140
+    $track.HorizontalAlignment = 'Left'
+    $track.Background = Get-Brush '#EDE6D5'
+    $track.CornerRadius = New-Object System.Windows.CornerRadius(5)
+    $fill = New-Object System.Windows.Controls.Border
+    $fill.Height = 10
+    $fill.Width = 0
+    $fill.HorizontalAlignment = 'Left'
+    $fill.Background = Get-Brush $FillColour
+    $fill.CornerRadius = New-Object System.Windows.CornerRadius(5)
+    $track.Child = $fill
+    [void]$sp.Children.Add($track)
+    $heat = New-Text '' 12.5 'SemiBold' '#117A68' '0,7,0,0'
+    $caption = New-Text '' 12 'Normal' '#4B5B5C' '0,2,0,0'
+    $extra = New-Text '' 11.5 'Normal' '#8A9696' '0,2,0,0'
+    $extra.Visibility = 'Collapsed'
+    $delta = New-Text '' 12.5 'SemiBold' '#117A68' '0,4,0,0'
+    $delta.Visibility = 'Collapsed'
+    foreach ($x in $heat, $caption, $extra, $delta) { [void]$sp.Children.Add($x) }
+    return [pscustomobject]@{ Border = $sp; Value = $value; Fill = $fill; Heat = $heat; Caption = $caption; Extra = $extra; Delta = $delta; TrackWidth = 140 }
+}
+
 $meters = New-Object System.Windows.Controls.WrapPanel
 $script:MeterSpace = New-Meter 'SPACE ON THIS PC' '#117A68'
-$script:MeterMemory = New-Meter 'MEMORY IN USE' '#FFB627'
 [void]$meters.Children.Add($script:MeterSpace.Border)
-[void]$meters.Children.Add($script:MeterMemory.Border)
+
+$script:LivePanel = New-Object System.Windows.Controls.Border
+$script:LivePanel.MinHeight = 148
+$script:LivePanel.Padding = Get-Thick '14,12,0,10'
+$script:LivePanel.Margin = Get-Thick '0,0,12,12'
+$script:LivePanel.Background = Get-Brush '#FFFDF8'
+$script:LivePanel.BorderBrush = Get-Brush '#E6DFCC'
+$script:LivePanel.BorderThickness = Get-Thick '1'
+$liveStack = New-Object System.Windows.Controls.StackPanel
+[void]$liveStack.Children.Add((New-Text 'RIGHT NOW' 11.5 'SemiBold' '#4B5B5C' '0,0,0,6'))
+$liveTiles = New-Object System.Windows.Controls.WrapPanel
+$script:TileCpu    = New-LiveTile 'PROCESSOR' '#117A68'
+$script:TileGpu    = New-LiveTile 'GRAPHICS' '#117A68'
+$script:TileMemory = New-LiveTile 'MEMORY' '#FFB627'
+$script:TileVram   = New-LiveTile 'VIDEO MEMORY' '#FFB627'
+foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileVram) { [void]$liveTiles.Children.Add($t.Border) }
+[void]$liveStack.Children.Add($liveTiles)
+$script:LiveNote = New-Text 'Updates every 2 seconds while this screen is open. Nothing is recorded.' 11.5 'Normal' '#8A9696' '0,4,0,0'
+[void]$liveStack.Children.Add($script:LiveNote)
+$script:LivePanel.Child = $liveStack
+[void]$meters.Children.Add($script:LivePanel)
+# The memory tile carries the "freed just now" note that the old memory bar used to.
+$script:MeterMemory = $script:TileMemory
 [void]$homePanel.Children.Add($meters)
 $script:TotalsText = New-Text '' 13 'Normal' '#117A68' '2,0,0,10'
 $script:TotalsText.Visibility = 'Collapsed'
@@ -730,6 +784,48 @@ function Start-Work {
     Set-Busy $true $StatusText
 }
 
+# ------------------------------------------------------------------ live readings
+# A small reader of its own, separate from Start-Work, so the Home tiles never block a button. It only
+# reads while Home is on screen and the window isn't minimised; the rest of the time it sleeps. That
+# also matters on gaming laptops: asking the graphics card how it is doing shouldn't keep it awake.
+$script:Live = [hashtable]::Synchronized(@{ Reading = $null; Seq = 0; Active = $false; Stop = $false })
+$script:LiveSeqShown = 0
+$script:LiveJob = $null
+
+function Start-LiveSampler {
+    if ($script:LiveJob) { return }
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.Open()
+    $rs.SessionStateProxy.SetVariable('Live', $script:Live)
+    $rs.SessionStateProxy.SetVariable('ModulePath', $modulePath)
+    $ps = [powershell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript({
+        Import-Module $ModulePath -Force
+        $monitor = New-QpLiveMonitor
+        Start-Sleep -Milliseconds 1000          # load is measured between two moments, so give it a first gap
+        while (-not $Live.Stop) {
+            if ($Live.Active) {
+                $Live.Reading = Get-QpLiveReading -Monitor $monitor
+                $Live.Seq = $Live.Seq + 1
+                for ($i = 0; $i -lt 10 -and -not $Live.Stop; $i++) { Start-Sleep -Milliseconds 200 }
+            } else {
+                Start-Sleep -Milliseconds 400
+            }
+        }
+    }.ToString())
+    $script:LiveJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+}
+
+function Stop-LiveSampler {
+    if (-not $script:LiveJob) { return }
+    $script:Live.Stop = $true
+    $job = $script:LiveJob
+    $script:LiveJob = $null
+    try { [void]$job.Handle.AsyncWaitHandle.WaitOne(1500) } catch { }
+    try { $job.PS.Dispose(); $job.RS.Dispose() } catch { }
+}
+
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(150)
 $timer.Add_Tick({
@@ -738,6 +834,11 @@ $timer.Add_Tick({
     while ($script:Sync.Queue.TryDequeue([ref]$line)) { $ui.LogBox.AppendText($line + [Environment]::NewLine); $got = $true }
     if ($got) { $ui.LogBox.ScrollToEnd() }
     if ($script:Job -and $script:ScanRunning) { Update-ScanProgress }
+    $script:Live.Active = ($ui.Tabs.SelectedIndex -eq 0) -and ($window.WindowState -ne 'Minimized')
+    if ($script:Live.Seq -ne $script:LiveSeqShown) {
+        $script:LiveSeqShown = $script:Live.Seq
+        try { Update-LiveTiles $script:Live.Reading } catch { }   # a reading must never be able to break the window
+    }
     if ($script:Job -and $script:Job.Handle.IsCompleted) {
         $job = $script:Job
         $script:Job = $null
@@ -910,11 +1011,7 @@ function Update-Meters {
         $script:MeterSpace.Caption.Text = 'of {0} on drive {1} - {2}% full' -f (Format-QpBytes $u.DiskTotal), $u.Drive, [int](100 * $u.DiskUsed / $u.DiskTotal)
         Set-MeterFill $script:MeterSpace ($u.DiskUsed / $u.DiskTotal)
     }
-    if ($u.MemTotal -gt 0) {
-        $script:MeterMemory.Value.Text = '{0} in use' -f (Format-QpBytes $u.MemUsed)
-        $script:MeterMemory.Caption.Text = 'of {0} of memory - {1}% in use right now' -f (Format-QpBytes $u.MemTotal), [int](100 * $u.MemUsed / $u.MemTotal)
-        Set-MeterFill $script:MeterMemory ($u.MemUsed / $u.MemTotal)
-    }
+    if ($u.MemTotal -gt 0) { Set-MemoryTile $u.MemUsed $u.MemTotal }
     $t = Get-QpTotals
     if ($t.SpaceFreedBytes -gt 0 -or $t.MemoryFreedBytes -gt 0) {
         $parts = @()
@@ -924,6 +1021,106 @@ function Update-Meters {
         $script:TotalsText.Visibility = 'Visible'
     } else {
         $script:TotalsText.Visibility = 'Collapsed'
+    }
+}
+
+function Get-ShortName([string]$Name) {
+    # "13th Gen Intel(R) Core(TM) i7-13620H" -> "Intel Core i7-13620H"; "NVIDIA GeForce RTX 4060 Laptop GPU" -> "RTX 4060 Laptop GPU"
+    $n = $Name -replace '\((R|TM)\)', '' -replace '^\s*\d+(st|nd|rd|th) Gen\s+', '' -replace '\s+CPU\s+@.*$', '' -replace '\s+with Radeon Graphics$', ''
+    $n = $n -replace '^NVIDIA GeForce\s+', '' -replace '\s{2,}', ' '
+    return $n.Trim()
+}
+
+function Set-MemoryTile([double]$Used, [double]$Total) {
+    if ($Total -le 0) { return }
+    $script:TileMemory.Value.Text = '{0:N0}%' -f (100 * $Used / $Total)
+    # Memory has no temperature, so its first line says what the number is, lining up with the others.
+    $script:TileMemory.Heat.Text = 'in use right now'
+    $script:TileMemory.Heat.Foreground = Get-Brush '#4B5B5C'; $script:TileMemory.Heat.FontWeight = 'Normal'
+    $script:TileMemory.Caption.Text = '{0} of {1}' -f (Format-QpBytes $Used), (Format-QpBytes $Total)
+    Set-MeterFill $script:TileMemory ($Used / $Total)
+}
+
+$script:HeatColours = @{ ok = '#117A68'; warn = '#9A6700'; high = '#A83232'; none = '#8A9696' }
+function Set-HeatText($Block, $Celsius, $MaxC, [bool]$Stuck, [string]$Tip) {
+    # Number and word together, so heat never depends on colour alone.
+    $deg = [char]0x00B0
+    $dot = [char]0x00B7
+    $h = Get-QpHeatWord -Celsius $Celsius -MaxC $MaxC
+    if ($null -eq $Celsius) {
+        $Block.Text = 'temperature not shared'
+        $Block.Foreground = Get-Brush $script:HeatColours.none
+    } elseif ($Stuck) {
+        $Block.Text = '{0:N0}{1}C {2} sensor not updating' -f $Celsius, $deg, $dot
+        $Block.Foreground = Get-Brush $script:HeatColours.none
+        $Tip = 'This number has not changed at all for a while, so this PC''s sensor probably isn''t live. Treat it as unknown.'
+    } else {
+        $Block.Text = '{0:N0}{1}C {2} {3}' -f $Celsius, $deg, $dot, $h.Word
+        $Block.Foreground = Get-Brush $script:HeatColours[$h.Level]
+    }
+    $Block.ToolTip = $Tip
+}
+
+function Update-LiveTiles($r) {
+    <# Paints one reading onto the four tiles. Anything the PC doesn't share says so plainly. #>
+    if (-not $r) { return }
+    $deg = [char]0x00B0
+
+    $t = $script:TileCpu
+    if ($null -ne $r.CpuUsage) { $t.Value.Text = '{0:N0}%' -f $r.CpuUsage; Set-MeterFill $t ($r.CpuUsage / 100) } else { $t.Value.Text = '-' }
+    $t.Caption.Text = Get-ShortName $r.CpuName
+    $zone = if ($r.CpuTempSource) { " ($($r.CpuTempSource))" } else { '' }
+    Set-HeatText $t.Heat $r.CpuTempC $null ([bool]$r.CpuTempStuck) ("From Windows' own thermal sensor$zone. On some PCs that is the processor itself, on others a sensor close to it, so treat it as a guide. Laptops often run hot when busy - it's only a worry if it stays very hot while the PC is doing nothing.")
+    # Windows holding the processor back to cool it: the moment a game suddenly stutters for no reason.
+    if ($r.CpuThrottled) {
+        $t.Extra.Text = 'slowing down to cool off - running at {0:N0}%' -f $r.CpuLimitPct
+        $t.Extra.Foreground = Get-Brush $script:HeatColours.warn
+        $t.Extra.FontWeight = 'SemiBold'
+        $t.Extra.ToolTip = 'Windows is holding the processor back to shed heat, so things can feel slower until it cools. Common on laptops during games. Clear vents and a hard, flat surface help. Slowing down done inside the chip itself is not visible to Windows, so this cannot catch every case.'
+        $t.Extra.Visibility = 'Visible'
+    } else {
+        $t.Extra.Visibility = 'Collapsed'
+    }
+
+    $gpus = @($r.Gpus)
+    $g = $gpus | Select-Object -First 1
+    $t = $script:TileGpu
+    if ($g) {
+        $t.Value.Text = '{0:N0}%' -f $g.Usage
+        Set-MeterFill $t ($g.Usage / 100)
+        $t.Caption.Text = Get-ShortName $g.Name
+        $tip = if ($g.TempMaxC) { "From the graphics driver - the same reading Task Manager shows. The driver says this card is built for up to {0:N0}{1}C." -f $g.TempMaxC, $deg } else { 'From the graphics driver - the same reading Task Manager shows.' }
+        if ($null -eq $g.TempC -and -not $g.Discrete) { $tip = 'Built-in graphics share the processor''s cooling, so the driver doesn''t report its own temperature.' }
+        elseif ($null -eq $g.TempC) { $tip = 'The driver isn''t sharing a temperature right now. On laptops the graphics card often sleeps when it isn''t needed.' }
+        Set-HeatText $t.Heat $g.TempC $g.TempMaxC $false $tip
+        # Gaming laptops have two: say how busy the other one is, quietly.
+        $other = $gpus | Select-Object -Skip 1 -First 1
+        if ($other) { $t.Extra.Text = 'also {0}: {1:N0}%' -f (Get-ShortName $other.Name), $other.Usage; $t.Extra.Visibility = 'Visible' } else { $t.Extra.Visibility = 'Collapsed' }
+    } else {
+        $t.Value.Text = '-'
+        $t.Caption.Text = 'not shared by this PC'
+        $t.Heat.Text = ''
+    }
+
+    if ($null -ne $r.MemUsed) { Set-MemoryTile $r.MemUsed $r.MemTotal }
+
+    $t = $script:TileVram
+    if ($g -and $g.Discrete -and $g.DedicatedTotal -gt 0) {
+        $t.Value.Text = '{0:N0}%' -f (100 * $g.DedicatedUsed / $g.DedicatedTotal)
+        $t.Caption.Text = '{0} of {1}' -f (Format-QpBytes $g.DedicatedUsed), (Format-QpBytes $g.DedicatedTotal)
+        $t.Heat.Text = 'on the graphics card'
+        $t.Heat.Foreground = Get-Brush '#4B5B5C'; $t.Heat.FontWeight = 'Normal'
+        Set-MeterFill $t ($g.DedicatedUsed / $g.DedicatedTotal)
+    } elseif ($g -and $g.SharedTotal -gt 0) {
+        $t.Value.Text = '{0:N0}%' -f (100 * $g.SharedUsed / $g.SharedTotal)
+        $t.Caption.Text = '{0} of {1}' -f (Format-QpBytes $g.SharedUsed), (Format-QpBytes $g.SharedTotal)
+        $t.Heat.Text = 'borrowed from memory'
+        $t.Heat.Foreground = Get-Brush '#4B5B5C'; $t.Heat.FontWeight = 'Normal'
+        Set-MeterFill $t ($g.SharedUsed / $g.SharedTotal)
+    } else {
+        $t.Value.Text = '-'
+        $t.Caption.Text = 'not shared by this PC'
+        $t.Heat.Text = ''
     }
 }
 
@@ -1521,6 +1718,7 @@ $window.Add_Closing({
         if ([System.Windows.MessageBox]::Show('Something is still running. Close anyway?', 'Quietpane', 'YesNo', 'Warning') -ne 'Yes') { $e.Cancel = $true; return }
     }
     $timer.Stop()
+    Stop-LiveSampler
 })
 
 $ui.Tabs.SelectedIndex = 0
@@ -1533,6 +1731,12 @@ if ($SelfTest) {
         $ui.Status.Text = 'Ready when you are.'
         $ui.Tabs.SelectedIndex = $SnapshotTab
         if ($SnapshotTab -eq ($ui.Tabs.Items.Count - 1)) { $script:PrivacyExpander.IsExpanded = $true }
+        if ($SnapshotTab -eq 0) {
+            # A real reading for the picture: load is measured between two moments, a second apart.
+            $monitor = New-QpLiveMonitor
+            Start-Sleep -Milliseconds 1000
+            Update-LiveTiles (Get-QpLiveReading -Monitor $monitor)
+        }
         Update-Buttons
         $root = $window.Content
         $size = [System.Windows.Size]::new([double]$window.Width, [double]$window.Height - 40)
@@ -1573,6 +1777,8 @@ $window.Add_ContentRendered({
     if (-not (Show-Welcome)) { $window.Close(); return }
     $ui.LogBox.AppendText(('Quietpane {0} - Developed by KomodoWorks.com. Started {1}. Administrator: {2}. This app makes no network connections.' -f $info.Version, (Get-Date -Format 'yyyy-MM-dd HH:mm'), (Test-IsAdmin)) + [Environment]::NewLine)
     Update-State
+    Start-LiveSampler
 })
 $timer.Start()
 [void]$window.ShowDialog()
+Stop-LiveSampler   # in case the window went away without Closing firing

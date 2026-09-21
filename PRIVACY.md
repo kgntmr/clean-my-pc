@@ -1,6 +1,6 @@
 # Privacy Policy: Quietpane
 
-**Last updated: 19 September 2026**
+**Last updated: 21 September 2026**
 
 Quietpane is free, open-source software developed by **KomodoWorks**, an independent technology studio in Dublin, Ireland ([komodoworks.com](https://www.komodoworks.com)).
 Contact: **info@komodoworks.com**
@@ -26,7 +26,7 @@ The app runs only on your PC, only when you start it, and only does what you cli
 | **Telemetry tab** | Your PC's maker and graphics chip, the list of installed programs, services and scheduled tasks, to recognise brand software | Shown on screen only |
 | **Privacy, Telemetry, Apps** (only when you click Apply) | The settings, services, tasks, apps and hosts-file entries you ticked | Restore points and logs in `%ProgramData%\Quietpane\restore\` on your PC. These hold the previous values, so Undo can put them back. |
 | **Clean up space** (only when you click Apply) | The folders you ticked | Files are moved to **your Recycle Bin** |
-| **Home screen bars** | Free space on your system drive, and how much memory is in use, read from Windows | Shown on screen. Totals of what the app has freed are kept in `%ProgramData%\Quietpane\totals.json` (two numbers, a count of runs and the date of the last one). Nothing else is recorded, and none of it leaves your PC. |
+| **Home screen** | Free space on your system drive. How busy the processor, graphics card and memory are, and how much video memory is in use, from Windows performance counters. Temperatures from Windows' thermal sensor and from your graphics driver, asked through a short C# block that's compiled on your PC from the readable source in `src/Quietpane.psm1`. | Shown on screen, refreshed every 2 seconds while Home is open and paused otherwise. **Live readings are never saved.** Totals of what the app has freed are kept in `%ProgramData%\Quietpane\totals.json` (two numbers, a count of runs and the date of the last one). Nothing else is recorded, and none of it leaves your PC. |
 
 **What the scan does not read:** your browsing history, passwords, cookies, emails, messages, documents or the contents of web pages.
 
