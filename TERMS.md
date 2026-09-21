@@ -9,7 +9,7 @@ Quietpane is developed by **KomodoWorks**, an independent technology studio in D
 It is **free**. There's no purchase, no subscription, no account and no in-app offer.
 
 ## 2. What it does
-Quietpane can look at your computer without changing it (the Safety scan and the Health tab). When you choose to, it can also change Windows and application settings, switch off services, scheduled tasks and startup items, add entries to the Windows hosts file, remove pre-installed apps, run a program's own uninstaller, move files to the Recycle Bin, and deal with threats: ask Microsoft Defender to remove them, quarantine them, or delete them.
+Quietpane can look at your computer without changing it (the Safety scan, the Health tab, "Where your space went", "What's talking to the internet" and the record of which apps used your camera, microphone and location). When you choose to, it can also change Windows and application settings, switch off services, scheduled tasks and startup items, stop an app using the camera, microphone or location, add entries to the Windows hosts file, remove pre-installed apps, run a program's own uninstaller, move files and folders you pick to the Recycle Bin, add or remove its own Start menu and desktop shortcuts, and deal with threats: ask Microsoft Defender to remove them, quarantine them, or delete them.
 
 **It only makes changes you have chosen and confirmed.** Before applying settings you can use "Preview" to see exactly what would change.
 
@@ -28,6 +28,8 @@ Most changes are recorded in a restore point that you can undo, and clean-up onl
 Quietpane is provided free of charge, **"as is"**, without warranty of any kind, to the extent permitted by applicable law. Every PC is different, and Windows and third-party updates can change how settings behave. We can't guarantee the app will suit your particular system.
 
 The Safety scan relies on Microsoft Defender and on Quietpane's own checks. **It cannot guarantee that a PC is free of malware**, and a finding from Quietpane's own checks is a signal, not proof. Readings on the Health tab come from Windows and your drivers, and may be approximate.
+
+"Where your space went" measures what Windows lets it see: what it cannot read, and Windows' own folder, are reported together as "Windows and system files" rather than guessed at. "What's talking to the internet" is a snapshot of the connections Windows lists at that moment; connections made over QUIC are not listed by Windows, and a note about an address being usage data or ads is judged from its name alone, not from what is actually sent.
 
 ## 5. Liability
 To the fullest extent permitted by law, KomodoWorks is not liable for indirect or consequential loss, loss of data, or loss caused by third-party software or updates, arising from the use of this free software.

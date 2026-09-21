@@ -13,7 +13,7 @@
             '-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
 
     (all on one line). An elevated window says "Administrator:" in its title bar and starts in
-    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated: 112 checks run.
+    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated: 140 checks run.
 
     No real malware is ever used. The only live test writes the EICAR string - the harmless standard file
     the antivirus industry publishes so people can check their protection works - into a temporary folder,
@@ -478,6 +478,124 @@ Test-Case 'Undo puts back exactly the bytes that were there before' {
 Test-Case 'reading the real sign-in list never throws' { $null -ne @(Get-QpStartupItems) }
 Remove-Item -Path $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 
+Section 'Who used your camera, microphone and location'
+# A throwaway copy of Windows' record, so the tests never touch the real permissions.
+$devRoot = 'HKCU:\Software\QuietpaneTest\Consent'
+$devMachine = 'HKCU:\Software\QuietpaneTest\MachineConsent'
+function Set-TestUse([string]$Key, $Start, $Stop) {
+    Set-ItemProperty -LiteralPath $Key -Name LastUsedTimeStart -Value ([int64]$Start.ToFileTime()) -Type QWord
+    Set-ItemProperty -LiteralPath $Key -Name LastUsedTimeStop -Value ([int64]$(if ($Stop) { $Stop.ToFileTime() } else { 0 })) -Type QWord
+}
+function Reset-DeviceTestArea {
+    Remove-Item -Path 'HKCU:\Software\QuietpaneTest' -Recurse -Force -ErrorAction SilentlyContinue
+    $now = Get-Date
+    foreach ($k in 'webcam', 'microphone', 'location') {
+        New-Item -Path "$devRoot\$k\NonPackaged" -Force | Out-Null
+        New-Item -Path "$devMachine\$k" -Force | Out-Null
+        Set-ItemProperty -Path "$devRoot\$k" -Name Value -Value 'Allow' -Type String
+        Set-ItemProperty -Path "$devRoot\$k\NonPackaged" -Name Value -Value 'Allow' -Type String
+        Set-ItemProperty -Path "$devMachine\$k" -Name Value -Value $(if ($k -eq 'location') { 'Deny' } else { 'Allow' }) -Type String
+    }
+    $cam = "$devRoot\webcam"
+    foreach ($a in @{ N = 'Test.VideoCaller_1234567890abc'; V = 'Allow' }, @{ N = 'Test.NeverUsed_1234567890abc'; V = 'Allow' },
+                   @{ N = 'Test.AlreadyOff_1234567890abc'; V = 'Deny' }, @{ N = 'Test.AsksFirst_1234567890abc'; V = 'Prompt' },
+                   @{ N = 'Test.SystemApp_1234567890abc'; V = $null }) {
+        New-Item -Path "$cam\$($a.N)" -Force | Out-Null
+        if ($a.V) { Set-ItemProperty -Path "$cam\$($a.N)" -Name Value -Value $a.V -Type String }
+    }
+    Set-TestUse "$cam\Test.VideoCaller_1234567890abc" $now.AddHours(-2) $now.AddHours(-2).AddMinutes(5)
+    Set-TestUse "$cam\Test.SystemApp_1234567890abc" $now.AddDays(-1) $now.AddDays(-1).AddMinutes(1)
+    # A program using the camera right now, and one program that Windows noted in two places.
+    foreach ($p in 'C:#QpTest#caller.exe', 'C:#Program Files#QpTest Studio#old#studio.exe', 'C:#Program Files#QpTest Studio#new#studio.exe') { New-Item -Path "$cam\NonPackaged\$p" -Force | Out-Null }
+    Set-TestUse "$cam\NonPackaged\C:#QpTest#caller.exe" $now.AddMinutes(-1) $null
+    Set-TestUse "$cam\NonPackaged\C:#Program Files#QpTest Studio#old#studio.exe" $now.AddDays(-30) $now.AddDays(-30)
+    Set-TestUse "$cam\NonPackaged\C:#Program Files#QpTest Studio#new#studio.exe" $now.AddDays(-3) $now.AddDays(-3)
+}
+function Get-TestDeviceUse { Get-QpDeviceUse -UserRoot $devRoot -MachineRoot $devMachine -BootTime (Get-Date).AddDays(-1).AddHours(-1) }
+function Get-TestConsent([string]$Key) { (Get-ItemProperty -LiteralPath $Key -Name Value -ErrorAction SilentlyContinue).Value }
+function Get-NewestDeviceRestorePoint([datetime]$Since) {
+    Get-ChildItem (Join-Path $env:ProgramData 'Quietpane\restore') -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like '*-devices' -and $_.CreationTime -ge $Since } | Sort-Object CreationTime -Descending | Select-Object -First 1
+}
+
+Test-Case 'times are put in plain words' {
+    $now = [datetime]'2026-09-21 15:00'
+    (Format-QpWhen $null $now) -eq 'never' -and (Format-QpWhen $now.AddSeconds(-30) $now) -eq 'a moment ago' -and
+    (Format-QpWhen $now.AddMinutes(-20) $now) -eq '20 minutes ago' -and (Format-QpWhen $now.AddMinutes(-70) $now) -eq 'an hour ago' -and
+    (Format-QpWhen $now.AddHours(-5) $now) -eq '5 hours ago' -and (Format-QpWhen ([datetime]'2026-09-21 01:00') $now) -eq 'earlier today' -and
+    (Format-QpWhen $now.AddDays(-1) $now) -eq 'yesterday' -and (Format-QpWhen $now.AddDays(-4) $now) -eq '4 days ago' -and
+    (Format-QpWhen ([datetime]'2026-03-16 12:00') $now) -eq '16 March' -and (Format-QpWhen ([datetime]'2025-12-27 12:00') $now) -eq '27 December 2025'
+}
+Test-Case 'who used the camera is read, in use first, then newest' {
+    Reset-DeviceTestArea
+    $cam = @(Get-TestDeviceUse | Where-Object { $_.Kind -eq 'webcam' })[0]
+    $first = $cam.Apps[0]
+    $caller = @($cam.Apps | Where-Object { $_.Name -eq 'Video Caller' })[0]
+    $first.Type -eq 'Desktop' -and $first.InUse -and $first.Name -eq 'caller' -and
+    $caller.Type -eq 'App' -and -not $caller.InUse -and (Format-QpWhen $caller.LastUsed) -eq 'an hour ago' -and $caller.Allowed
+}
+Test-Case 'each app''s own setting is read: allowed, off, asks first, or managed by Windows' {
+    Reset-DeviceTestArea
+    $apps = @(Get-TestDeviceUse | Where-Object { $_.Kind -eq 'webcam' })[0].Apps
+    $by = @{}; foreach ($a in $apps) { $by[$a.Name] = $a }
+    $by['Never Used'].Allowed -and $null -eq $by['Never Used'].LastUsed -and
+    -not $by['Already Off'].Allowed -and $by['Asks First'].Asks -and $by['System App'].Locked -and -not $by['Video Caller'].Locked
+}
+Test-Case 'one line per program, however many copies of it Windows noted' {
+    Reset-DeviceTestArea
+    $studio = @(@(Get-TestDeviceUse | Where-Object { $_.Kind -eq 'webcam' })[0].Apps | Where-Object { $_.Name -eq 'QpTest Studio' })
+    $studio.Count -eq 1 -and (Format-QpWhen $studio[0].LastUsed) -eq '3 days ago' -and $studio[0].Missing
+}
+Test-Case 'a device switched off for the whole PC says so' {
+    Reset-DeviceTestArea
+    $u = @(Get-TestDeviceUse)
+    -not @($u | Where-Object { $_.Kind -eq 'location' })[0].PcOn -and @($u | Where-Object { $_.Kind -eq 'webcam' })[0].PcOn
+}
+Test-Case 'preview changes nothing' {
+    Reset-DeviceTestArea
+    $u = @(Get-TestDeviceUse)
+    Invoke-QpDeviceAccess -Ids 'webcam|App|Test.VideoCaller_1234567890abc', 'webcam|AllDesktop' -Use $u -Preview | Out-Null
+    (Get-TestConsent "$devRoot\webcam\Test.VideoCaller_1234567890abc") -eq 'Allow' -and (Get-TestConsent "$devRoot\webcam\NonPackaged") -eq 'Allow'
+}
+Test-Case 'Windows'' own apps and single desktop programs are refused, with no empty restore point' {
+    Reset-DeviceTestArea
+    $since = (Get-Date).AddSeconds(-1)
+    $u = @(Get-TestDeviceUse)
+    Invoke-QpDeviceAccess -Ids 'webcam|App|Test.SystemApp_1234567890abc', 'webcam|Desktop|C:\QpTest\caller.exe' -Use $u | Out-Null
+    $null -eq (Get-TestConsent "$devRoot\webcam\Test.SystemApp_1234567890abc") -and $null -eq (Get-NewestDeviceRestorePoint $since)
+}
+Test-Case 'switching an app off writes what Settings writes, and Undo puts it back' {
+    Reset-DeviceTestArea
+    $since = (Get-Date).AddSeconds(-2)
+    $u = @(Get-TestDeviceUse)
+    Invoke-QpDeviceAccess -Ids 'webcam|App|Test.VideoCaller_1234567890abc' -Use $u | Out-Null
+    $off = (Get-TestConsent "$devRoot\webcam\Test.VideoCaller_1234567890abc") -eq 'Deny'
+    $rp = Get-NewestDeviceRestorePoint $since
+    if (-not $rp) { return $false }
+    Invoke-QpUndo -Path $rp.FullName | Out-Null
+    $back = (Get-TestConsent "$devRoot\webcam\Test.VideoCaller_1234567890abc") -eq 'Allow'
+    Remove-Item -LiteralPath $rp.FullName -Recurse -Force   # the test's own restore point, not the user's
+    $off -and $back
+}
+Test-Case 'the one switch for all desktop programs, and Undo, work too' {
+    Reset-DeviceTestArea
+    $since = (Get-Date).AddSeconds(-2)
+    $u = @(Get-TestDeviceUse)
+    Invoke-QpDeviceAccess -Ids 'webcam|AllDesktop' -Use $u | Out-Null
+    $off = (Get-TestConsent "$devRoot\webcam\NonPackaged") -eq 'Deny'
+    $offRead = -not @(Get-TestDeviceUse | Where-Object { $_.Kind -eq 'webcam' })[0].DesktopOn
+    $rp = Get-NewestDeviceRestorePoint $since
+    if (-not $rp) { return $false }
+    Invoke-QpUndo -Path $rp.FullName | Out-Null
+    $back = (Get-TestConsent "$devRoot\webcam\NonPackaged") -eq 'Allow'
+    Remove-Item -LiteralPath $rp.FullName -Recurse -Force
+    $off -and $offRead -and $back
+}
+Test-Case 'reading the real record never throws, and covers all three' {
+    @(Get-QpDeviceUse | ForEach-Object { $_.Kind }) -join ',' -eq 'webcam,microphone,location'
+}
+Remove-Item -Path 'HKCU:\Software\QuietpaneTest' -Recurse -Force -ErrorAction SilentlyContinue
+
 Section 'Live readings on Home'
 Test-Case 'heat is always put into words, not left to colour' {
     (Get-QpHeatWord 40).Word -eq 'cool' -and (Get-QpHeatWord 60).Word -eq 'comfortable' -and (Get-QpHeatWord 75).Word -eq 'warm' -and
@@ -660,7 +778,7 @@ Test-Case 'the shared lookups give exactly the same answers as asking one by one
 }
 Test-Case 'the whole state comes back in one pass, and the shared lookups are let go afterwards' {
     $s = Get-QpState
-    $keysOk = @('Privacy', 'Vendors', 'Apps', 'Startup', 'Cleanup', 'Restore' | Where-Object { -not $s.ContainsKey($_) }).Count -eq 0
+    $keysOk = @('Privacy', 'Vendors', 'Apps', 'Startup', 'Devices', 'Cleanup', 'Restore', 'Problems' | Where-Object { -not $s.ContainsKey($_) }).Count -eq 0
     $keysOk -and $null -eq (& (Get-Module Quietpane) { $script:StateCache })
 }
 Test-Case 'catalogs are read once and remembered' {
@@ -680,6 +798,154 @@ Test-Case 'an empty restore point is never offered in Undo' {
     $listed -eq 0
 }
 
+Section 'Where your space went'
+# In your own folder, not Temp: Temp lives inside AppData, which Quietpane deliberately refuses to move.
+$spaceTest = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'QuietpaneSpaceTest'
+function Set-TestFile([string]$Path, [int]$Bytes) { $fs = [IO.File]::Create($Path); $fs.SetLength($Bytes); $fs.Close() }
+function Reset-SpaceTestArea {
+    if (Test-Path $spaceTest) { Remove-Item -LiteralPath $spaceTest -Recurse -Force }
+    foreach ($d in 'big', 'small', 'program', 'holder\program2') { New-Item -ItemType Directory -Path (Join-Path $spaceTest $d) -Force | Out-Null }
+    Set-TestFile "$spaceTest\big\big.bin" 40000
+    Set-TestFile "$spaceTest\small\tiny.bin" 100
+    Set-TestFile "$spaceTest\program\app.exe" 2000        # an .exe with a .dll beside it is a program's own folder
+    Set-TestFile "$spaceTest\program\app.dll" 2000
+    Set-TestFile "$spaceTest\holder\program2\thing.exe" 500
+    Set-TestFile "$spaceTest\holder\program2\thing.dll" 500
+}
+function Get-TestSpace { Get-QpSpaceUse -Root $spaceTest -KeepAbove 1000 }
+
+Test-Case 'folder sizes add up, and the small ones are summed up in a line' {
+    Reset-SpaceTestArea
+    $u = Get-TestSpace
+    $by = @{}; foreach ($c in $u.Tree.Children) { $by[$c.Name] = $c }
+    $u.Tree.Size -eq 45100 -and $u.Tree.Files -eq 6 -and $by['big'].Size -eq 40000 -and $by['program'].Size -eq 4000 -and
+    -not $by.ContainsKey('small') -and $u.Tree.OtherCount -eq 1 -and $u.Tree.OtherSize -eq 100
+}
+Test-Case 'a program''s own folder is spotted, and so is a folder holding one' {
+    Reset-SpaceTestArea
+    $by = @{}; foreach ($c in (Get-TestSpace).Tree.Children) { $by[$c.Name] = $c }
+    $by['program'].HasProgram -and $by['program'].ContainsProgram -and
+    -not $by['holder'].HasProgram -and $by['holder'].ContainsProgram -and -not $by['big'].ContainsProgram
+}
+Test-Case 'links are not followed, so nothing is counted twice' {
+    Reset-SpaceTestArea
+    $before = (Get-TestSpace).Tree.Size
+    New-Item -ItemType Junction -Path "$spaceTest\link" -Target "$spaceTest\big" -ErrorAction Stop | Out-Null
+    $after = Get-TestSpace
+    $after.Tree.Size -eq $before -and @($after.Tree.Children | Where-Object { $_.Name -eq 'link' }).Count -eq 0
+}
+Test-Case 'Windows, programs, games and app data are explained instead of offered' {
+    $win = Get-QpSpaceAdvice -Path (Join-Path $env:WINDIR 'System32')
+    $prog = Get-QpSpaceAdvice -Path (Join-Path $env:ProgramFiles 'Something')
+    $steam = Get-QpSpaceAdvice -Path 'C:\Program Files (x86)\Steam\steamapps\common\Rust'
+    $app = Get-QpSpaceAdvice -Path (Join-Path $env:LOCALAPPDATA 'Google')
+    $dot = Get-QpSpaceAdvice -Path (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex\plugins')
+    $me = Get-QpSpaceAdvice -Path ([Environment]::GetFolderPath('UserProfile'))
+    $downloads = Get-QpSpaceAdvice -Path (Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads')
+    -not ($win.CanRecycle -or $prog.CanRecycle -or $steam.CanRecycle -or $app.CanRecycle -or $dot.CanRecycle -or $me.CanRecycle -or $downloads.CanRecycle) -and
+    $win.Why -match 'Windows itself' -and $steam.Why -match 'Steam' -and $downloads.Why -match 'main folders'
+}
+Test-Case 'your own files are yours to move, and OneDrive says what else it means' {
+    $mine = Get-QpSpaceAdvice -Path (Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\holiday.mp4')
+    if (-not $mine.CanRecycle -or $mine.Note -ne '') { return $false }
+    # OneDrive only exists on some PCs; where it does, moving something also removes it everywhere else.
+    if (-not $env:OneDrive) { return $true }
+    $one = Get-QpSpaceAdvice -Path (Join-Path $env:OneDrive 'Pictures\x.jpg')
+    $one.CanRecycle -and $one.Note -match 'other devices'
+}
+Test-Case 'a folder Windows knows a program lives in is left alone, both ways round' {
+    $installed = @([pscustomobject]@{ Path = 'C:\Games\The Sims 4'; Name = 'The Sims 4' })
+    $inside = Get-QpSpaceAdvice -Path 'C:\Games\The Sims 4\Data\Client' -Installed $installed
+    $holder = Get-QpSpaceAdvice -Path 'C:\Games' -Installed $installed
+    $near = Get-QpSpaceAdvice -Path 'C:\Games\Something' -NearProgram $true
+    -not $inside.CanRecycle -and $inside.Why -match 'Part of The Sims 4' -and
+    -not $holder.CanRecycle -and $holder.Why -match 'holds The Sims 4' -and
+    -not $near.CanRecycle -and $near.Why -match 'stop that program working'
+}
+Test-Case 'installed programs are read from where Windows lists them' {
+    $places = @(Get-QpInstallPlaces)
+    $places.Count -ge 1 -and @($places | Where-Object { -not [IO.Path]::IsPathRooted($_.Path) }).Count -eq 0
+}
+Test-Case 'nothing too big for the Recycle Bin is ever sent there' {
+    Reset-SpaceTestArea
+    $file = "$spaceTest\big\big.bin"
+    $drive = [IO.Path]::GetPathRoot($file).TrimEnd('\')
+    & (Get-Module Quietpane) { param($d) $script:BinLimits[$d] = [int64]1 } $drive    # pretend the bin is tiny
+    $refused = -not (Move-QpToRecycleBin -Path $file -SizeBytes 40000)
+    $stillThere = Test-Path -LiteralPath $file
+    $r = Invoke-QpSpaceRecycle -Path $file -SizeBytes 40000
+    & (Get-Module Quietpane) { $script:BinLimits = @{} }
+    $refused -and $stillThere -and -not $r.Ok -and $r.Note -match 'bigger than'
+}
+Test-Case 'a place that is not yours to move is refused, with what to do instead' {
+    $r = Invoke-QpSpaceRecycle -Path (Join-Path $env:WINDIR 'System32') -SizeBytes 1000
+    -not $r.Ok -and $r.Note -match 'Windows itself'
+}
+Test-Case 'a real drive comes back with its own figures' {
+    $u = Get-QpSpaceUse -Root ($env:SystemDrive + '\') -KeepAbove 1GB
+    $u.Total -gt 0 -and $u.Used -gt 0 -and $u.Hidden -ge 0 -and $u.BinLimit -ge 0 -and -not $u.Cancelled
+}
+if (Test-Path $spaceTest) { Remove-Item -LiteralPath $spaceTest -Recurse -Force }
+
+Section 'What''s talking to the internet'
+Test-Case 'your own network is told apart from the internet' {
+    (Test-QpPrivateAddress '192.168.1.5') -and (Test-QpPrivateAddress '10.0.0.3') -and (Test-QpPrivateAddress '172.20.1.1') -and
+    (Test-QpPrivateAddress '127.0.0.1') -and (Test-QpPrivateAddress 'fe80::1') -and (Test-QpPrivateAddress '::1') -and
+    -not (Test-QpPrivateAddress '4.207.247.137') -and -not (Test-QpPrivateAddress '2600:1901:1:a98::')
+}
+Test-Case 'who is behind an address is named, and a reporting address is only ever a hint' {
+    $a = Get-QpAddressLabel -Address '1.2.3.4' -HostName 'api.anthropic.com'
+    $b = Get-QpAddressLabel -Address '5.6.7.8' -HostName 'vortex.data.microsoft.com'
+    $c = Get-QpAddressLabel -Address '9.9.9.9' -HostName ''
+    $a.Owner -eq 'Anthropic' -and $a.Note -eq '' -and $b.Note -match 'looks like' -and
+    $c.Text -eq '9.9.9.9' -and $c.Owner -eq '' -and $c.Note -eq ''
+}
+Test-Case 'connections are grouped by program, with the places that have names first' {
+    $conns = @(
+        [pscustomobject]@{ RemoteAddress = '1.1.1.1'; OwningProcess = 4242 }
+        [pscustomobject]@{ RemoteAddress = '2.2.2.2'; OwningProcess = 4242 }
+        [pscustomobject]@{ RemoteAddress = '192.168.0.9'; OwningProcess = 4242 }   # your own network
+        [pscustomobject]@{ RemoteAddress = '127.0.0.1'; OwningProcess = 4242 }     # this PC
+        [pscustomobject]@{ RemoteAddress = '3.3.3.3'; OwningProcess = 4343 }       # a second copy of the same program
+        [pscustomobject]@{ RemoteAddress = '10.0.0.5'; OwningProcess = 4444 }      # only ever on your own network
+    )
+    $cache = @([pscustomobject]@{ Data = '2.2.2.2'; Entry = 'api.anthropic.com'; Type = 'A' })
+    $procs = @(
+        [pscustomobject]@{ Id = 4242; ProcessName = 'testapp'; Description = 'Test App'; Product = ''; Path = 'D:\Test\testapp.exe' }
+        [pscustomobject]@{ Id = 4343; ProcessName = 'testapp'; Description = 'Test App'; Product = ''; Path = 'D:\Test\testapp.exe' }
+        [pscustomobject]@{ Id = 4444; ProcessName = 'printer'; Description = ''; Product = ''; Path = '' }
+    )
+    $r = Get-QpConnections -Connections $conns -DnsCache $cache -Processes $procs -Services @{}
+    $p = @($r.Programs)[0]
+    @($r.Programs).Count -eq 1 -and $p.Name -eq 'Test App' -and $p.Processes -eq 2 -and $p.Count -eq 3 -and
+    $p.Destinations[0].Text -eq 'api.anthropic.com' -and ($p.Owners -contains 'Anthropic') -and $p.LocalCount -eq 1 -and
+    ($r.LocalOnly -contains 'printer')
+}
+Test-Case 'reading the real list never throws' {
+    $r = Get-QpConnections
+    $null -ne $r -and $r.Internet -ge 0 -and $null -ne $r.At
+}
+
+Section 'Start menu and desktop shortcuts'
+Test-Case 'a shortcut carries the app id, so the taskbar treats it as Quietpane' {
+    Initialize-QpShortcut
+    $lnk = Join-Path $env:TEMP 'QuietpaneShortcutTest.lnk'
+    $i = Get-QpInfo
+    [QuietpaneShortcut]::Create($lnk, (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile', $root, $i.IconPath, 'Quietpane test', $i.AppId)
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+    $ok = (Test-Path -LiteralPath $lnk) -and ([QuietpaneShortcut]::ReadAppId($lnk)) -eq $i.AppId -and
+          $s.IconLocation -like '*quietpane.ico*' -and $s.TargetPath -like '*powershell.exe' -and $s.WorkingDirectory -eq $root
+    [IO.File]::Delete($lnk)
+    $ok
+}
+Test-Case 'shortcuts go in your own Start menu and desktop, never system-wide' {
+    $p = Get-QpShortcutPaths
+    $s = Test-QpShortcuts
+    $p.StartMenu.StartsWith($env:APPDATA, [StringComparison]::OrdinalIgnoreCase) -and
+    $p.Desktop.StartsWith([Environment]::GetFolderPath('DesktopDirectory'), [StringComparison]::OrdinalIgnoreCase) -and
+    (Test-Path $p.Icon) -and $null -ne $s.StartMenu -and $null -ne $s.Desktop
+}
+
 Section 'The app icon'
 Add-Type -AssemblyName PresentationCore
 Test-Case 'the icon has every size Windows asks for' {
@@ -697,10 +963,33 @@ Test-Case 'the icon is the KomodoWorks emblem, on a see-through background' {
     # corner clear, dark square in the KomodoWorks anchor colour, teal square peeking out bottom-right
     (Get-Px 0 0).EndsWith(',0') -and (Get-Px 40 40) -eq '15,27,28,255' -and (Get-Px 240 240) -eq '23,155,131,255'
 }
-Test-Case 'the window''s only call into Windows names the app for the taskbar' {
+Test-Case 'the window''s calls into Windows only name the app and ask for a sharp picture' {
     $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
     $calls = @([regex]::Matches($src, 'DllImport\("(\w+)\.dll"[^\]]*\)\]\s*public static extern int (\w+)') | ForEach-Object { '{0}!{1}' -f $_.Groups[1].Value, $_.Groups[2].Value })
-    ($calls -join ';') -eq 'shell32!SetCurrentProcessExplicitAppUserModelID'
+    ($calls -join ';') -eq 'shell32!SetCurrentProcessExplicitAppUserModelID;user32!SetProcessDPIAware'
+}
+
+Section 'When things go wrong'
+Test-Case 'the window still draws on a PC with nothing on it, and says what could not be read' {
+    # Every list empty, and one part reported as unreadable: nothing may be left blank or throw.
+    $env:QP_EMPTYSTATE = '1'
+    try {
+        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String
+    } finally { Remove-Item Env:\QP_EMPTYSTATE -ErrorAction SilentlyContinue }
+    $out -match 'empty state drawn OK' -and $out -match 'could not be read' -and $out -notmatch 'Exception|ParserError'
+}
+Test-Case 'a part of the read that fails does not take the rest with it' {
+    $s = Get-QpState
+    # Problems is always there, and everything else still comes back in its usual shape.
+    $null -ne $s.Problems -and $s.Privacy -is [hashtable] -and $null -ne $s.Devices
+}
+Test-Case 'one job at a time is enforced in the window, not left to chance' {
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    # Every action that asks a question first has to check nothing else is running, or it would ask
+    # and then quietly do nothing.
+    $src -match 'function Test-Busy' -and
+    @([regex]::Matches($src, 'if \(Test-Busy\) \{ return \}')).Count -ge 6 -and
+    $src -match 'add_UnhandledException'
 }
 
 Section 'The checks a person has to do by hand'

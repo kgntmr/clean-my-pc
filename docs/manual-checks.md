@@ -75,6 +75,23 @@ These need eyes, not assertions:
   things as Task Manager > Startup apps, with the same on/off state. Switch one off in Quietpane and
   Task Manager shows it as Disabled straight away; Undo, and it shows Enabled again. Sign out and
   back in to confirm it really stays quiet.
+- **Camera, microphone and location match Settings.** Privacy tab > Who used your camera,
+  microphone and location should name the same apps, with the same times, as Settings > Privacy &
+  security > Camera (and Microphone, Location) > Recent activity. Open the Windows Camera app: the
+  section header says the camera is in use right now. Switch a Store app off in Quietpane and its
+  switch in Settings is off straight away; Undo, and it is on again.
+- **Where your space went.** Free up space > Look. The drive's used figure should match File Explorer's,
+  and "Windows and system files" should be the rest of it. Click into Program Files: every row should
+  say where to uninstall rather than offer the Recycle Bin. A folder bigger than the Recycle Bin's
+  limit must say "Too big for the bin", never move. Move a small file of your own and check it lands
+  in the Recycle Bin, the totals drop, and a restore point appears in Undo.
+- **What's talking to the internet.** Privacy > What's talking to the internet right now. Open a
+  website and the browser should appear within about five seconds; close everything and the list
+  shrinks. Compare it with Resource Monitor > Network > TCP Connections: the same programs, allowing
+  for QUIC, which Windows does not list.
+- **Start menu and desktop.** About > Add to Start menu and desktop. Both shortcuts show the emblem,
+  open Quietpane, and right-click > Pin to taskbar gives one taskbar button, not two, while it runs.
+  The button then offers to remove them again, and Undo removes them too.
 - **Stop.** Start "Check this PC", press **Stop** after a few seconds. The progress line changes to
   "Stopping as soon as it is safe to...", then the summary says the check was stopped and that
   nothing was changed. No report is written to the Desktop.

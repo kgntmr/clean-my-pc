@@ -14,7 +14,7 @@
   <a href="https://github.com/kgntmr/quietpane/releases/latest/download/Quietpane.zip"><b>⬇&nbsp;&nbsp;Download Quietpane</b></a> &nbsp;(one small ZIP file)
 </p>
 
-<p align="center"><img src="docs/screenshot-home.png" width="820" alt="Quietpane home screen with one big 'Quiet my PC now' button"></p>
+<p align="center"><img src="docs/screenshot-home.png" width="820" alt="Quietpane home screen: cards showing what could be better, and one button that does it"></p>
 
 ## Get started
 
@@ -42,7 +42,8 @@ Just want a check-up that changes nothing? Double-click **Safety scan only** ins
 - **Tells you first.** Every item explains what it does and its side effects, and **Preview** shows exactly what would change.
 - **Can be undone.** Changes go into a restore point, and clean-up only moves files to your Recycle Bin. The three exceptions say so before you confirm: removing an app, uninstalling a brand extra, and deleting a threat for good.
 - **Leaves your security alone.** Defender, SmartScreen, the firewall and Windows Update are never touched.
-- **Hides nothing.** Plain-text PowerShell you can read, plus a few lines of C# that ask the graphics driver for its temperature and put the KomodoWorks emblem on the taskbar. No installer, no `.exe`.
+- **Owns up when something goes wrong.** If a part of your PC can't be read, that part says so and the rest still works. One job runs at a time, only one copy of the app opens at once, and an error never takes the window down with it.
+- **Hides nothing.** Plain-text PowerShell you can read, plus three short C# blocks (the graphics driver's temperature, adding up folder sizes, and making the Start-menu shortcut) and two lines that give the app its own taskbar icon and a sharp window. No installer, no `.exe`.
 
 ## What's inside
 
@@ -54,13 +55,15 @@ Just want a check-up that changes nothing? Double-click **Safety scan only** ins
 
 Every finding says who found it: **Microsoft Defender** (a real detection, named by Defender and explained in plain words) or a **Quietpane check** (a signal, not proof, and never a malware family). You decide what happens: let Defender handle it, quarantine it (you can put it back), move it to the Recycle Bin, or delete it for good (you're asked twice). **Leave it for now** never creates a Defender exclusion. Windows' own folders are refused, and every action is logged.
 
-**Privacy.** 32 settings in five sections: Windows telemetry, privacy, ads and tips, background services, and browsers and other software (Edge, Chrome, Office, VS Code and more). Anything already done says so.
+**Privacy.** Which apps used your camera, microphone and location, and when, as Windows itself records it. Switch any Store app off (the same switch as in Settings, with Undo); desktop programs share one switch in Windows, and Quietpane says so. Also **what's talking to the internet right now**: the programs with a connection open and where it goes, named from the addresses Windows has already looked up. It is a live list while you watch it, nothing is blocked, and Quietpane still makes no connections of its own. Then 32 settings in five sections: Windows telemetry, privacy, ads and tips, background services, and browsers and other software (Edge, Chrome, Office, VS Code and more). Anything already done says so.
 
 **Telemetry.** The background extras your PC's makers left running (NVIDIA, Intel, AMD, MSI, ASUS, Dell, HP, Lenovo, Acer), listed only if they're actually on your PC. It switches off reporting, updaters and helpers; drivers are never touched and the brand's own app still works. Extras you could remove are left unticked, and Quietpane warns you before removing one because that can't be undone.
 
 **Apps.** *Starts when you sign in:* switch items off the way Task Manager does, with Undo; Windows Security and driver helpers are never offered. *Apps you could remove:* known bloat only. The Store, Camera, Photos, Calculator, Notepad, Paint and Snipping Tool are never on the list.
 
-**Free up space** moves temp files, crash dumps, caches and old installers to the Recycle Bin. **Undo** puts back every recorded change. **About** holds the policies, readable offline.
+**Free up space** moves temp files, crash dumps, caches and old installers to the Recycle Bin. **Where your space went** then answers the bigger question: it adds up every folder on a drive (about ten seconds) and shows the biggest, so you can look inside them. Your own files can go to the Recycle Bin; Windows, installed programs and games are explained instead, with where to remove them properly. Nothing bigger than your Recycle Bin can hold is ever sent there, because Windows would delete it for good.
+
+**Undo** puts back every recorded change. **About** holds the policies, readable offline, and a button that adds Quietpane to your Start menu and desktop with its own icon, so it is easy to find and pins to the taskbar properly.
 
 ## What it deliberately doesn't do
 
@@ -75,7 +78,7 @@ Every finding says who found it: **Microsoft Defender** (a real detection, named
 
 ## Verify it yourself
 
-1. **Read it.** The app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The only non-PowerShell code is a short C# block in the engine. It asks the graphics driver three read-only questions: list the adapters, ask each one, close it. The window adds one line, which names the app to Windows so the taskbar shows its own icon instead of PowerShell's.
+1. **Read it.** The app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The non-PowerShell code is three short C# blocks in the engine, all of them readable in `src/Quietpane.psm1`: one asks the graphics driver three read-only questions (list the adapters, ask each one, close it), one adds up folder sizes for "Where your space went" (it reads names and sizes and opens nothing), and one makes the Start-menu shortcut through Windows' own shortcut object. The window adds two lines of its own: one names the app to Windows, so the taskbar shows its icon instead of PowerShell's, and one asks Windows to draw the window at your screen's real resolution.
 2. **Search for network code.** In the folder, run:
    ```powershell
    Select-String -Path .\Quietpane.ps1, .\src\Quietpane.psm1 -Pattern 'Invoke-WebRequest|Invoke-RestMethod|WebClient|HttpClient|BitsTransfer|TcpClient|curl|wget|DownloadString'
@@ -137,7 +140,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
   ```powershell
   Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
   ```
-  An elevated window says "Administrator:" in its title bar. All 109 checks run there.
+  An elevated window says "Administrator:" in its title bar. All 140 checks run there.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what still needs a person, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files.
 - **Contribute:** the lists in [`src/catalog/`](src/catalog) are plain data, so adding a setting, app, folder, brand or startup note needs no code. Describe side effects honestly, and test with **Preview** first. The reasons behind a few design choices are in [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md).
 

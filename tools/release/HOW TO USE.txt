@@ -24,7 +24,14 @@ Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
 ALSO IN THE APP
    Health     How hard your PC is working, how warm it is, which programs
               are busiest, and how the battery and drive are holding up.
+   Privacy    See which apps used your camera, microphone and location,
+              and when - and switch them off. Also what is talking to
+              the internet right now, and where to.
    Apps       Choose what starts when you sign in.
+   Free up    "Where your space went" shows the biggest folders and files,
+    space     so you can see where your disk went.
+   About      One button puts Quietpane in your Start menu and on your
+              desktop, so it is easy to find again.
    Undo       Changed your mind? Everything recorded can be put back.
               Cleaned-up files are in your Recycle Bin.
 

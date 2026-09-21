@@ -10,7 +10,7 @@ Email **info@komodoworks.com** with the subject **"Security: Quietpane"**, and i
 We aim to acknowledge reports within **5 working days**, agree a fix and a disclosure date with you, and credit you in the release notes if you'd like.
 
 ## Supported versions
-Security fixes go into the latest release.
+Security fixes go into the latest release. **Only the current release is published:** when a new one goes out, the previous one is removed, so everyone downloads the same, current version. The download link on the [README](README.md) always points at it.
 
 ## Getting a genuine copy
 - The only official source is **[github.com/kgntmr/quietpane](https://github.com/kgntmr/quietpane)**, published by KomodoWorks ([komodoworks.com](https://www.komodoworks.com)).

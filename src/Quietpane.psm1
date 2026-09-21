@@ -18,7 +18,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.9.2'
+$script:AppVersion  = '1.10.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -50,6 +50,7 @@ function Get-QpInfo {
         RepoUrl    = $script:Brand.Repo
         LogoPath   = Join-Path $script:AssetsRoot 'komodoworks-logo.png'
         IconPath   = Join-Path $script:AssetsRoot 'quietpane.ico'
+        AppId      = $script:AppUserModelId
         DataRoot   = $script:DataRoot
     }
 }
@@ -113,7 +114,7 @@ function Test-QpAdmin {
 $script:CatalogCache = @{}
 function Get-QpCatalog {
     <# A catalog file, parsed once and remembered. It is read again only if the file itself changes. #>
-    param([ValidateSet('privacy', 'apps', 'cleanup', 'vendors', 'threats', 'startup')][string]$Name)
+    param([ValidateSet('privacy', 'apps', 'cleanup', 'vendors', 'threats', 'startup', 'network')][string]$Name)
     $path = Join-Path $script:CatalogRoot "$Name.psd1"
     $stamp = (Get-Item -LiteralPath $path).LastWriteTimeUtc.Ticks
     $hit = $script:CatalogCache[$Name]
@@ -167,12 +168,46 @@ function Get-QpSize {
     return $sum
 }
 
-function Move-QpToRecycleBin {
+$script:BinLimits = @{}
+function Get-QpRecycleBinLimit {
+    <#
+        The biggest item the Recycle Bin on that drive will take. Anything bigger, Windows deletes for
+        good without asking, so Quietpane never sends it there. 0 means "don't use the bin here".
+    #>
     param([string]$Path)
+    try {
+        $drive = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path)).TrimEnd('\')
+        if ($script:BinLimits.ContainsKey($drive)) { return $script:BinLimits[$drive] }
+        $limit = [int64]0
+        $policy = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer' -ErrorAction SilentlyContinue
+        if (-not ($policy -and [int]$policy.NoRecycleFiles -eq 1)) {
+            $vol = Get-CimInstance Win32_Volume -Filter "DriveLetter='$drive'" -ErrorAction Stop | Select-Object -First 1
+            $p = $null
+            if ($vol -and "$($vol.DeviceID)" -match '\{[0-9a-fA-F-]+\}') {
+                $p = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\$($matches[0])" -ErrorAction SilentlyContinue
+            }
+            if ($p -and [int]$p.NukeOnDelete -eq 1) { $limit = 0 }
+            elseif ($p -and $p.MaxCapacity) { $limit = [int64]$p.MaxCapacity * 1MB }
+            elseif ($vol) { $limit = [int64]([double]$vol.Capacity * 0.05) }   # not set: assume a cautious 5% of the drive
+        }
+        $script:BinLimits[$drive] = $limit
+        return $limit
+    } catch { return [int64]0 }   # can't tell, so assume it can't take it
+}
+
+function Move-QpToRecycleBin {
+    param([string]$Path, [int64]$SizeBytes = -1)
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
     Add-Type -AssemblyName Microsoft.VisualBasic
     try {
         $item = Get-Item -LiteralPath $Path -Force
+        # Too big for the bin means Windows would delete it for good, silently. Leave it where it is.
+        if ($SizeBytes -lt 0) { $SizeBytes = if ($item.PSIsContainer) { Get-QpSize @($item.FullName) } else { $item.Length } }
+        $limit = Get-QpRecycleBinLimit $item.FullName
+        if ($limit -le 0 -or $SizeBytes -gt $limit) {
+            Write-QpLog ("{0} is bigger than the Recycle Bin can hold, so it was left where it is (Windows would have deleted it for good)." -f $item.Name) 'WARN'
+            return $false
+        }
         if ($item.PSIsContainer) {
             [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
         } else {
@@ -404,6 +439,9 @@ $script:ProgramNames = @{
     'csrss' = 'Windows'; 'svchost' = 'Windows services'; 'audiodg' = 'Windows audio'; 'searchindexer' = 'Windows search'
     'msmpeng' = 'Microsoft Defender'; 'mpdefendercoreservice' = 'Microsoft Defender'; 'wmiprvse' = 'Windows management'
     'nvdisplay.container' = 'NVIDIA display helper'; 'explorer' = 'Windows Explorer'; 'tiworker' = 'Windows Update'
+    'nvcontainer' = 'NVIDIA helper'; 'nvsphelper64' = 'NVIDIA helper'; 'smartscreen' = 'Windows SmartScreen'
+    'backgroundtransferhost' = 'Windows downloads'; 'runtimebroker' = 'Windows app helper'; 'lsass' = 'Windows sign-in'
+    'services' = 'Windows'; 'taskhostw' = 'Windows background tasks'; 'sihost' = 'Windows shell'
 }
 
 function Get-QpProgramName {
@@ -850,7 +888,11 @@ function Invoke-QpUndo {
     param([Parameter(Mandatory)][string]$Path)
     $stateFile = Join-Path $Path 'state.json'
     if (-not (Test-Path $stateFile)) { Write-QpLog "No state.json in $Path" 'ERROR'; return }
-    $state = Get-Content $stateFile -Raw | ConvertFrom-Json
+    try { $state = Get-Content $stateFile -Raw | ConvertFrom-Json }
+    catch {
+        Write-QpLog "That restore point cannot be read, so nothing was undone from it. Its own folder is still at $Path." 'ERROR'
+        return
+    }
     $entries = @($state.Entries)
     [array]::Reverse($entries)
     Write-QpLog "Undoing $($entries.Count) change(s) from $(Split-Path $Path -Leaf)" 'STEP'
@@ -1354,6 +1396,205 @@ function Invoke-QpStartup {
 
 #endregion
 
+#region ---------------------------------------------------------------- camera, microphone and location (who used them)
+
+# Windows keeps its own record of which apps used the camera, microphone and location, and when: the
+# record behind Settings > Privacy & security. Quietpane only reads it. Switching an app off writes the
+# same value as the switch in Settings, so the two always agree, and Undo puts back what was there.
+
+$script:ConsentRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore'
+$script:ConsentRootMachine = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore'
+$script:DeviceNames = [ordered]@{ webcam = 'camera'; microphone = 'microphone'; location = 'location' }
+
+function Format-QpWhen {
+    <# A moment in plain words: "a moment ago", "3 hours ago", "yesterday", "16 September". #>
+    param($When, [datetime]$Now = (Get-Date))
+    if (-not $When) { return 'never' }
+    $en = [Globalization.CultureInfo]::InvariantCulture
+    $span = $Now - [datetime]$When
+    if ($span.TotalMinutes -lt 2) { return 'a moment ago' }
+    if ($span.TotalMinutes -lt 60) { return ('{0} minutes ago' -f [int][math]::Floor($span.TotalMinutes)) }
+    if ($span.TotalHours -lt 12) {
+        $h = [int][math]::Floor($span.TotalHours)
+        return $(if ($h -eq 1) { 'an hour ago' } else { "$h hours ago" })
+    }
+    $days = ($Now.Date - ([datetime]$When).Date).Days
+    if ($days -le 0) { return 'earlier today' }
+    if ($days -eq 1) { return 'yesterday' }
+    if ($days -lt 7) { return "$days days ago" }
+    if (([datetime]$When).Year -eq $Now.Year) { return ([datetime]$When).ToString('d MMMM', $en) }
+    return ([datetime]$When).ToString('d MMMM yyyy', $en)
+}
+
+function Get-QpPackageNames {
+    <# Store app names as the Start menu shows them ("Camera", "Settings"), by package family name. #>
+    if ($script:StateCache -and $script:StateCache.ContainsKey('StartNames')) { return $script:StateCache.StartNames }
+    $map = @{}
+    try {
+        foreach ($a in @(Get-StartApps -ErrorAction Stop)) {
+            $pfn = ([string]$a.AppID -split '!')[0]
+            if ($pfn -match '_[a-z0-9]{13}$' -and -not $map.ContainsKey($pfn)) { $map[$pfn] = [string]$a.Name }
+        }
+    } catch { }
+    if ($script:StateCache) { $script:StateCache.StartNames = $map }
+    return $map
+}
+
+function Get-QpProgramLabel {
+    <#
+        What a program calls itself ("Google Chrome"). Windows' own helpers are simply "Windows itself".
+        For a program that has since gone: the game's folder ("Battlefield 6"), or the first folder
+        under Program Files ("Adobe").
+    #>
+    param([string]$Path)
+    if ($env:WINDIR -and $Path -like "$env:WINDIR\*") { return 'Windows itself' }
+    try {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $vi = (Get-Item -LiteralPath $Path).VersionInfo
+            foreach ($n in [string]$vi.FileDescription, [string]$vi.ProductName) {
+                $n = $n.Trim()
+                if ($n -and $n.Length -le 60 -and $n -notmatch '(?i)operating system') { return $n }
+            }
+            return [IO.Path]::GetFileNameWithoutExtension($Path)
+        }
+        if ($Path -match '\\steamapps\\common\\([^\\]+)\\') { return $matches[1] }
+        if ($Path -match '^[a-z]:\\Program Files( \(x86\))?\\([^\\]+)\\') { return $matches[2] }
+    } catch { }
+    return [IO.Path]::GetFileNameWithoutExtension($Path)
+}
+
+function Get-QpDeviceUse {
+    <#
+        Who used the camera, microphone and location, and when, from Windows' own record. Read-only.
+        Store apps each have their own switch. Desktop programs are recorded by path, but Windows only
+        has one switch for all of them. The registry roots can be swapped for tests.
+    #>
+    param([string]$UserRoot = $script:ConsentRoot, [string]$MachineRoot = $script:ConsentRootMachine, $BootTime)
+    if ($null -eq $BootTime) {
+        $BootTime = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { [datetime]::MinValue }
+    }
+    function Get-Use($props) {
+        # Windows notes when each use started and stopped. Started but not stopped (since the PC was
+        # switched on) means it is in use right now.
+        $start = [int64]0; $stop = [int64]0
+        try { if ($props.LastUsedTimeStart) { $start = [int64]$props.LastUsedTimeStart } } catch { }
+        try { if ($props.LastUsedTimeStop) { $stop = [int64]$props.LastUsedTimeStop } } catch { }
+        $last = $null; $inUse = $false
+        try {
+            if ($start -gt 0) {
+                $s = [DateTime]::FromFileTime($start)
+                $last = if ($stop -gt $start) { [DateTime]::FromFileTime($stop) } else { $s }
+                $inUse = ($stop -lt $start) -and ($s -gt $BootTime)
+            }
+        } catch { }
+        [pscustomobject]@{ Last = $last; InUse = $inUse }
+    }
+    $names = $null
+    $out = foreach ($kind in $script:DeviceNames.Keys) {
+        $userKey = Join-Path $UserRoot $kind
+        $machineKey = Join-Path $MachineRoot $kind
+        $desktopKey = Join-Path $userKey 'NonPackaged'
+        $apps = New-Object System.Collections.ArrayList
+
+        foreach ($k in @(Get-ChildItem -Path $userKey -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -ne 'NonPackaged' })) {
+            $pfn = $k.PSChildName
+            $p = Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction SilentlyContinue
+            $use = Get-Use $p
+            if (-not $names) { $names = Get-QpPackageNames }
+            $name = $names[$pfn]
+            if (-not $name) {
+                # "SpotifyAB.SpotifyMusic_zpdnekdrzrea0" -> "Spotify Music"
+                $short = (($pfn -split '_')[0] -split '\.')[-1]
+                $name = ($short -creplace '(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', ' ').Trim()
+            }
+            $setting = [string]$p.Value
+            [void]$apps.Add([pscustomobject]@{
+                Id = "$kind|App|$pfn"; Kind = $kind; Type = 'App'; Name = $name; Path = $pfn
+                Setting = $setting; Allowed = ($setting -ne 'Deny'); Asks = ($setting -eq 'Prompt')
+                # Without a switch of its own (Settings, for example) an app is managed by Windows.
+                Locked = (-not $setting); LastUsed = $use.Last; InUse = $use.InUse; Missing = $false
+                RegPath = (Join-Path $userKey $pfn)
+            })
+        }
+
+        $desktopOn = (Get-QpRegValue -Path $desktopKey -Name 'Value').Value -ne 'Deny'
+        $programs = @{}
+        foreach ($root in $desktopKey, (Join-Path $machineKey 'NonPackaged')) {
+            foreach ($k in @(Get-ChildItem -Path $root -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like '*#*' })) {
+                $use = Get-Use (Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction SilentlyContinue)
+                if (-not $use.Last) { continue }
+                $path = $k.PSChildName.Replace('#', '\')
+                $name = Get-QpProgramLabel $path
+                # One line per program, however many copies of it Windows noted.
+                $prev = $programs[$name]
+                if ($prev -and $prev.LastUsed -ge $use.Last) { if ($use.InUse) { $prev.InUse = $true }; continue }
+                $programs[$name] = [pscustomobject]@{
+                    Id = "$kind|Desktop|$path"; Kind = $kind; Type = 'Desktop'; Name = $name; Path = $path
+                    Setting = ''; Allowed = $desktopOn; Asks = $false; Locked = $true
+                    LastUsed = $use.Last; InUse = ($use.InUse -or ($prev -and $prev.InUse))
+                    Missing = ($name -ne 'Windows itself' -and -not (Test-Path -LiteralPath $path)); RegPath = ''
+                }
+            }
+        }
+        foreach ($v in $programs.Values) { [void]$apps.Add($v) }
+
+        [pscustomobject]@{
+            Kind = $kind; Name = $script:DeviceNames[$kind]
+            PcOn = ((Get-QpRegValue -Path $machineKey -Name 'Value').Value -ne 'Deny')
+            UserOn = ((Get-QpRegValue -Path $userKey -Name 'Value').Value -ne 'Deny')
+            DesktopOn = $desktopOn; DesktopId = "$kind|AllDesktop"; DesktopKey = $desktopKey
+            # In use first, then the most recent, then the ones that have never used it.
+            Apps = @($apps | Sort-Object @{ Expression = { $_.InUse }; Descending = $true },
+                @{ Expression = { if ($_.LastUsed) { $_.LastUsed } else { [datetime]::MinValue } }; Descending = $true }, Name)
+        }
+    }
+    return @($out)
+}
+
+function Invoke-QpDeviceAccess {
+    <#
+        Stops the chosen apps using the camera, microphone or location. It is the same switch as in
+        Settings > Privacy & security, so Settings shows it off too. Each change goes into a restore
+        point first, so Undo switches it back on. Apps that are part of Windows are refused.
+    #>
+    param([string[]]$Ids, [switch]$Preview, $Use)
+    $Ids = @($Ids | Where-Object { $_ })
+    if (-not $Ids.Count) { Write-QpLog 'Nothing selected.' 'WARN'; return }
+    $devices = if ($null -ne $Use) { @($Use) } else { @(Get-QpDeviceUse) }
+    $own = $false   # set once this call opens its own restore point
+    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' }
+    foreach ($id in $Ids) {
+        $d = @($devices | Where-Object { $_.Kind -eq ($id -split '\|')[0] }) | Select-Object -First 1
+        if (-not $d) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; continue }
+        if ($id -eq $d.DesktopId) {
+            $label = 'all desktop programs'; $key = $d.DesktopKey; $already = -not $d.DesktopOn
+        } else {
+            $a = @($d.Apps | Where-Object { $_.Id -eq $id }) | Select-Object -First 1
+            if (-not $a) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; continue }
+            if ($a.Type -ne 'App') { Write-QpLog "Windows can't stop one desktop program at a time - $($a.Name) left as is." 'WARN'; continue }
+            if ($a.Locked) { Write-QpLog "$($a.Name) is part of Windows, so Windows decides its $($d.Name) access." 'WARN'; continue }
+            $label = $a.Name; $key = $a.RegPath; $already = ($a.Setting -eq 'Deny')
+        }
+        $opening = $label.Substring(0, 1).ToUpper() + $label.Substring(1)   # the same, to start a sentence
+        if ($already) { Write-QpLog "$opening already can't use the $($d.Name)" 'OK'; continue }
+        if ($Preview) { Write-QpLog "Would stop $label using the $($d.Name)" 'PREVIEW'; continue }
+        # The restore point is opened at the first real change, so refusals never leave an empty one in Undo.
+        if (-not $script:Session) { Start-QpSession 'devices'; $own = $true }
+        try {
+            $cur = Get-QpRegValue -Path $key -Name 'Value'
+            Add-QpUndo @{ Type = 'Reg'; Path = $key; Name = 'Value'; Existed = [bool]$cur.Exists; OldValue = $cur.Value; Kind = 'String' }
+            if (-not (Test-Path -Path $key)) { New-Item -Path $key -Force | Out-Null }
+            Set-ItemProperty -Path $key -Name 'Value' -Value 'Deny' -Type String -ErrorAction Stop
+            Write-QpLog "$opening can't use the $($d.Name) any more. Settings shows it switched off too, and Undo turns it back on." 'OK'
+        } catch {
+            Write-QpLog "Could not switch off $label for the $($d.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
+        }
+    }
+    if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-QpSession }
+}
+
+#endregion
+
 #region ---------------------------------------------------------------- clean-up
 
 function Resolve-QpPaths {
@@ -1411,7 +1652,7 @@ function Invoke-QpCleanup {
             foreach ($c in $children) {
                 $size = if ($c.PSIsContainer) { Get-QpSize @($c.FullName) } else { $c.Length }
                 if ($Preview) { $moved++; $bytes += $size; continue }
-                if (Move-QpToRecycleBin $c.FullName) { $moved++; $bytes += $size }
+                if (Move-QpToRecycleBin -Path $c.FullName -SizeBytes $size) { $moved++; $bytes += $size }
             }
             $total += $bytes
             if ($Preview) {
@@ -1430,6 +1671,546 @@ function Invoke-QpCleanup {
         if ($own) { Stop-QpSession }
     }
     [pscustomobject]@{ BytesFreed = [int64]$total }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- what's talking to the internet
+
+# Which programs have a connection open right now, and where to. Read-only, and nothing is looked up
+# online: the list comes from Windows' own connection table, and the names come from the DNS cache
+# Windows already has. Quietpane makes no network requests of its own, here or anywhere else.
+#
+# What it cannot see: connections made over QUIC (UDP), which some browsers and games prefer. Windows
+# does not record where those go, so the window says so rather than pretending the list is complete.
+
+$script:ServicesByPid = $null
+$script:ServicesAt = [datetime]::MinValue
+
+function Test-QpPrivateAddress {
+    <# Your own network (or this PC), rather than the internet. #>
+    param([string]$Address)
+    if (-not $Address) { return $true }
+    $a = $Address.Split('%')[0]
+    if ($a -eq '::1' -or $a -eq '0.0.0.0' -or $a -eq '::') { return $true }
+    if ($a -match '^(127\.|10\.|192\.168\.|169\.254\.)') { return $true }
+    if ($a -match '^172\.(1[6-9]|2[0-9]|3[01])\.') { return $true }
+    if ($a -match '^(?i)(fe[89ab]|f[cd])') { return $true }
+    return $false
+}
+
+function Get-QpAddressLabel {
+    <# A destination in plain words: the name Windows has for it, and who is behind it. #>
+    param([string]$Address, [string]$HostName, $Catalog = (Get-QpCatalog network))
+    $owner = ''; $note = ''
+    if ($HostName) {
+        foreach ($o in $Catalog.Owners) { if ($HostName -match $o.Match) { $owner = $o.Name; break } }
+        foreach ($r in $Catalog.Reporting) { if ($HostName -match $r.Match) { $note = $r.Note; break } }
+    }
+    [pscustomobject]@{ Address = $Address; Host = $HostName; Owner = $owner; Note = $note; Text = $(if ($HostName) { $HostName } else { $Address }) }
+}
+
+function Get-QpServicesByPid {
+    <# Which Windows services live in which process, so "svchost" can say what it actually is. #>
+    if ($script:ServicesByPid -and ((Get-Date) - $script:ServicesAt).TotalSeconds -lt 60) { return $script:ServicesByPid }
+    $map = @{}
+    foreach ($s in @(Get-CimInstance Win32_Service -Filter "State='Running'" -ErrorAction SilentlyContinue)) {
+        $id = [int]$s.ProcessId
+        if ($id -le 0) { continue }
+        if (-not $map.ContainsKey($id)) { $map[$id] = New-Object System.Collections.ArrayList }
+        [void]$map[$id].Add([string]$s.DisplayName)
+    }
+    $script:ServicesByPid = $map
+    $script:ServicesAt = Get-Date
+    return $map
+}
+
+function Get-QpConnections {
+    <#
+        Programs with a connection open right now, newest-busiest first. Read-only. The connection
+        table, DNS cache and process list can all be passed in, so tests never need a real network.
+    #>
+    param($Connections, $DnsCache, $Processes, $Catalog = (Get-QpCatalog network), $Services)
+    if ($null -eq $Connections) { $Connections = @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue) }
+    if ($null -eq $DnsCache) { $DnsCache = @(Get-DnsClientCache -ErrorAction SilentlyContinue) }
+    if ($null -eq $Processes) { $Processes = @(Get-Process -ErrorAction SilentlyContinue) }
+    $byId = @{}
+    foreach ($p in $Processes) { $byId[[int]$p.Id] = $p }
+    # Windows' own DNS cache: address -> the name that was asked for.
+    $names = @{}
+    foreach ($e in $DnsCache) {
+        $data = [string]$e.Data
+        if (-not $data -or $data -notmatch '[\.:]') { continue }
+        if ("$($e.Type)" -notin 'A', 'AAAA', '1', '28') { continue }
+        if (-not $names.ContainsKey($data)) { $names[$data] = [string]$e.Entry }
+    }
+    $groups = @{}
+    $localOnly = @{}
+    foreach ($c in $Connections) {
+        $addr = "$($c.RemoteAddress)".Split('%')[0]
+        if (-not $addr) { continue }
+        $procId = [int]$c.OwningProcess
+        if (Test-QpPrivateAddress $addr) {
+            if ($addr -notmatch '^(127\.|::1$)') { $localOnly[$procId] = [int]$localOnly[$procId] + 1 }
+            continue
+        }
+        if (-not $groups.ContainsKey($procId)) { $groups[$procId] = New-Object System.Collections.ArrayList }
+        [void]$groups[$procId].Add((Get-QpAddressLabel -Address $addr -HostName ([string]$names[$addr]) -Catalog $Catalog))
+    }
+    $out = foreach ($procId in @($groups.Keys)) {
+        $p = $byId[$procId]
+        $name = ''
+        $path = ''
+        if ($procId -eq $PID) { $name = 'Quietpane (this app)' }
+        elseif (-not $p) { $name = 'A program that has since closed' }
+        else {
+            try { $path = [string]$p.Path } catch { }
+            if ($p.ProcessName -eq 'svchost') {
+                if ($null -eq $Services) { $Services = Get-QpServicesByPid }
+                $list = @($Services[$procId])
+                $name = if ($list -and $list[0]) { 'Windows: ' + (($list | Select-Object -First 2) -join ', ') } else { 'A Windows service' }
+            } else {
+                # The plain names Windows' own programs go by, then what the program calls itself.
+                $name = [string]$script:ProgramNames["$($p.ProcessName)".ToLower()]
+                if (-not $name) {
+                    foreach ($n in [string]$p.Description, [string]$p.Product) {
+                        $n = "$n".Trim()
+                        if ($n -and $n.Length -le 40 -and $n -notmatch '(?i)operating system') { $name = $n; break }
+                    }
+                }
+                if (-not $name) { $name = [string]$p.ProcessName }
+            }
+        }
+        [pscustomobject]@{ Name = $name; ProcessId = $procId; Path = $path; Dests = @($groups[$procId]); LocalCount = [int]$localOnly[$procId] }
+    }
+    # One line per program, not per process: a browser or a game may have several at once.
+    $merged = foreach ($grp in @($out | Group-Object Name)) {
+        $all = @($grp.Group)
+        $dests = @($all | ForEach-Object { $_.Dests })
+        $named = @($dests | Where-Object { $_.Host } | Sort-Object Text -Unique)
+        $plain = @($dests | Where-Object { -not $_.Host } | Sort-Object Text -Unique)
+        [pscustomobject]@{
+            Name = $grp.Name; ProcessId = $all[0].ProcessId; Path = $all[0].Path; Processes = $all.Count
+            Count = $dests.Count
+            Destinations = @($named + $plain)          # the ones with a name first: they say more
+            Owners = @($dests | ForEach-Object { $_.Owner } | Where-Object { $_ } | Select-Object -Unique)
+            Reporting = @($dests | Where-Object { $_.Note } | ForEach-Object { '{0} ({1})' -f $_.Text, $_.Note } | Select-Object -Unique)
+            LocalCount = [int](($all | Measure-Object -Property LocalCount -Sum).Sum)
+        }
+    }
+    $localNames = foreach ($procId in @($localOnly.Keys)) {
+        if ($groups.ContainsKey($procId)) { continue }
+        if ($byId[$procId]) { [string]$byId[$procId].ProcessName } else { 'a program' }
+    }
+    [pscustomobject]@{
+        Programs = @($merged | Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, Name)
+        Internet = @($merged).Count
+        LocalOnly = @($localNames | Sort-Object -Unique)
+        At = Get-Date
+    }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- Start menu and desktop shortcuts
+
+# A shortcut that carries the same app id as the window, so Windows treats them as one app: the
+# taskbar shows the emblem, and "Pin to taskbar" pins something that really opens Quietpane.
+# Nothing is installed: these are two small .lnk files in your own Start menu and desktop folders,
+# and Undo (or the button) puts them in the Recycle Bin again.
+
+$script:AppUserModelId = 'KomodoWorks.Quietpane'
+$script:ShortcutSource = @'
+using System;
+using System.Runtime.InteropServices;
+
+// Windows' own shortcut object, used the way Explorer uses it. No Windows functions are imported.
+public static class QuietpaneShortcut {
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046")] class ShellLink { }
+
+    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IShellLinkW {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder file, int cch, IntPtr fd, int flags);
+        void GetIDList(out IntPtr ppidl);
+        void SetIDList(IntPtr pidl);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder name, int cch);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder dir, int cch);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string dir);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder args, int cch);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string args);
+        void GetHotkey(out short hotkey);
+        void SetHotkey(short hotkey);
+        void GetShowCmd(out int show);
+        void SetShowCmd(int show);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder icon, int cch, out int index);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string icon, int index);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string path, int reserved);
+        void Resolve(IntPtr hwnd, int flags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string path);
+    }
+
+    [ComImport, Guid("0000010b-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPersistFile {
+        void GetClassID(out Guid clsid);
+        [PreserveSig] int IsDirty();
+        void Load([MarshalAs(UnmanagedType.LPWStr)] string file, int mode);
+        void Save([MarshalAs(UnmanagedType.LPWStr)] string file, [MarshalAs(UnmanagedType.Bool)] bool remember);
+        void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string file);
+        void GetCurFile([Out, MarshalAs(UnmanagedType.LPWStr)] out string file);
+    }
+
+    [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPropertyStore {
+        void GetCount(out uint count);
+        void GetAt(uint index, out PROPERTYKEY key);
+        void GetValue(ref PROPERTYKEY key, out PROPVARIANT value);
+        void SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);
+        void Commit();
+    }
+
+    [StructLayout(LayoutKind.Sequential)] struct PROPERTYKEY { public Guid fmtid; public uint pid; }
+    [StructLayout(LayoutKind.Sequential)] struct PROPVARIANT { public ushort vt; ushort r1, r2, r3; public IntPtr value; public IntPtr unused; }
+
+    public static void Create(string linkPath, string target, string args, string workingDir, string icon, string description, string appId) {
+        var link = (IShellLinkW)new ShellLink();
+        link.SetPath(target);
+        link.SetArguments(args);
+        link.SetWorkingDirectory(workingDir);
+        link.SetDescription(description);
+        if (!string.IsNullOrEmpty(icon)) link.SetIconLocation(icon, 0);
+        link.SetShowCmd(7);                       // start out of the way; the window itself opens normally
+        if (!string.IsNullOrEmpty(appId)) {
+            // System.AppUserModel.ID: what makes the taskbar treat shortcut and window as one app.
+            var store = (IPropertyStore)link;
+            var key = new PROPERTYKEY { fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5 };
+            var v = new PROPVARIANT { vt = 31, value = Marshal.StringToCoTaskMemUni(appId) };   // 31 = a text value
+            try { store.SetValue(ref key, ref v); store.Commit(); } finally { Marshal.FreeCoTaskMem(v.value); }
+        }
+        ((IPersistFile)link).Save(linkPath, true);
+        Marshal.FinalReleaseComObject(link);
+    }
+
+    // Reads the app id back out of a shortcut, so it can be checked.
+    public static string ReadAppId(string linkPath) {
+        var link = (IShellLinkW)new ShellLink();
+        ((IPersistFile)link).Load(linkPath, 0);
+        var key = new PROPERTYKEY { fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5 };
+        PROPVARIANT v;
+        ((IPropertyStore)link).GetValue(ref key, out v);
+        string id = v.vt == 31 ? Marshal.PtrToStringUni(v.value) : "";
+        Marshal.FinalReleaseComObject(link);
+        return id;
+    }
+}
+'@
+
+function Get-QpShortcutPaths {
+    <# Where the two shortcuts go: your own Start menu and your own desktop. Nothing system-wide. #>
+    $root = Split-Path $PSScriptRoot -Parent
+    [pscustomobject]@{
+        StartMenu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Quietpane.lnk'
+        Desktop   = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Quietpane.lnk'
+        AppRoot   = $root
+        Script    = Join-Path $root 'Quietpane.ps1'
+        Icon      = Join-Path $script:AssetsRoot 'quietpane.ico'
+        Temporary = ($env:TEMP -and $root.StartsWith(([IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase))
+    }
+}
+
+function Test-QpShortcuts {
+    $p = Get-QpShortcutPaths
+    [pscustomobject]@{ StartMenu = (Test-Path -LiteralPath $p.StartMenu); Desktop = (Test-Path -LiteralPath $p.Desktop) }
+}
+
+function Initialize-QpShortcut {
+    if (-not ('QuietpaneShortcut' -as [type])) { Add-Type -TypeDefinition $script:ShortcutSource -ErrorAction Stop }
+}
+
+function New-QpShortcuts {
+    <#
+        Puts Quietpane in your Start menu and on your desktop, with the KomodoWorks emblem. Both point
+        at this folder, so if you move it later, make them again. Undo removes them.
+    #>
+    $p = Get-QpShortcutPaths
+    if (-not (Test-Path -LiteralPath $p.Script)) { return [pscustomobject]@{ Ok = $false; Note = 'Quietpane cannot find its own files, so it did not make a shortcut.' } }
+    if ($p.Temporary) {
+        return [pscustomobject]@{ Ok = $false; Note = 'Quietpane is running from a temporary folder, so a shortcut would stop working. Unzip it somewhere you keep things first, then try again.' }
+    }
+    Initialize-QpShortcut
+    $target = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    # (not $args: PowerShell keeps that name for a function's own arguments)
+    $argLine = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}"' -f $p.Script
+    $own = -not $script:Session
+    if ($own) { Start-QpSession 'shortcuts' }
+    $made = @()
+    try {
+        foreach ($link in $p.StartMenu, $p.Desktop) {
+            $existed = Test-Path -LiteralPath $link
+            try {
+                [QuietpaneShortcut]::Create($link, $target, $argLine, $p.AppRoot, $p.Icon, 'Quietpane - take your Windows PC back', $script:AppUserModelId)
+                if (-not $existed) { Add-QpUndo @{ Type = 'FileCreated'; Path = $link } }
+                $made += (Split-Path $link -Leaf)
+                Write-QpLog "Shortcut ready: $link" 'OK'
+            } catch {
+                Write-QpLog "Could not make the shortcut at $link : $(Get-QpFailureReason $_.Exception)" 'WARN'
+            }
+        }
+    } finally { if ($own) { Stop-QpSession } }
+    if (-not $made.Count) { return [pscustomobject]@{ Ok = $false; Note = 'Windows would not let Quietpane make the shortcuts.' } }
+    [pscustomobject]@{ Ok = $true; Note = 'Quietpane is in your Start menu and on your desktop. To keep it on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".' }
+}
+
+function Remove-QpShortcuts {
+    <# Takes the two shortcuts away again. They go to the Recycle Bin, like everything else. #>
+    $p = Get-QpShortcutPaths
+    $gone = 0
+    foreach ($link in $p.StartMenu, $p.Desktop) {
+        if (-not (Test-Path -LiteralPath $link)) { continue }
+        if (Move-QpToRecycleBin -Path $link -SizeBytes ((Get-Item -LiteralPath $link).Length)) { $gone++; Write-QpLog "Shortcut removed: $link" 'OK' }
+        else { Write-QpLog "Could not remove the shortcut at $link" 'WARN' }
+    }
+    [pscustomobject]@{ Ok = ($gone -gt 0); Note = $(if ($gone) { 'The shortcuts are in your Recycle Bin. Quietpane itself is untouched.' } else { 'There were no Quietpane shortcuts to remove.' }) }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- where the space went
+
+# Adds up how much room each folder takes, so you can see where your disk went. It reads names and
+# sizes only - no file is opened - and skips links, so nothing is counted twice. Online-only OneDrive
+# files take no room on this PC, so they aren't counted either. Windows' own folder isn't walked: its
+# files are hard-linked many times over, so the honest figure is simply "whatever else is in use".
+
+$script:SpaceScannerSource = @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+
+public class QuietpaneSpaceNode {
+    public string Name; public string Path; public long Size; public bool IsFile; public bool Denied;
+    public long Files; public long Folders; public long OtherSize; public int OtherCount; public long CloudSize;
+    // A program's own folder has its .exe and .dll files side by side. Moving that, or anything
+    // holding it, would stop the program working.
+    public bool HasProgram; public bool ContainsProgram;
+    public DateTime Modified; public QuietpaneSpaceNode Parent;
+    public List<QuietpaneSpaceNode> Children = new List<QuietpaneSpaceNode>();
+}
+
+// Only reads directory listings. It never opens, changes or deletes anything.
+public static class QuietpaneSpaceScanner {
+    const FileAttributes RecallOnOpen = (FileAttributes)0x40000, RecallOnData = (FileAttributes)0x400000;
+    static string[] skip; static string[] cloud; static long keep; static Func<string, long, bool> tick;
+    static long seen; static bool stopped;
+    public static bool WasStopped { get { return stopped; } }
+
+    public static QuietpaneSpaceNode Scan(string root, string[] skipPaths, string[] cloudRoots, long keepAbove, Func<string, long, bool> onTick) {
+        skip = skipPaths ?? new string[0]; cloud = cloudRoots ?? new string[0]; keep = keepAbove; tick = onTick; seen = 0; stopped = false;
+        var node = new QuietpaneSpaceNode { Name = root, Path = root };
+        Walk(new DirectoryInfo(root), node);
+        return node;
+    }
+
+    static bool Under(string path, string[] roots) {
+        foreach (var r in roots) {
+            if (string.IsNullOrEmpty(r)) continue;
+            if (path.Equals(r, StringComparison.OrdinalIgnoreCase) || path.StartsWith(r.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    static void Walk(DirectoryInfo dir, QuietpaneSpaceNode node) {
+        if (stopped) return;
+        seen++;
+        if (tick != null && seen % 500 == 0 && !tick(dir.FullName, seen)) { stopped = true; return; }
+        IEnumerable<FileSystemInfo> entries;
+        try { entries = dir.EnumerateFileSystemInfos(); } catch { node.Denied = true; return; }
+        bool exe = false, dll = false;
+        try {
+            foreach (var e in entries) {
+                if (stopped) return;
+                var a = e.Attributes;
+                if ((a & FileAttributes.Directory) != 0) {
+                    // Links and junctions point at something counted elsewhere; OneDrive's folders are real.
+                    if ((a & FileAttributes.ReparsePoint) != 0 && !Under(e.FullName, cloud)) continue;
+                    if (Under(e.FullName, skip)) continue;
+                    var child = new QuietpaneSpaceNode { Name = e.Name, Path = e.FullName, Parent = node, Modified = e.LastWriteTime };
+                    Walk((DirectoryInfo)e, child);
+                    node.Size += child.Size; node.Files += child.Files; node.Folders += child.Folders + 1; node.CloudSize += child.CloudSize;
+                    if (child.ContainsProgram) node.ContainsProgram = true;
+                    if (child.Size >= keep) node.Children.Add(child); else { node.OtherSize += child.Size; node.OtherCount++; }
+                } else {
+                    string ext = e.Extension;
+                    if (ext.Equals(".exe", StringComparison.OrdinalIgnoreCase)) exe = true;
+                    else if (ext.Equals(".dll", StringComparison.OrdinalIgnoreCase)) dll = true;
+                    long len = ((FileInfo)e).Length;
+                    // Online-only files take no room on this PC, however big they say they are.
+                    if ((a & (FileAttributes.Offline | RecallOnOpen | RecallOnData)) != 0) { node.CloudSize += len; continue; }
+                    node.Size += len; node.Files++;
+                    if (len >= keep) node.Children.Add(new QuietpaneSpaceNode { Name = e.Name, Path = e.FullName, Size = len, IsFile = true, Parent = node, Modified = e.LastWriteTime, Files = 1 });
+                    else { node.OtherSize += len; node.OtherCount++; }
+                }
+            }
+        } catch { node.Denied = true; }
+        if (exe && dll) { node.HasProgram = true; node.ContainsProgram = true; }
+    }
+}
+'@
+
+function Initialize-QpSpaceScanner {
+    if (-not ('QuietpaneSpaceScanner' -as [type])) { Add-Type -TypeDefinition $script:SpaceScannerSource -ErrorAction Stop }
+}
+
+function Get-QpSpaceUse {
+    <#
+        Where the space on a drive went: every folder's size, keeping the ones worth showing (50 MB and
+        up) and adding the rest up as "smaller items". Read-only. Stop works at any point.
+    #>
+    param([string]$Root = ($env:SystemDrive + '\'), [int64]$KeepAbove = 50MB)
+    Initialize-QpSpaceScanner
+    $Root = $Root.TrimEnd('\') + '\'
+    $isSystem = $Root -like ($env:SystemDrive + '\*')
+    $skip = @(if ($isSystem) { $env:WINDIR })
+    $cloud = @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial | Where-Object { $_ } | Select-Object -Unique)
+    $started = Get-Date
+    $tick = [Func[string, long, bool]]{
+        param($path, $count)
+        Write-QpProgress -Stage 'Adding up folder sizes' -Object $path -Scanned ([int]$count)
+        -not (Test-QpCancelled)
+    }
+    $tree = [QuietpaneSpaceScanner]::Scan($Root, [string[]]$skip, [string[]]$cloud, $KeepAbove, $tick)
+    $drive = New-Object IO.DriveInfo $Root
+    $used = [int64]($drive.TotalSize - $drive.AvailableFreeSpace)
+    [pscustomobject]@{
+        Root = $Root; Tree = $tree; Total = [int64]$drive.TotalSize; Free = [int64]$drive.AvailableFreeSpace; Used = $used
+        # Whatever is in use but wasn't counted: Windows itself, restore points, and files nobody may read.
+        Hidden = [int64][math]::Max([double]0, [double]($used - $tree.Size))
+        HiddenLabel = $(if ($isSystem) { 'Windows and system files' } else { 'System and hidden files' })
+        Cloud = [int64]$tree.CloudSize; Folders = [int64]$tree.Folders; Files = [int64]$tree.Files
+        BinLimit = (Get-QpRecycleBinLimit $Root)
+        Installed = @(Get-QpInstallPlaces)
+        Cancelled = [QuietpaneSpaceScanner]::WasStopped; Seconds = [int]((Get-Date) - $started).TotalSeconds
+    }
+}
+
+function Get-QpInstallPlaces {
+    <#
+        Where installed programs and games live, as they told Windows when they were installed
+        ("The Sims 4" -> C:\Games\The Sims 4). Read-only.
+    #>
+    $keys = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    $places = @{}
+    foreach ($k in $keys) {
+        foreach ($e in @(Get-ItemProperty -Path $k -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName })) {
+            $where = [string]$e.InstallLocation
+            if (-not $where.Trim()) {
+                # No folder given: a program's own uninstaller usually sits in its folder ("unins000.exe").
+                $exe = Resolve-QpCommandTarget ([string]$e.UninstallString)
+                if ($exe -and [IO.Path]::IsPathRooted($exe) -and (Split-Path $exe -Leaf) -match '^(?i)(unins|uninst)') { $where = Split-Path $exe -Parent }
+            }
+            $where = $where.Trim().Trim('"').TrimEnd('\')
+            if ($where.Length -le 3 -or -not [IO.Path]::IsPathRooted($where)) { continue }
+            if ($env:WINDIR -and $where -like "$env:WINDIR*") { continue }
+            if (-not $places.ContainsKey($where)) { $places[$where] = [string]$e.DisplayName }
+        }
+    }
+    return @($places.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Path = $_.Key; Name = $_.Value } })
+}
+
+function Get-QpSpaceAdvice {
+    <#
+        What a place on the disk is, in plain words, and whether Quietpane will move it to the Recycle
+        Bin. Your own files can go; Windows, installed programs, games and app data are explained instead,
+        with where to remove them properly. -Installed is Get-QpInstallPlaces; -NearProgram says the
+        scan found a program's own files in or around it.
+    #>
+    param([Parameter(Mandatory)][string]$Path, $Installed = @(), [bool]$NearProgram = $false)
+    function Out-Advice([bool]$Can, [string]$Why, [string]$Note = '') { [pscustomobject]@{ CanRecycle = $Can; Why = $Why; Note = $Note } }
+    $p = try { [IO.Path]::GetFullPath($Path).TrimEnd('\') } catch { return (Out-Advice $false 'Quietpane could not work out where this is.') }
+    function Test-Under([string]$Root) { $Root = "$Root".TrimEnd('\'); return ($Root -and ($p -eq $Root -or $p.StartsWith($Root + '\', [StringComparison]::OrdinalIgnoreCase))) }
+    $leaf = Split-Path $p -Leaf
+    $appRoot = Split-Path $PSScriptRoot -Parent
+    $userDir = [Environment]::GetFolderPath('UserProfile')
+    $usersRoot = Split-Path $userDir -Parent
+
+    if ($p.Length -le 3) { return (Out-Advice $false 'A whole drive.') }
+    if ($p -match '^[a-z]:\\(pagefile|swapfile)\.sys$') { return (Out-Advice $false "Windows' page file, which works alongside your memory. Windows looks after its size." "Windows' page file") }
+    if ($p -match '^[a-z]:\\hiberfil\.sys$') { return (Out-Advice $false "Windows' hibernation file, which lets the PC sleep deeply and start quickly. Windows looks after it." "Windows' hibernation file") }
+    if ($p -match '^[a-z]:\\DumpStack\.log') { return (Out-Advice $false 'A small log Windows keeps for when it crashes.') }
+    if ($p -match '^[a-z]:\\\$Recycle\.Bin') { return (Out-Advice $false "Your Recycle Bin. Empty it yourself when you're sure." 'Your Recycle Bin') }
+    if ($p -match '^[a-z]:\\(System Volume Information|Recovery|Config\.Msi|\$WinREAgent|\$SysReset|\$Windows\.~BT|\$Windows\.~WS|\$GetCurrent)(\\|$)') { return (Out-Advice $false 'Kept by Windows for recovery and updates.') }
+    if ($p -match '^[a-z]:\\Windows\.old(\\|$)') { return (Out-Advice $false 'Your previous version of Windows. Remove it in Settings > System > Storage > Temporary files, which does it safely.' 'Your previous Windows') }
+    if (Test-Under $env:WINDIR) { return (Out-Advice $false 'Windows itself. Quietpane never touches it.' 'Windows itself') }
+    if ($appRoot -and (Test-Under $appRoot)) { return (Out-Advice $false 'Quietpane itself.' 'Quietpane') }
+    if ($p -match '\\steamapps(\\|$)') { return (Out-Advice $false 'A Steam game, or its files. Uninstall it in Steam, so Steam knows it has gone.' 'Steam games') }
+    if ($p -match '\\(Epic Games|EA Games|XboxGames|Riot Games|GOG Galaxy\\Games|Ubisoft Game Launcher\\games)(\\|$)') { return (Out-Advice $false "A game. Uninstall it in the launcher it came from, so the launcher knows it has gone." 'Games') }
+    foreach ($root in $env:ProgramFiles, ${env:ProgramFiles(x86)}) {
+        if ($root -and (Test-Under $root)) { return (Out-Advice $false 'Installed programs. Remove them in Settings > Apps > Installed apps, so they are removed properly.' 'Installed programs') }
+    }
+    if (Test-Under $env:ProgramData) { return (Out-Advice $false 'Settings and data your programs share. Moving them could break those programs.' 'Shared program data') }
+    if ($p -match '\\AppData(\\|$)') { return (Out-Advice $false "Your apps' settings and caches. The list above clears the parts that are safe to clear." "Apps' settings and caches") }
+    # ".codex", ".vscode", ".cache"... in your own folder: where tools keep their settings and parts.
+    if ($p -match ('^' + [regex]::Escape($userDir.TrimEnd('\')) + '\\\.[^\\]+')) { return (Out-Advice $false "An app's own settings and parts (its folder name starts with a dot). Remove the app itself to remove it properly." "An app's own folder") }
+    if ($p -eq $usersRoot.TrimEnd('\')) { return (Out-Advice $false 'Everyone who uses this PC has a folder in here.' 'Accounts on this PC') }
+    if ((Test-Under $usersRoot) -and -not (Test-Under $userDir)) {
+        if ($leaf -eq 'Public' -or (Split-Path $p -Parent) -ne $usersRoot.TrimEnd('\')) { return (Out-Advice $false "Files that belong to another account on this PC, or shared by everyone. Quietpane leaves them to their owner.") }
+        return (Out-Advice $false "Another person's files on this PC. Quietpane leaves them to their owner." 'Another account')
+    }
+    if ($p -eq $userDir.TrimEnd('\')) { return (Out-Advice $false 'Your own folder. Open it to pick what to move.' 'Your files') }
+    $main = @('Desktop', 'MyDocuments', 'MyMusic', 'MyPictures', 'MyVideos') | ForEach-Object { [Environment]::GetFolderPath($_) }
+    $main += @('Downloads', 'Saved Games', 'Contacts', 'Favorites', 'Links', 'Searches', '3D Objects', 'OneDrive') | ForEach-Object { Join-Path $userDir $_ }
+    $main += @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial)
+    foreach ($m in @($main | Where-Object { $_ })) { if ($p -eq $m.TrimEnd('\')) { return (Out-Advice $false 'One of your main folders. Open it to pick what to move.') } }
+    foreach ($i in @($Installed | Where-Object { $_ -and $_.Path })) {
+        if (Test-Under $i.Path) { return (Out-Advice $false "Part of $($i.Name). Uninstall it in Settings > Apps > Installed apps (or the launcher it came from), so it is removed properly." $i.Name) }
+        if ("$($i.Path)".StartsWith($p + '\', [StringComparison]::OrdinalIgnoreCase)) { return (Out-Advice $false "It holds $($i.Name). Uninstall that first, so it is removed properly." "Holds $($i.Name)") }
+    }
+    if ($NearProgram) { return (Out-Advice $false 'It holds a program, or sits with one, so moving it could stop that program working. Open the folder and decide there.' 'Holds a program') }
+    $cloudNote = ''
+    foreach ($c in @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial | Where-Object { $_ })) {
+        if (Test-Under $c) { $cloudNote = 'It is in OneDrive, so moving it also removes it from your other devices.' }
+    }
+    return (Out-Advice $true '' $cloudNote)
+}
+
+function Invoke-QpSpaceRecycle {
+    <#
+        Moves one folder or file you picked to the Recycle Bin, after checking again that it's yours to
+        move and that the bin can hold it. Nothing is ever deleted for good.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [int64]$SizeBytes = -1, [bool]$NearProgram = $false)
+    $name = Split-Path $Path -Leaf
+    $advice = Get-QpSpaceAdvice -Path $Path -Installed (Get-QpInstallPlaces) -NearProgram $NearProgram
+    if (-not $advice.CanRecycle) {
+        Write-QpLog "$name stays where it is: $($advice.Why)" 'WARN'
+        return [pscustomobject]@{ Ok = $false; Note = $advice.Why }
+    }
+    if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject]@{ Ok = $false; Note = 'It is not there any more. Look again to bring the list up to date.' } }
+    if ($SizeBytes -lt 0) { $SizeBytes = if (Test-Path -LiteralPath $Path -PathType Container) { Get-QpSize @($Path) } else { (Get-Item -LiteralPath $Path -Force).Length } }
+    $limit = Get-QpRecycleBinLimit $Path
+    if ($limit -le 0 -or $SizeBytes -gt $limit) {
+        $why = if ($limit -gt 0) { "It's bigger than your Recycle Bin can hold ($(Format-QpBytes $limit)), so Windows would delete it for good. Quietpane won't. If you're sure, delete it yourself in File Explorer." }
+               else { "The Recycle Bin is switched off on that drive, so Windows would delete it for good. Quietpane won't." }
+        Write-QpLog "$name stays where it is: $why" 'WARN'
+        return [pscustomobject]@{ Ok = $false; Note = $why }
+    }
+    $own = -not $script:Session
+    if ($own) { Start-QpSession 'space' }
+    try {
+        if (Move-QpToRecycleBin -Path $Path -SizeBytes $SizeBytes) {
+            Add-QpUndo @{ Type = 'Recycled'; Path = $Path; Items = 1 }
+            Add-QpTotals -SpaceBytes $SizeBytes
+            Write-QpLog ("Moved {0} ({1}) to the Recycle Bin. It stays there until you empty the bin, so you can still put it back." -f $name, (Format-QpBytes $SizeBytes)) 'OK'
+            return [pscustomobject]@{ Ok = $true; Note = '' }
+        }
+        $note = 'It could not be moved - something may be using it. Close it and try again. Anything that did move is in the Recycle Bin.'
+        Write-QpLog "$name : $note" 'WARN'
+        return [pscustomobject]@{ Ok = $false; Note = $note }
+    } finally { if ($own) { Stop-QpSession } }
 }
 
 #endregion
@@ -1614,14 +2395,27 @@ function Get-QpState {
         Read-only. Battery and drive health aren't here: the Health tab reads those itself, when open.
     #>
     Start-QpStateCache
+    $problems = New-Object System.Collections.ArrayList
+    # Each part stands on its own: if one cannot be read on this PC, the rest of the window still works
+    # and the part that failed says so, rather than leaving the whole window empty.
+    function Read-Part([string]$What, [scriptblock]$Body, $Fallback) {
+        try { return (& $Body) }
+        catch {
+            [void]$problems.Add($What)
+            Write-QpLog "Could not read $What : $($_.Exception.Message)" 'WARN'
+            return $Fallback
+        }
+    }
     try {
         @{
-            Privacy = Get-QpPrivacyStatus
-            Vendors = @(Get-QpVendorStatus)
-            Apps    = @(Get-QpBloatApps)
-            Startup = @(Get-QpStartupItems)
-            Cleanup = @(Get-QpCleanupTargets)
-            Restore = @(Get-QpRestorePoints)
+            Privacy  = Read-Part 'the privacy settings' { Get-QpPrivacyStatus } @{}
+            Vendors  = Read-Part 'the brand extras' { @(Get-QpVendorStatus) } @()
+            Apps     = Read-Part 'the installed apps' { @(Get-QpBloatApps) } @()
+            Startup  = Read-Part 'what starts at sign-in' { @(Get-QpStartupItems) } @()
+            Devices  = Read-Part 'camera, microphone and location use' { @(Get-QpDeviceUse) } @()
+            Cleanup  = Read-Part 'what can be cleaned up' { @(Get-QpCleanupTargets) } @()
+            Restore  = Read-Part 'the restore points' { @(Get-QpRestorePoints) } @()
+            Problems = @($problems)
         }
     } finally { Stop-QpStateCache }
 }
@@ -2140,7 +2934,7 @@ function Invoke-QpRemediate {
                 return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Removed'; Ok = $true; Note = 'In your Recycle Bin. Empty the bin to finish the job, or restore it from there.' }
             }
             Write-QpAudit -FindingId $Finding.Id -Action 'RecycleBin' -Result 'Failed' -Object $Finding.Path -Note 'move failed'
-            return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'It could not be moved - it is probably in use. Close what is using it, or restart and try again.' }
+            return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'It could not be moved - it is probably in use, or bigger than the Recycle Bin can hold. Close what is using it and try again, or use Quarantine.' }
         }
         # Delete: gone for good, and only ever when the window has asked outright.
         if (-not $Force) { return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'Permanent deletion has to be confirmed first.' } }
@@ -2854,7 +3648,11 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpPrivacyStatus, Invoke-QpPrivacy,
     Get-QpBloatApps, Invoke-QpRemoveApps,
     Get-QpStartupItems, Invoke-QpStartup, Set-QpStartupApproved, Get-QpStartupAdvice,
-    Get-QpCleanupTargets, Invoke-QpCleanup,
+    Get-QpDeviceUse, Invoke-QpDeviceAccess, Format-QpWhen,
+    Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpRecycleBinLimit, Move-QpToRecycleBin,
+    Get-QpSpaceUse, Get-QpSpaceAdvice, Invoke-QpSpaceRecycle, Get-QpInstallPlaces,
+    Get-QpShortcutPaths, Test-QpShortcuts, New-QpShortcuts, Remove-QpShortcuts, Initialize-QpShortcut,
+    Get-QpConnections, Get-QpAddressLabel, Test-QpPrivateAddress,
     Get-QpVendorStatus, Invoke-QpVendor, Invoke-QpVendorUninstall,
     Get-QpDefenderState, Get-QpDefenderFindings, Invoke-QpThreatScan, Invoke-QpRemediate, Get-QpAllowList, Resolve-QpThreatInfo, New-QpFinding,
     New-QpDonutSvg, New-QpReportHtml, Get-QpFileHash,
