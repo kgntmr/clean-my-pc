@@ -321,7 +321,7 @@ function Add-Option {
 # 0. Home - the one-click screen for everyone
 $homePanel = New-TabPage 'Home' 'home' ''
 [void]$homePanel.Children.Add((New-Text 'Make this PC yours again.' 28 'SemiBold' '#0F1B1C' '0,4,0,6' 'Fraunces, Georgia'))
-[void]$homePanel.Children.Add((New-Text 'One click switches off the tracking and ads, clears out apps you never asked for and frees up space. Only the safe, recommended bits - and you can undo all of it.' 14.5 'Normal' '#4B5B5C' '0,0,0,18'))
+[void]$homePanel.Children.Add((New-Text 'One click switches off the tracking and ads, clears out apps you never asked for and frees up space. Only the safe, recommended bits, and you can put it all back.' 14.5 'Normal' '#4B5B5C' '0,0,0,18'))
 
 function New-Card([string]$Title) {
     $b = New-Object System.Windows.Controls.Border
@@ -488,7 +488,7 @@ $btnHomeScan.Margin = Get-Thick '0,0,12,8'
 [void]$homeButtons.Children.Add($btnOneClick)
 [void]$homeButtons.Children.Add($btnHomeScan)
 [void]$homePanel.Children.Add($homeButtons)
-$homeHint = New-Text 'You will see exactly what is about to change before it happens, you can undo all of it, and files only ever go to your Recycle Bin.' 12.5 'Normal' '#4B5B5C' '0,6,0,0'
+$homeHint = New-Text 'You will see exactly what is about to change before it happens. Settings can be undone, cleaned-up files go to your Recycle Bin, and removed apps can be reinstalled from the Microsoft Store.' 12.5 'Normal' '#4B5B5C' '0,6,0,0'
 [void]$homePanel.Children.Add($homeHint)
 $homeDisclaimer = New-Text 'A good start, not a guarantee: this tidies up the usual troublemakers, but it cannot promise a PC is clean. If yours still feels wrong afterwards, run a deeper scan with a dedicated security tool too.' 12.5 'Normal' '#9A6700' '0,8,0,0'
 [void]$homePanel.Children.Add($homeDisclaimer)
@@ -712,10 +712,10 @@ $aboutTitle.VerticalAlignment = 'Center'
 foreach ($line in @(
         'Collects nothing: no accounts, analytics, telemetry, crash reports, ads, cookies or tracking.',
         'Connects to nothing: the app makes no network requests. Links only open when you click them.',
-        'Changes nothing without you: every change is previewed, confirmed, recorded and can be undone.',
-        'Tidying up never deletes for good: files go to your Recycle Bin and scheduled tasks are switched off, not deleted. Only a threat you choose to delete is gone for good, and we ask twice first.',
-        'Hides nothing: plain-text PowerShell you can read line by line. No installer, nothing hidden.',
-        'Free and open source under the MIT License. Not affiliated with Microsoft, NVIDIA, Intel or Google.')) {
+        'Changes nothing without you: every change is shown first and confirmed, and settings go into a restore point you can undo.',
+        'Tidying up never deletes for good: files go to your Recycle Bin and scheduled tasks are switched off, not deleted. Three things can''t be undone - removing an app (the Microsoft Store has it), uninstalling a brand extra, and deleting a threat for good - and the app says so before you confirm.',
+        'Hides nothing: plain-text PowerShell you can read line by line, plus a few lines of C# that ask the graphics driver for its temperature. No installer.',
+        'Free and open source under the MIT License. Not affiliated with Microsoft, NVIDIA, Intel, AMD, Google or any PC maker.')) {
     [void]$aboutPanel.Children.Add((New-Text ('-  ' + $line) 13 'Normal' '#0F1B1C' '4,4,0,0'))
 }
 
@@ -2053,7 +2053,8 @@ function Show-Welcome {
     if (Test-Path $acceptFile) { return $true }
     $msg = "Hello, and welcome to Quietpane $($info.Version).`n`n" +
            "Nothing leaves this PC, and nothing changes until you press a button.`n" +
-           "Whatever you change, you can undo. Files only go to the Recycle Bin.`n" +
+           "Settings you change can be undone, and cleaned-up files go to the Recycle Bin.`n" +
+           "Anything that can't be undone tells you so before you confirm it.`n" +
            "It is free, open source, and comes with no warranty - use it on PCs that are yours to look after.`n`n" +
            "The full privacy policy and terms are in the About tab. Sound good?"
     if ([System.Windows.MessageBox]::Show($window, $msg, 'Quietpane', 'YesNo', 'Information') -ne 'Yes') { return $false }

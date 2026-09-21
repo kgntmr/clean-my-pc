@@ -18,7 +18,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.9.0'
+$script:AppVersion  = '1.9.1'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -1424,7 +1424,7 @@ function Invoke-QpCleanup {
     if ($Preview) {
         Write-QpLog ("Preview finished. About {0} could be freed." -f (Format-QpBytes $total)) 'OK'
     } else {
-        Write-QpLog ("About {0} moved to the Recycle Bin. Empty the Recycle Bin yourself when you are happy - this tool never permanently deletes." -f (Format-QpBytes $total)) 'OK'
+        Write-QpLog ("About {0} moved to the Recycle Bin. Empty the Recycle Bin yourself when you are happy - clean-up never deletes anything for good." -f (Format-QpBytes $total)) 'OK'
         Add-QpTotals -SpaceBytes $total
         if ($own) { Stop-QpSession }
     }

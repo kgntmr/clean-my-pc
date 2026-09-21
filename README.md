@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Take your Windows PC back.</b><br>
-  Switch off the tracking, clear out the bloat your PC came with, free up space. Everything happens on your PC, and nothing leaves it.<br><br>
+  Switch off tracking, clear out the bloat your PC came with, and free up space. Everything happens on your PC, and nothing leaves it.<br><br>
   Developed by <a href="https://www.komodoworks.com"><b>KomodoWorks.com</b></a> &middot; Free &amp; open source (MIT) &middot; Windows 10 / 11
 </p>
 
@@ -14,21 +14,17 @@
   <a href="https://github.com/kgntmr/quietpane/releases/latest/download/Quietpane.zip"><b>⬇&nbsp;&nbsp;Download Quietpane</b></a> &nbsp;(one small ZIP file)
 </p>
 
----
-
-## Get started in 3 steps
-
-1. **[Download Quietpane](https://github.com/kgntmr/quietpane/releases/latest/download/Quietpane.zip)**.
-2. **Unzip it:** right-click the downloaded **Quietpane.zip** → **Extract All** → **Extract**. *It can't start from inside the ZIP.*
-3. In the new **Quietpane** folder, double-click **Start Quietpane**, then press **Quiet my PC now**.
-
-It tells you what it will do before it does anything, takes about a minute, and has an **Undo everything** button. You never need to open the *App files* folder.
-
-> **A good start, not a guarantee.** Quietpane tidies up the usual troublemakers and switches off tracking you never agreed to. It can't promise a PC is clean. If yours still feels wrong afterwards, run a deeper scan with a dedicated security tool as well.
-
 <p align="center"><img src="docs/screenshot-home.png" width="820" alt="Quietpane home screen with one big 'Quiet my PC now' button"></p>
 
-**Windows will ask a few questions first.** That's normal for new free software:
+## Get started
+
+1. **[Download Quietpane](https://github.com/kgntmr/quietpane/releases/latest/download/Quietpane.zip)**.
+2. **Unzip it:** right-click **Quietpane.zip** → **Extract All** → **Extract**. It can't start from inside the ZIP.
+3. In the new folder, double-click **Start Quietpane**, then press **Quiet my PC now**.
+
+It shows what it will do before doing anything, takes about a minute, and **Undo everything** puts it all back. You need Windows 10 or 11 and an administrator account. Nothing is installed.
+
+Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a few questions first:
 
 | Windows says | Click |
 |---|---|
@@ -36,141 +32,86 @@ It tells you what it will do before it does anything, takes about a minute, and 
 | "Do you want to run this file?" | **Run** |
 | "Do you want to allow this app to make changes?" | **Yes** |
 
-Quietpane isn't digitally signed yet, so Windows doesn't recognise the publisher. We've applied for free code signing (see [Code Signing Policy](#code-signing-policy)). Every file is plain text you can read in Notepad.
+Just want a check-up that changes nothing? Double-click **Safety scan only** instead.
 
-**Opened a window full of code, or Windows asked "How do you want to open this file?"** You opened one of the app's own files. Close it, pick nothing, and double-click **Start Quietpane** instead.
+> **A good start, not a guarantee.** Quietpane tidies up the usual troublemakers, but it can't promise a PC is clean. If yours still feels wrong, run a deeper scan with a dedicated security tool too.
 
-Just want a check-up that changes nothing? Double-click **Safety scan only**. Want to be sure your download is genuine? [Here's how](SECURITY.md#check-that-your-download-is-genuine).
+## How it treats your PC
 
-**Requirements:** Windows 10 or 11 and an administrator account. Nothing is installed.
-
----
-
-## Why this exists
-
-Almost everything on a modern PC reports home: Windows, browsers, graphics drivers, and the software your laptop maker pre-installed. Most people never knowingly agreed to any of it, and plenty of "cleaner" tools collect data of their own.
-
-- 🔒 **Collects nothing.** No accounts, analytics, telemetry, crash reports, ads or tracking.
-- 🌐 **Connects to nothing.** No network requests at all: [verify it yourself](#verify-it-yourself).
-- 👀 **Tells you first.** Every item explains what it does and its side effects, and **Preview** shows exactly what would change.
-- ↩️ **Can be undone.** Every change creates a restore point, and tidying up only ever moves files to your Recycle Bin. Only a threat you choose to delete for good is gone for good, and you're asked twice.
-- 📖 **Hides nothing.** Plain-text PowerShell (plus a few readable lines of C# that ask the graphics driver for its temperature), no installer, no `.exe`, no obfuscation.
-- 🛡️ **Leaves your security alone.** Defender, SmartScreen, the firewall and Windows Update are never touched.
-
-It grew out of a real clean-up of a gaming laptop, where adware kept re-installing itself from a scheduled task that came in with a cracked game. Those [lessons](docs/LESSONS-LEARNED.md) are built into the tool.
-
----
+- **Collects nothing, connects to nothing.** No accounts, analytics, telemetry or ads, and no network requests at all. [Check for yourself](#verify-it-yourself).
+- **Tells you first.** Every item explains what it does and its side effects, and **Preview** shows exactly what would change.
+- **Can be undone.** Changes go into a restore point, and clean-up only moves files to your Recycle Bin. The three exceptions say so before you confirm: removing an app, uninstalling a brand extra, and deleting a threat for good.
+- **Leaves your security alone.** Defender, SmartScreen, the firewall and Windows Update are never touched.
+- **Hides nothing.** Plain-text PowerShell you can read, plus a few lines of C# that ask the graphics driver for its temperature. No installer, no `.exe`.
 
 ## What's inside
 
-### Home
-Cards show what could be better on this PC, a bar shows free space, and one button does the lot. **Quiet my PC now** applies only the recommended items that aren't done yet, all inside **one** restore point, so **Undo everything** really does undo everything. It never uninstalls a program on its own.
+**Home.** Cards show what could be better, and **Quiet my PC now** applies the recommended items that aren't done yet, all in one restore point, so **Undo everything** really does undo everything. It never uninstalls a program on its own. If a Windows update switches things back on, Home says what came back and offers to switch exactly those off again.
 
-**If things switch themselves back on**, Home says so next time you open it: which settings, apps or startup items came back, since when, and whether Windows updated in between, which is the usual reason. Big Windows updates are known to do this. **Switch them off again** changes exactly those items and nothing else, and **That was me** leaves them be.
+**Health.** How hard the processor, graphics card and memory are working, how warm they are, and which programs are using them most, updated every 2 seconds while the tab is open. Also the battery's charge and how much it holds compared with new, and the drive's health, wear and temperature. The graphics temperature comes from the driver, as in Task Manager. The processor's comes from Windows' thermal sensor, so treat it as a guide: reading the chip itself would need a kernel driver, and Quietpane won't install one. Anything a PC doesn't share says **not shared**.
 
-### Health
-How hard the processor, graphics card and memory are working right now, how warm they are, and which programs are using them most, every 2 seconds and only while the tab is open. On a laptop, the battery's charge and how much it holds compared with when it was new. And the drive Windows runs from: Windows' own verdict on it, how much of its rated life it has used, and its temperature.
+**Safety scan.** Asks Microsoft Defender what it has found, and looks for the tricks adware uses: odd startup entries and tasks, hijacked network settings, unsigned or tampered programs, cracked-software traces, browser add-ons and notification spam. For anything suspicious, it also shows the folders created at the same moment, which is usually the culprit. Looking changes nothing.
 
-Temperatures come from Windows' own thermal sensor and from the graphics driver, which is the same reading Task Manager shows. Reading a processor's core sensors needs a kernel driver, and Quietpane won't install one, so the processor figure is a guide. If Windows starts holding the processor back to cool it down, the tile says so - the usual reason a game suddenly stutters. Anything a PC doesn't share says **not shared** instead of guessing.
+Every finding says who found it: **Microsoft Defender** (a real detection, named by Defender and explained in plain words) or a **Quietpane check** (a signal, not proof, and never a malware family). You decide what happens: let Defender handle it, quarantine it (you can put it back), move it to the Recycle Bin, or delete it for good (you're asked twice). **Leave it for now** never creates a Defender exclusion. Windows' own folders are refused, and every action is logged.
 
-### Telemetry: the extras your PC came with
-Laptop makers and chip makers leave software running in the background. Quietpane looks for what's actually on **your** PC and lists only that, so nothing shows up for brands you don't have.
+**Privacy.** 32 settings in five sections: Windows telemetry, privacy, ads and tips, background services, and browsers and other software (Edge, Chrome, Office, VS Code and more). Anything already done says so.
 
-Supported today: **NVIDIA, Intel, AMD, MSI, ASUS, Dell, HP, Lenovo, Acer**. For each one it can switch off background reporting, auto-updaters and scanning helpers. **Drivers are never touched and the brand's own app still works.** Extras that are safe to remove, like an offers app, are listed separately and unticked: Quietpane removes one only if you tick it and confirm, and it warns you first that an uninstall can't be undone. Adding a brand needs no code, just an entry in [`src/catalog/vendors.psd1`](src/catalog/vendors.psd1).
+**Telemetry.** The background extras your PC's makers left running (NVIDIA, Intel, AMD, MSI, ASUS, Dell, HP, Lenovo, Acer), listed only if they're actually on your PC. It switches off reporting, updaters and helpers; drivers are never touched and the brand's own app still works. Extras you could remove are left unticked, and Quietpane warns you before removing one because that can't be undone.
 
-NVIDIA is a special case: deleting its telemetry plugin breaks NVIDIA App, so Quietpane blocks the telemetry servers instead. We [found that out the hard way](docs/LESSONS-LEARNED.md#nvidia-app-telemetry-cannot-be-deleted).
+**Apps.** *Starts when you sign in:* switch items off the way Task Manager does, with Undo; Windows Security and driver helpers are never offered. *Apps you could remove:* known bloat only. The Store, Camera, Photos, Calculator, Notepad, Paint and Snipping Tool are never on the list.
 
-### Privacy
-32 settings in five collapsed sections: Windows telemetry, privacy, ads and tips, background services, and browsers and other software (Edge, Chrome, Office, Intel DTT, VS Code, .NET and PowerShell). Anything already done says so.
+**Free up space** moves temp files, crash dumps, caches and old installers to the Recycle Bin. **Undo** puts back every recorded change. **About** holds the policies, readable offline.
 
-### Safety scan
-Two things at once: **what Microsoft Defender has found**, and Quietpane's own look around for the tricks adware uses. Looking changes nothing.
+## What it deliberately doesn't do
 
-While it runs, a line shows which step it's on, what it's looking at, how many things it has seen and how long it's been going. **Stop** ends it cleanly at the next safe point, changes nothing and writes no report.
-
-Results come back as a doughnut chart with a written legend, and a card for each finding. Click a severity to show only those. Every card says **who found it** and **how sure that is**:
-
-- **Microsoft Defender** - a real detection with a real threat name. Quietpane translates the name into plain words and sorts it into Critical, High, Medium, Low or Info. Defender's own name and classification stay on the card.
-- **Quietpane check** - our own heuristics: odd startup entries, hidden tasks, tampered programs, cracked-software traces. These are **signals, not proof**, and they never claim a malware family.
-
-Each finding with a real file behind it gets three buttons:
-
-- **Remove it** asks how: let **Defender** handle it (safest, and Windows Security can restore it), **quarantine** it with Quietpane, move it to the **Recycle Bin**, or **delete it permanently**. Permanent deletion is the only thing Quietpane cannot undo, so it asks twice and says so plainly.
-- **Quarantine** moves the file somewhere it cannot run. The original path, times and SHA256 are recorded, the folder is locked to administrators, and **Put it back** restores the file byte-for-byte after checking the hash still matches. Quarantined items are listed in the same tab.
-- **Leave it for now** warns that it stays on the PC. It's a note in Quietpane only: **it never creates a Defender exclusion** and never weakens a future scan.
-
-Before anything is moved or deleted, Quietpane re-checks that the file is still there and still the same file, and refuses outright in Windows, Program Files and driver folders. Every action, including every failure, is written to `%ProgramData%\Quietpane\audit.log`.
-
-When it's done, a short summary says what was looked at, what was found by severity, what you've dealt with so far - removed, quarantined, recycled, deleted, left alone, or failed - and the one thing worth doing next.
-
-**Quietpane cannot identify a malware family by itself.** Without Defender, only the heuristics run, and the scan says so rather than implying the PC is clean.
-
-| Check | What it looks for |
+| Left alone | Why |
 |---|---|
-| Microsoft Defender detections | Everything Defender has found, quarantined or removed, named by Defender and explained in plain words |
-| Startup entries and tasks | Items that open websites, run hidden scripts or re-create themselves. Entries pointing to programs that no longer exist are flagged as leftovers. |
-| **"What installed this?"** | For anything suspicious, the folders created within 3 minutes of it. That's usually the culprit. |
-| Hidden persistence | WMI event consumers, IFEO hijacks, Winlogon changes, AppInit_DLLs |
-| Network | Hosts-file redirects, proxies, DNS servers |
-| Files | Unsigned programs in user folders, **modified signed programs**, traces of cracked software |
-| Browsers | Extensions that can read every site, and sites allowed to push notifications |
-| Security and privacy | Defender status, suspicious exclusions, firewall, settings still switched on |
-| Brand software | What your laptop and chip makers left running, and extras you could remove |
-| Performance and space | Memory use, what really starts at sign-in, space you could reclaim, folders nothing has touched in 6+ months |
-
-### Apps: what starts when you sign in, and what you could remove
-**Starts when you sign in** lists what launches by itself, from the usual startup places, the Startup folders and Store apps, with who made it and a plain word on whether it's safe to switch off. Switching an item off works exactly like Task Manager: the program is untouched and still opens when you start it, and **Undo** turns it back on. Windows Security and the helpers your sound, touchpad and Bluetooth drivers need are never offered, and if one of them has been switched off, Quietpane says so kindly. Startup is never part of one-click: what you want at sign-in is your call.
-
-**Apps you could remove** offers only known bloat that's actually installed; Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool and anything driver-related are never offered.
-
-### Free up space, Undo, About
-**Free up space** lists temp files, crash dumps, caches and old installers with their sizes, and moves them to the Recycle Bin. **Undo** restores services, tasks, registry values, startup items, environment variables, VS Code settings and hosts entries exactly as they were. **About** holds the policies, readable offline.
-
----
+| Defender, SmartScreen, firewall, Windows Update | Your security and updates come first |
+| Drivers, audio and chipset software | Your hardware has to keep working |
+| The global "background apps off" switch | It breaks notifications for Store apps |
+| Blocking Microsoft servers in the hosts file | It breaks Windows Update, the Store and Defender |
+| Deleting NVIDIA's telemetry plugin | It breaks NVIDIA App, so the servers are blocked instead ([why](docs/LESSONS-LEARNED.md#nvidia-app-telemetry-cannot-be-deleted)) |
+| Removing Microsoft Edge | Windows blocks it outside the EEA, and WebView2 must stay |
 
 ## Verify it yourself
 
-**1. Read it.** The whole app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The only non-PowerShell code is a short C# block in the engine that asks the graphics driver three read-only questions: list the adapters, ask each one, close it. It's compiled on your PC from that same readable text.
+1. **Read it.** The app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The only non-PowerShell code is a short C# block in the engine. It asks the graphics driver three read-only questions: list the adapters, ask each one, close it.
+2. **Search for network code.** In the folder, run:
+   ```powershell
+   Select-String -Path .\Quietpane.ps1, .\src\Quietpane.psm1 -Pattern 'Invoke-WebRequest|Invoke-RestMethod|WebClient|HttpClient|BitsTransfer|TcpClient|curl|wget|DownloadString'
+   ```
+   You'll find exactly two matches: the scanner's **detection patterns** in `src/Quietpane.psm1`, which are text it looks *for* in malicious startup entries, not network calls.
+3. **Watch it.** Open **Resource Monitor** (`resmon`) → **Network** while you use the app. Nothing connects. Your browser opens only when **you** click a link.
+4. **See what it keeps.** `%ProgramData%\Quietpane` holds restore points and their logs, the audit log, the quarantine, and a few small notes (see the [Privacy Policy](PRIVACY.md)). Scan reports go on your Desktop. Delete any of it whenever you like.
 
-**2. Search for network code.** In the folder, run:
-```powershell
-Select-String -Path .\Quietpane.ps1, .\src\Quietpane.psm1 -Pattern 'Invoke-WebRequest|Invoke-RestMethod|WebClient|HttpClient|BitsTransfer|TcpClient|curl|wget|DownloadString'
-```
-You'll find exactly two matches, both in `src/Quietpane.psm1`, where `$suspiciousCmd` and `$suspiciousTask` are defined. They are the scanner's **detection patterns** - text it looks *for* in malicious startup entries, not network calls.
+## FAQ
 
-**3. Watch it.** Open **Resource Monitor** (`resmon`) → **Network** while you use the app. Nothing connects. Only your browser goes online, and only when **you** click a link.
+**A window full of code opened, or Windows asked "How do you want to open this file?"**
+You opened one of the app's own files. Close it, pick nothing, and double-click **Start Quietpane** instead.
 
-**4. See what it keeps.** Restore points, logs and a small totals file live in `%ProgramData%\Quietpane`, and scan reports on your Desktop. Delete them whenever you like.
+**Chrome or Edge says "Managed by your organization".**
+That appears whenever a browser policy is set, which is how the telemetry switches are locked. Nobody controls your browser, and Undo removes the policies.
 
----
+**Windows still says diagnostic data is "Required".**
+Windows Home and Pro can't go below Required. Switching off the DiagTrack service is what actually stops it, and Quietpane does that.
 
-## What it deliberately does *not* do
+**Some items say [not on this PC].**
+That service, task or program isn't on your Windows version, or is already gone.
 
-| Not touched | Why |
-|---|---|
-| Defender, SmartScreen, firewall | Security |
-| Windows Update | Keeps updates safe |
-| Drivers, audio and chipset software | Your hardware has to keep working |
-| The global "background apps off" switch | Breaks notifications for packaged apps |
-| Blocking Microsoft servers in the hosts file | Breaks Windows Update, the Store and Defender |
-| Deleting NVIDIA's telemetry plugin | Breaks NVIDIA App. Its servers are blocked instead. |
-| Removing Microsoft Edge | Windows blocks it outside the EEA, and WebView2 must stay |
-| Deleting anything behind your back | Clean-up and bloat removal always use the Recycle Bin. A confirmed threat can be deleted for good, but only when you pick that yourself and confirm it. |
+**Is my download genuine?**
+Only download from this repository's [Releases](https://github.com/kgntmr/quietpane/releases) page. [Here's how to check the file](SECURITY.md#check-that-your-download-is-genuine).
 
-Windows Home and Pro treat "diagnostic data = 0" as "Required", so the switch that actually works is disabling the DiagTrack service, which this tool does. Big Windows updates can quietly turn tips back on: run it again afterwards.
+**How do I remove Quietpane?**
+Removing it doesn't undo its changes, so use **Undo** first if you want your PC back as it was. Then delete the Quietpane folder and any Quietpane-Report files on your Desktop. Your undo history stays in `C:\ProgramData\Quietpane` until you delete that too.
 
----
+## Privacy, terms and security
 
-## Privacy, terms & security
-
-- **[Privacy Policy](PRIVACY.md):** collects no personal data, makes no network connections.
-- **[Terms of Use](TERMS.md):** free, open source, provided as is. Irish law, consumer rights unaffected.
-- **[Security Policy](SECURITY.md):** reporting a vulnerability, and telling a genuine copy from a fake. **Only download from this repository's [Releases](https://github.com/kgntmr/quietpane/releases) page.**
+- **[Privacy Policy](PRIVACY.md):** collects no personal data and makes no network connections.
+- **[Terms of Use](TERMS.md):** free, open source, provided as is. Irish law; your consumer rights are unaffected.
+- **[Security Policy](SECURITY.md):** reporting a vulnerability, and telling a genuine copy from a fake.
 - **[License](LICENSE):** MIT.
 
 Quietpane is independent and not affiliated with or endorsed by Microsoft, NVIDIA, Intel, AMD or any PC maker. All trademarks belong to their owners.
-
----
 
 ## Code Signing Policy
 
@@ -187,42 +128,22 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 
 **Privacy:** This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. Details: [Privacy Policy](PRIVACY.md).
 
----
-
-## FAQ
-
-**Chrome or Edge says "Managed by your organization".**
-That appears whenever a browser policy is set, which is how the telemetry switches are locked. Nobody controls your browser, and Undo removes the policies.
-
-**Some items say [not on this PC].**
-That service, task or program isn't on your Windows version, or is already gone.
-
-**How do I remove Quietpane?**
-Removing it doesn't undo its changes: click **Undo** first if you want your PC back as it was. Then delete the Quietpane folder and any Quietpane-Report files on your Desktop. Nothing is installed, so that's all. Your undo history stays in `C:\ProgramData\Quietpane` until you delete that too.
-
----
-
 ## For developers
 
-- **Run from source:** clone and double-click `Start Quietpane.cmd` (or `Safety scan only.cmd`).
-- **Build the download:** `powershell -ExecutionPolicy Bypass -File tools\build-release.ps1` creates `dist\Quietpane.zip` and prints its SHA256. The ZIP holds exactly the files in this repo; nothing is compiled.
-- **Test safely:** `.\Quietpane.ps1 -SelfTest` builds the window without showing it; add `-Snapshot file.png -SnapshotTab 0` to render it.
-- **Run the tests:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`, or add `-Live` to include the EICAR check. No real malware is used anywhere; the EICAR string is built at runtime, so it is never stored in this repository.
-- **Include the quarantine tests:** they need administrator rights, and `-ExecutionPolicy Bypass` doesn't grant them - without an elevated window those six are skipped. Paste this into an ordinary PowerShell window and answer **Yes**:
-
+- **Run from source:** clone the repository and double-click `Start Quietpane.cmd` (or `Safety scan only.cmd`).
+- **Build the download:** `powershell -ExecutionPolicy Bypass -File tools\build-release.ps1` creates `dist\Quietpane.zip` and prints its SHA256. The ZIP holds the app's files from this repository, unchanged; the tests and build tools are left out.
+- **Try the window safely:** `.\Quietpane.ps1 -SelfTest` builds it without showing it; add `-Snapshot file.png -SnapshotTab 0` to save a picture.
+- **Run the tests:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`, and add `-Live` for the EICAR check. No real malware is used anywhere, and the EICAR string is built at runtime, so it's never stored here. The six quarantine tests need administrator rights. From the repository folder, run this in an ordinary PowerShell window and answer **Yes**:
   ```powershell
-  Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','C:\Tools\quietpane\tests\Run-QuietpaneTests.ps1','-Live'
+  Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
   ```
-
-  An elevated window says "Administrator:" in its title bar and starts in `C:\WINDOWS\system32`. All 109 checks run there.
-- **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what a person still has to test in a browser and in the window, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files, and it makes no network requests.
-- **Contribute:** the lists are plain data files in [`src/catalog/`](src/catalog), so adding a setting, app, folder or brand needs no code. Describe side effects honestly and test with **Preview** first.
+  An elevated window says "Administrator:" in its title bar. All 109 checks run there.
+- **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what still needs a person, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files.
+- **Contribute:** the lists in [`src/catalog/`](src/catalog) are plain data, so adding a setting, app, folder, brand or startup note needs no code. Describe side effects honestly, and test with **Preview** first. The reasons behind a few design choices are in [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md).
 
 ---
 
 <p align="center">
   <a href="https://www.komodoworks.com"><img src="assets/komodoworks-logo.png" width="40" alt="KomodoWorks"></a><br>
-  <b>Developed by <a href="https://www.komodoworks.com">KomodoWorks.com</a></b><br>
-  An independent technology studio in Dublin, Ireland: websites and apps, business systems, AI integration and data analytics.<br>
-  Work directly with the person who scopes, builds and launches your project. &middot; <a href="https://komodoworks.com/en/contact">Get in touch</a>
+  <b>Developed by <a href="https://www.komodoworks.com">KomodoWorks.com</a></b>, an independent technology studio in Dublin, Ireland &middot; <a href="https://komodoworks.com/en/contact">Get in touch</a>
 </p>

@@ -7,10 +7,10 @@
 
     The quarantine tests need administrator rights, and -ExecutionPolicy Bypass does not grant them:
     without an elevated window those six are skipped. The reliable way to get one is to paste this into
-    an ordinary PowerShell window and answer Yes to the prompt Windows shows:
+    an ordinary PowerShell window, from the repository folder, and answer Yes to the prompt Windows shows:
 
         Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass',
-            '-File','C:\Tools\quietpane\tests\Run-QuietpaneTests.ps1','-Live'
+            '-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
 
     (all on one line). An elevated window says "Administrator:" in its title bar and starts in
     C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated: 109 checks run.

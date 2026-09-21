@@ -16,7 +16,7 @@ Security fixes go into the latest release.
 - The only official source is **[github.com/kgntmr/quietpane](https://github.com/kgntmr/quietpane)**, published by KomodoWorks ([komodoworks.com](https://www.komodoworks.com)).
 - Right now Quietpane is **only** distributed as plain-text PowerShell scripts in `Quietpane.zip`. **There is no `.exe` version.** Treat any `.exe`, installer or "cracked/pro" version claiming to be Quietpane as fake. If that ever changes, it will be announced here and in the [Code Signing Policy](README.md#code-signing-policy) first.
 - Because everything is plain text, you can read every line before running it. See [Verify it yourself](README.md#verify-it-yourself).
-- The ZIP is built with [`tools/build-release.ps1`](tools/build-release.ps1) and contains exactly the files in this repository. Nothing is compiled or added.
+- The ZIP is built with [`tools/build-release.ps1`](tools/build-release.ps1) and contains the app's files from this repository, unchanged (the tests and build tools are left out). Nothing in it is pre-compiled, and nothing is added.
 
 ## Check that your download is genuine
 Optional, and takes a minute. Each release lists the **SHA256 checksum** of `Quietpane.zip`, a fingerprint that changes if even one byte of the file is different.

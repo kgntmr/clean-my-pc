@@ -1,6 +1,6 @@
 # Terms of Use: Quietpane
 
-**Last updated: 19 September 2026**
+**Last updated: 21 September 2026**
 
 These terms explain, in plain language, how you may use Quietpane. The software itself is licensed under the [MIT License](LICENSE). Where these terms and the MIT License differ on copyright or licensing, the MIT License applies.
 
@@ -9,24 +9,32 @@ Quietpane is developed by **KomodoWorks**, an independent technology studio in D
 It is **free**. There's no purchase, no subscription, no account and no in-app offer.
 
 ## 2. What it does
-Quietpane can scan your computer (read-only), change Windows and application settings, disable services and scheduled tasks, remove pre-installed apps, add entries to the Windows hosts file, and move files to the Recycle Bin.
-**It only makes changes you have ticked and confirmed with "Apply".** Before that you can use "Preview" to see exactly what would change. Every applied change is recorded in a restore point that you can undo. Files are never permanently deleted by the app. You empty your own Recycle Bin.
+Quietpane can look at your computer without changing it (the Safety scan and the Health tab). When you choose to, it can also change Windows and application settings, switch off services, scheduled tasks and startup items, add entries to the Windows hosts file, remove pre-installed apps, run a program's own uninstaller, move files to the Recycle Bin, and deal with threats: ask Microsoft Defender to remove them, quarantine them, or delete them.
+
+**It only makes changes you have chosen and confirmed.** Before applying settings you can use "Preview" to see exactly what would change.
+
+Most changes are recorded in a restore point that you can undo, and clean-up only ever moves files to your Recycle Bin. Three things cannot be undone by Quietpane, and the app says so before you confirm them:
+- **removing an app** (you can reinstall it from the Microsoft Store);
+- **uninstalling a brand extra** (you can reinstall it from its maker);
+- **deleting a threat for good** (you're asked twice).
 
 ## 3. Using it responsibly
-- Use it only on computers you own or are authorised to administer. On a work or school computer, ask the administrator first, because changing settings may break your organisation's policies.
+- Use it only on computers you own or are authorised to administer. On a work or school computer, ask the administrator first, because changing settings may conflict with your organisation's policies.
 - Read each item's description, including its side effects, before applying it.
 - Keep backups of important files, as you would before any system change.
 - The app needs administrator rights, because the settings it changes are system settings.
 
 ## 4. No warranty
-Quietpane is provided free of charge, **"as is"**, without warranty of any kind, to the extent permitted by applicable law. Every PC is different, and Windows and third-party software updates can change how settings behave. We can't guarantee the app will suit your particular system.
+Quietpane is provided free of charge, **"as is"**, without warranty of any kind, to the extent permitted by applicable law. Every PC is different, and Windows and third-party updates can change how settings behave. We can't guarantee the app will suit your particular system.
+
+The Safety scan relies on Microsoft Defender and on Quietpane's own checks. **It cannot guarantee that a PC is free of malware**, and a finding from Quietpane's own checks is a signal, not proof. Readings on the Health tab come from Windows and your drivers, and may be approximate.
 
 ## 5. Liability
 To the fullest extent permitted by law, KomodoWorks is not liable for indirect or consequential loss, loss of data, or loss caused by third-party software or updates, arising from the use of this free software.
 **Nothing in these terms limits or excludes liability that cannot be limited or excluded by law**, including liability for fraud, or for death or personal injury caused by negligence. Nothing here affects your statutory rights as a consumer.
 
 ## 6. Third-party software and trademarks
-Windows, Microsoft Edge, Microsoft 365, Microsoft Office, Xbox and Visual Studio Code are trademarks of Microsoft. NVIDIA and GeForce are trademarks of NVIDIA. Intel is a trademark of Intel. Google Chrome is a trademark of Google. Other names belong to their owners.
+Windows, Microsoft Defender, Microsoft Edge, Microsoft 365, Microsoft Office, Xbox and Visual Studio Code are trademarks of Microsoft. NVIDIA and GeForce are trademarks of NVIDIA. Intel is a trademark of Intel. AMD and Radeon are trademarks of Advanced Micro Devices. Google Chrome is a trademark of Google. MSI, ASUS, Dell, HP, Lenovo, Acer and other names belong to their owners.
 **Quietpane is independent and is not affiliated with, endorsed by or sponsored by any of these companies.** It only uses settings, policies and uninstall mechanisms those products already provide. Your use of their software remains subject to their own terms.
 
 ## 7. Security

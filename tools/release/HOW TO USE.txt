@@ -2,80 +2,56 @@ Quietpane - HOW TO USE
 Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
 
 
-STEP 1 - UNZIP IT (important)
+1. UNZIP IT
    Quietpane cannot start from inside the zip file.
    Right-click Quietpane.zip  >  Extract All  >  Extract.
-   A new Quietpane folder opens.
 
-STEP 2 - START IT
+2. START IT
    In the new folder, double-click "Start Quietpane".
-   (You never need to open the "App files" folder.)
+   You never need to open the "App files" folder.
 
-   Windows may ask a few questions first. This is normal:
-   - "Windows protected your PC"          -> click "More info", then "Run anyway"
-   - "Do you want to run this file?"      -> click "Run"
-   - "Allow this app to make changes?"    -> click "Yes"
+   Quietpane isn't digitally signed yet, so Windows asks a few questions:
+   - "Windows protected your PC"          -> "More info", then "Run anyway"
+   - "Do you want to run this file?"      -> "Run"
+   - "Allow this app to make changes?"    -> "Yes"
 
-STEP 3 - CLICK ONE BUTTON
-   Click the big "Quiet my PC now" button, then "Yes".
-   It takes about a minute. Restart your PC when it says "All done!".
+3. CLICK ONE BUTTON
+   Click "Quiet my PC now", then "Yes". It shows what it will do first and
+   takes about a minute. Restart your PC when it says "All done!".
+   Your drivers are never touched.
 
-   It also quietens the extras your laptop maker left running - MSI, ASUS,
-   Dell, HP, Lenovo, Acer - and the Intel, AMD or NVIDIA reporting bits,
-   if your PC has any. Your drivers are never touched.
+
+ALSO IN THE APP
+   Health     How hard your PC is working, how warm it is, which programs
+              are busiest, and how the battery and drive are holding up.
+   Apps       Choose what starts when you sign in.
+   Undo       Changed your mind? Everything recorded can be put back.
+              Cleaned-up files are in your Recycle Bin.
 
    Open Quietpane again now and then. Big Windows updates sometimes switch
    things back on, and Home will tell you what came back.
 
+JUST WANT A CHECK-UP THAT CHANGES NOTHING?
+   Double-click "Safety scan only". For anything it finds, you choose what
+   happens next - nothing is removed behind your back.
 
 A GOOD START, NOT A GUARANTEE
    Quietpane clears out the usual troublemakers, but it cannot promise a
-   PC is clean. If yours still feels wrong afterwards, run a deeper scan
-   with a dedicated security tool too.
+   PC is clean. If yours still feels wrong, run a deeper scan with a
+   dedicated security tool too.
+
+A WINDOW FULL OF CODE OPENED?
+   You opened one of the app's own files. Close it (pick nothing if
+   Windows asks what to open it with) and double-click "Start Quietpane".
+
+REMOVING QUIETPANE
+   Removing it does not undo its changes, so use Undo first if you want
+   your PC back exactly as it was. Then delete the Quietpane folder and
+   any Quietpane-Report files on your Desktop. Nothing is installed.
+   Your undo history stays in C:\ProgramData\Quietpane - delete that too
+   once you're sure you won't need it.
 
 
-CHANGED YOUR MIND?
-   Click "Undo everything" straight away, or open Quietpane again later
-   and use the Undo tab. Files it cleaned are in your Recycle Bin.
-
-JUST WANT A CHECK-UP THAT CHANGES NOTHING?
-   Double-click "Safety scan only".
-
-   The check asks Microsoft Defender what it has found and looks around
-   for the tricks adware uses. Anything found is sorted into Critical,
-   High, Medium, Low or Info, and each item says who found it. Threat
-   names come from Defender - Quietpane explains them in plain words.
-   You choose what happens next; nothing is removed behind your back.
-   For anything it finds you can let Defender handle it, put it in
-   Quietpane's quarantine (and take it back out later), send it to the
-   Recycle Bin, or delete it for good. Only that last one cannot be
-   undone, and you are asked twice before it happens.
-
-   It says where it has got to while it works, and in the window "Stop"
-   ends it at any point without changing a thing. When it finishes, a
-   short summary says what it looked at, what it found, what you have
-   dealt with and the one thing worth doing next.
-
-A WINDOW FULL OF CODE OPENED, OR WINDOWS ASKED "HOW DO YOU WANT TO OPEN THIS FILE?"
-   You opened one of the app's own files. Close it (pick nothing) and
-   double-click "Start Quietpane" instead.
-
-WHY DOES WINDOWS SAY "UNKNOWN PUBLISHER"?
-   Quietpane is free and new, and is not digitally signed yet (we have
-   applied for free code signing). Every file is plain text, so anyone can
-   read exactly what it does.
-
-WANT TO REMOVE QUIETPANE?
-   Removing it does not undo its changes. If you want your PC back
-   exactly as it was, click "Undo" first. Then delete the Quietpane
-   folder (and any Quietpane-Report files on your Desktop).
-   Nothing is installed, so that is all.
-
-   Your undo history stays in C:\ProgramData\Quietpane. If you change
-   your mind later, download Quietpane again and use the Undo tab.
-   Delete that folder too once you are sure you won't need it.
-
-
-Questions:       info@komodoworks.com
-Website:         https://www.komodoworks.com
+Questions:  info@komodoworks.com
+Website:    https://www.komodoworks.com
 Source, privacy policy and terms:  https://github.com/kgntmr/quietpane
