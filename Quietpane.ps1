@@ -13,6 +13,8 @@
         .\Quietpane.ps1                          open the app (asks for administrator rights)
         .\Quietpane.ps1 -Scan                    run only the read-only scan and open the HTML report
         .\Quietpane.ps1 -Minimized               open on the taskbar, out of the way (used at sign-in)
+        .\Quietpane.ps1 -Minimized -Watch        the same, and check once for anything Windows switched
+                                                 back on - the taskbar icon gets a badge if something did
         .\Quietpane.ps1 -SelfTest                build the window without showing it (used for testing)
         .\Quietpane.ps1 -SelfTest -Snapshot x.png -SnapshotTab 1
                                                  also render the window to an image (used for screenshots)
@@ -22,6 +24,7 @@
 param(
     [switch]$Scan,
     [switch]$Minimized,
+    [switch]$Watch,
     [switch]$SelfTest,
     [string]$Snapshot,
     [int]$SnapshotTab = 0
@@ -40,6 +43,7 @@ if (-not $SelfTest -and -not (Test-IsAdmin)) {
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
     if ($Scan) { $argList += '-Scan' } else { $argList = @('-WindowStyle', 'Hidden') + $argList }
     if ($Minimized) { $argList += '-Minimized' }
+    if ($Watch) { $argList += '-Watch' }
     try {
         Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argList | Out-Null
     } catch {
@@ -95,6 +99,13 @@ if ($Scan) {
 }
 
 # ------------------------------------------------------------------ window
+# The accessibility improvements .NET has added since 4.7.1 (screen readers hearing status changes,
+# better keyboard focus, tooltips that also appear for the keyboard) are only on for apps that ask.
+# PowerShell doesn't, so Quietpane asks here - before the window's code is loaded, or it's too late.
+foreach ($switch in 'Switch.UseLegacyAccessibilityFeatures', 'Switch.UseLegacyAccessibilityFeatures.2',
+                    'Switch.UseLegacyAccessibilityFeatures.3', 'Switch.UseLegacyToolTipDisplay') {
+    try { [AppContext]::SetSwitch($switch, $false) } catch { }
+}
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 # Two things Windows has to be told before the first window exists, and neither changes anything on
@@ -114,7 +125,8 @@ if (-not $SelfTest) {
 }
 
 # KomodoWorks palette (from komodoworks.com): bg #FAF6EC, anchor #0F1B1C, accent #FFB627,
-# secondary #1FA187 / readable #117A68, error #A83232. Headings Fraunces, body Sora
+# secondary #1FA187 / readable #117A68, error #A83232. Muted text is #66706F, the lightest grey that
+# still passes WCAG AA (4.5:1) on the cream background. Headings Fraunces, body Sora
 # (falls back to Georgia / Segoe UI when those fonts are not installed - no web fonts are downloaded).
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -128,6 +140,32 @@ if (-not $SelfTest) {
     <SolidColorBrush x:Key="Line" Color="#E6DFCC"/>
     <SolidColorBrush x:Key="Card" Color="#FFFDF8"/>
 
+    <!-- Where the keyboard is: a clear teal outline, shown only while you use the keyboard. -->
+    <Style x:Key="FocusRing">
+      <Setter Property="Control.Template">
+        <Setter.Value>
+          <ControlTemplate>
+            <Rectangle Margin="-4" Stroke="#117A68" StrokeThickness="2.5" RadiusX="3" RadiusY="3" SnapsToDevicePixels="True"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="FocusRingInset">
+      <Setter Property="Control.Template">
+        <Setter.Value>
+          <ControlTemplate>
+            <Rectangle Margin="2" Stroke="#117A68" StrokeThickness="2.5" SnapsToDevicePixels="True"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
+    </Style>
+    <Style TargetType="Expander">
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
+    </Style>
+
     <Style TargetType="Button">
       <Setter Property="Foreground" Value="#0F1B1C"/>
       <Setter Property="Background" Value="#FFFDF8"/>
@@ -135,6 +173,7 @@ if (-not $SelfTest) {
       <Setter Property="BorderThickness" Value="1.5"/>
       <Setter Property="Padding" Value="14,7"/>
       <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
@@ -165,6 +204,7 @@ if (-not $SelfTest) {
     <Style TargetType="TabItem">
       <Setter Property="Foreground" Value="#4B5B5C"/>
       <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TabItem">
@@ -192,6 +232,7 @@ if (-not $SelfTest) {
       <Setter Property="Cursor" Value="Hand"/>
       <Style.Triggers>
         <Trigger Property="IsMouseOver" Value="True"><Setter Property="TextDecorations" Value="Underline"/></Trigger>
+        <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="TextDecorations" Value="Underline"/></Trigger>
       </Style.Triggers>
     </Style>
   </Window.Resources>
@@ -205,7 +246,8 @@ if (-not $SelfTest) {
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
-        <Image x:Name="HeaderLogo" Width="48" Height="48" Margin="0,0,14,0" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
+        <Image x:Name="HeaderLogo" Width="48" Height="48" Margin="0,0,14,0" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"
+               AutomationProperties.Name="Quietpane emblem"/>
         <StackPanel Grid.Column="1" VerticalAlignment="Center">
           <TextBlock Text="Quietpane" Foreground="#FAF6EC" FontSize="25" FontWeight="SemiBold" FontFamily="Fraunces, Georgia"/>
           <TextBlock Foreground="#C9C2B0" FontSize="12.5" TextWrapping="Wrap" Margin="0,2,0,0"
@@ -238,7 +280,8 @@ if (-not $SelfTest) {
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
-        <TextBlock VerticalAlignment="Center" Foreground="#4B5B5C" TextTrimming="CharacterEllipsis">
+        <TextBlock x:Name="StatusLine" VerticalAlignment="Center" Foreground="#4B5B5C" TextTrimming="CharacterEllipsis"
+                   AutomationProperties.LiveSetting="Polite">
           <Run x:Name="Status" Text="Starting..."/><Run Text="    "/><Hyperlink x:Name="LinkDetails" Foreground="#117A68">Show details</Hyperlink>
         </TextBlock>
         <StackPanel x:Name="AdvancedButtons" Grid.Column="1" Orientation="Horizontal">
@@ -260,6 +303,7 @@ if (-not $SelfTest) {
       <TabControl x:Name="Tabs" Margin="14,12,14,4" Padding="0" Background="#FFFDF8" BorderBrush="#E6DFCC" BorderThickness="1"/>
       <GridSplitter x:Name="LogSplitter" Grid.Row="1" HorizontalAlignment="Stretch" Background="Transparent" Visibility="Collapsed"/>
       <TextBox x:Name="LogBox" Grid.Row="2" Margin="14,0,14,12" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+               AutomationProperties.Name="Details: what Quietpane has done"
                VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
                Background="#0F1B1C" Foreground="#FAF6EC" BorderThickness="0" Padding="10,8"/>
     </Grid>
@@ -297,7 +341,20 @@ $window.Dispatcher.add_UnhandledException({
 $ui = @{}
 foreach ($n in 'Tabs', 'LogBox', 'Status', 'BtnRecommended', 'BtnNone', 'BtnPreview', 'BtnApply', 'HeaderLogo',
                'LinkHeader', 'LinkFooter', 'LinkPrivacy', 'LinkTerms', 'LinkContact', 'VersionRun',
-               'LinkDetails', 'AdvancedButtons', 'LogRow', 'LogSplitter') { $ui[$n] = $window.FindName($n) }
+               'LinkDetails', 'AdvancedButtons', 'LogRow', 'LogSplitter', 'StatusLine') { $ui[$n] = $window.FindName($n) }
+# Screen readers hear the status line whenever it changes ("Reading the current state...", "All done").
+# It is spoken by name, so the name follows the text.
+function Send-StatusToScreenReader {
+    try {
+        [System.Windows.Automation.AutomationProperties]::SetName($ui.StatusLine, [string]$ui.Status.Text)
+        $peer = [System.Windows.Automation.Peers.UIElementAutomationPeer]::CreatePeerForElement($ui.StatusLine)
+        if ($peer) { $peer.RaiseAutomationEvent([System.Windows.Automation.Peers.AutomationEvents]::LiveRegionChanged) }
+    } catch { }
+}
+try {
+    $statusWatch = [System.ComponentModel.DependencyPropertyDescriptor]::FromProperty([System.Windows.Documents.Run]::TextProperty, [System.Windows.Documents.Run])
+    $statusWatch.AddValueChanged($ui.Status, { Send-StatusToScreenReader })
+} catch { }
 # What the engine does straight from this window (shortcuts, starting at sign-in) goes in the details
 # log too. Background jobs have their own log line, set up in Start-Work.
 Set-QpLogSink { param($line) try { $ui.LogBox.AppendText($line + [Environment]::NewLine) } catch { } }
@@ -351,6 +408,9 @@ function New-TabPage {
     $tab.Tag = $Key
     $sv = New-Object System.Windows.Controls.ScrollViewer
     $sv.VerticalScrollBarVisibility = 'Auto'
+    # The page itself can take the keyboard, so arrow keys and Page Down scroll it - and shows it has.
+    $sv.FocusVisualStyle = $window.FindResource('FocusRingInset')
+    [System.Windows.Automation.AutomationProperties]::SetName($sv, "$Header page")
     $sp = New-Object System.Windows.Controls.StackPanel
     $sp.Margin = Get-Thick '20,16,20,16'
     if ($Intro) { [void]$sp.Children.Add((New-Text $Intro 13 'Normal' '#4B5B5C' '0,0,0,10')) }
@@ -362,11 +422,28 @@ function New-TabPage {
 
 function New-GroupHeader([string]$Text) { New-Text $Text 16 'SemiBold' '#117A68' '0,18,0,0' 'Fraunces, Georgia' }
 
+function Set-MoreInfo($Element, [string]$Text) {
+    <#
+        The longer explanation, kept one step away so the window stays calm: it appears when you point
+        at the thing or Tab to it, and screen readers read it as the thing's help text.
+    #>
+    if (-not $Element -or -not $Text) { return }
+    $tip = New-Object System.Windows.Controls.TextBlock
+    $tip.Text = $Text; $tip.TextWrapping = 'Wrap'; $tip.MaxWidth = 440
+    $Element.ToolTip = $tip
+    [System.Windows.Controls.ToolTipService]::SetShowDuration($Element, 30000)
+    [System.Windows.Automation.AutomationProperties]::SetHelpText($Element, $Text)
+}
+
 $script:Options = @{}
 foreach ($k in 'privacy', 'devices', 'vendors', 'apps', 'startup', 'cleanup') { $script:Options[$k] = New-Object System.Collections.ArrayList }
 
 function Add-Option {
-    param($Panel, [string]$Key, [string]$Id, [string]$Title, [string]$Description, [bool]$Recommended)
+    <#
+        One tick box. -Short is the few words shown under it; the full -Description then waits one hover
+        away. Without -Short, the description is shown as it is.
+    #>
+    param($Panel, [string]$Key, [string]$Id, [string]$Title, [string]$Description, [bool]$Recommended, [string]$Short = '')
     $cb = New-Object System.Windows.Controls.CheckBox
     $cb.Tag = $Id
     $cb.Margin = Get-Thick '0,10,0,0'
@@ -376,9 +453,13 @@ function Add-Option {
     # Keep the Apply button's count honest as things are ticked and unticked.
     $cb.Add_Checked({ Update-TickCount })
     $cb.Add_Unchecked({ Update-TickCount })
-    $desc = New-Text $Description 12.5 'Normal' '#4B5B5C' '22,2,0,0'
     [void]$Panel.Children.Add($cb)
-    [void]$Panel.Children.Add($desc)
+    $shown = if ($Short) { $Short } else { $Description }
+    if ($shown) {
+        $desc = New-Text $shown 12.5 'Normal' '#4B5B5C' '22,2,0,0'
+        [void]$Panel.Children.Add($desc)
+        if ($Short -and $Description -and $Description -ne $Short) { Set-MoreInfo $cb $Description; Set-MoreInfo $desc $Description }
+    }
     [void]$script:Options[$Key].Add([pscustomobject]@{ Id = $Id; CheckBox = $cb; Recommended = $Recommended; Label = $label; Title = $Title; Status = 'Unknown' })
 }
 
@@ -386,7 +467,7 @@ function Add-Option {
 # 0. Home - the one-click screen for everyone
 $homePanel = New-TabPage 'Home' 'home' ''
 [void]$homePanel.Children.Add((New-Text 'Make this PC yours again.' 28 'SemiBold' '#0F1B1C' '0,4,0,6' 'Fraunces, Georgia'))
-[void]$homePanel.Children.Add((New-Text 'One click switches off the tracking and ads, clears out apps you never asked for and frees up space. Only the safe, recommended bits, and you can put it all back.' 14.5 'Normal' '#4B5B5C' '0,0,0,18'))
+[void]$homePanel.Children.Add((New-Text 'One click switches off tracking and ads, clears out unwanted apps and frees up space. You can put it all back.' 14.5 'Normal' '#4B5B5C' '0,0,0,18'))
 
 function New-Card([string]$Title) {
     $b = New-Object System.Windows.Controls.Border
@@ -502,7 +583,7 @@ function New-LiveTile([string]$Title, [string]$FillColour) {
     # "What's using it": the busiest programs right now, one per line.
     $top = New-Text '' 11.5 'Normal' '#4B5B5C' '0,4,0,0'
     $top.Visibility = 'Collapsed'
-    $extra = New-Text '' 11.5 'Normal' '#8A9696' '0,2,0,0'
+    $extra = New-Text '' 11.5 'Normal' '#66706F' '0,2,0,0'
     $extra.Visibility = 'Collapsed'
     $delta = New-Text '' 12.5 'SemiBold' '#117A68' '0,4,0,0'
     $delta.Visibility = 'Collapsed'
@@ -530,7 +611,7 @@ $script:TileMemory = New-LiveTile 'MEMORY' '#FFB627'
 $script:TileVram   = New-LiveTile 'VIDEO MEMORY' '#FFB627'
 foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileVram) { [void]$liveTiles.Children.Add($t.Border) }
 [void]$liveStack.Children.Add($liveTiles)
-$script:LiveNote = New-Text 'Updates every 2 seconds while this tab is open. Nothing is recorded.' 11.5 'Normal' '#8A9696' '0,4,0,0'
+$script:LiveNote = New-Text 'Live, every 2 seconds. Nothing is recorded.' 11.5 'Normal' '#66706F' '0,4,0,0'
 [void]$liveStack.Children.Add($script:LiveNote)
 $script:LivePanel.Child = $liveStack
 # The memory tile carries the "freed just now" note that the old memory bar used to.
@@ -553,9 +634,13 @@ $btnHomeScan.Margin = Get-Thick '0,0,12,8'
 [void]$homeButtons.Children.Add($btnOneClick)
 [void]$homeButtons.Children.Add($btnHomeScan)
 [void]$homePanel.Children.Add($homeButtons)
-$homeHint = New-Text 'You will see exactly what is about to change before it happens. Settings can be undone, cleaned-up files go to your Recycle Bin, and removed apps can be reinstalled from the Microsoft Store.' 12.5 'Normal' '#4B5B5C' '0,6,0,0'
+$homeHint = New-Text 'You''ll see every change before it happens.' 12.5 'Normal' '#4B5B5C' '0,6,0,0'
+$howItsSafe = 'Settings can be undone, cleaned-up files go to your Recycle Bin, and removed apps can be reinstalled from the Microsoft Store.'
+Set-MoreInfo $homeHint $howItsSafe
+Set-MoreInfo $btnOneClick $howItsSafe
 [void]$homePanel.Children.Add($homeHint)
-$homeDisclaimer = New-Text 'A good start, not a guarantee: this tidies up the usual troublemakers, but it cannot promise a PC is clean. If yours still feels wrong afterwards, run a deeper scan with a dedicated security tool too.' 12.5 'Normal' '#9A6700' '0,8,0,0'
+$homeDisclaimer = New-Text 'A good start, not a guarantee. If your PC still feels wrong, also run a full antivirus scan.' 12.5 'Normal' '#9A6700' '0,8,0,0'
+Set-MoreInfo $homeDisclaimer 'Quietpane tidies up the usual troublemakers, but no single tool can promise a PC is clean.'
 [void]$homePanel.Children.Add($homeDisclaimer)
 
 $script:ResultPanel = New-Object System.Windows.Controls.Border
@@ -578,7 +663,7 @@ foreach ($b in $btnRestart, $btnUndoAll, $btnShowDetails) { $b.Margin = Get-Thic
 [void]$resultStack.Children.Add($resultButtons)
 $script:ResultPanel.Child = $resultStack
 [void]$homePanel.Children.Add($script:ResultPanel)
-$homeRather = New-Text 'Rather choose yourself? The Privacy, Telemetry, Apps and Free up space tabs let you pick item by item, and Preview shows what would happen without touching anything.' 12.5 'Normal' '#4B5B5C' '0,20,0,0'
+$homeRather = New-Text 'Prefer to choose each item yourself? Use the tabs above - Preview changes nothing.' 12.5 'Normal' '#4B5B5C' '0,20,0,0'
 [void]$homePanel.Children.Add($homeRather)
 
 # The order people read Home in: how things stand, the one button (and what it just did), then space.
@@ -590,7 +675,7 @@ foreach ($x in @($homeTop) + @($cards, $script:BackPanel, $homeButtons, $homeHin
 
 # 1. Health - how hard the PC is working, how warm it is, and how the battery and drive are holding up.
 # Its own tab, so Home stays calm - and nothing here is read unless this tab is open.
-$healthPanel = New-TabPage 'Health' 'health' 'How hard your PC is working right now, how warm it is, and how the battery and drive are holding up. Nothing here changes anything, and it only looks while this tab is open.'
+$healthPanel = New-TabPage 'Health' 'health' 'How hard your PC is working, how warm it is, and how the battery and drive are doing.'
 $script:LivePanel.Margin = Get-Thick '0,4,0,12'
 [void]$healthPanel.Children.Add($script:LivePanel)
 $healthCards = New-Object System.Windows.Controls.WrapPanel
@@ -608,8 +693,8 @@ foreach ($c in $script:BatteryCard, $script:DriveCard) { [void]$healthCards.Chil
 [void]$healthPanel.Children.Add($healthCards)
 
 # 1. Safety scan - Microsoft Defender's detections plus Quietpane's own checks
-$scanPanel = New-TabPage 'Safety scan' 'scan' ('We ask Microsoft Defender what it has found, and we look around for the tricks adware uses: odd startup entries, hidden tasks, browser add-ons and tampered programs. Nothing is changed while we look.')
-[void]$scanPanel.Children.Add((New-Text 'Threat names come from Defender. Anything Quietpane spots on its own is marked as our own check - a signal worth knowing about, not proof.' 12.5 'Normal' '#4B5B5C' '0,0,0,10'))
+$scanPanel = New-TabPage 'Safety scan' 'scan' ('Asks Microsoft Defender what it has found, and looks for the tricks adware uses. Looking changes nothing.')
+Set-MoreInfo $scanPanel.Children[0] 'Odd startup entries, hidden tasks, browser add-ons and tampered programs. Threat names come from Defender; anything Quietpane spots itself is marked as its own check - a warning sign, not proof.'
 $scanButtons = New-Object System.Windows.Controls.StackPanel
 $scanButtons.Orientation = 'Horizontal'
 $scanButtons.Margin = Get-Thick '0,0,0,10'
@@ -641,7 +726,8 @@ $script:SummaryPanel.Child = $script:SummaryStack
 [void]$scanPanel.Children.Add($script:SummaryPanel)
 
 # Severity doughnut: colour, label and count, so it never depends on colour alone.
-$script:SevColours = [ordered]@{ Critical = '#7B1D1D'; High = '#A83232'; Medium = '#9A6700'; Low = '#8A8578'; Info = '#117A68' }
+# Each is dark enough for white text on it to pass WCAG AA (Low was a lighter grey that didn't).
+$script:SevColours = [ordered]@{ Critical = '#7B1D1D'; High = '#A83232'; Medium = '#9A6700'; Low = '#6E695C'; Info = '#117A68' }
 $script:SevMeaning = @{ Critical = 'act now'; High = 'act on it'; Medium = 'worth a look'; Low = 'minor'; Info = 'just so you know' }
 $script:SevCounts = [ordered]@{ Critical = 0; High = 0; Medium = 0; Low = 0; Info = 0 }
 $script:SevFilter = 'All'
@@ -679,7 +765,7 @@ $script:QuarantinePanel = New-Object System.Windows.Controls.StackPanel
 $script:QuarantinePanel.Margin = Get-Thick '8,6,0,8'
 $script:QuarantineBox.Content = $script:QuarantinePanel
 [void]$scanPanel.Children.Add($script:QuarantineBox)
-[void]$scanPanel.Children.Add((New-Text 'A good start, not a guarantee: this looks where problems usually hide, and it cannot promise a PC is clean. If yours still feels wrong, run a deeper scan with a dedicated security tool too.' 12.5 'Normal' '#9A6700' '0,14,0,0'))
+[void]$scanPanel.Children.Add((New-Text 'A good start, not a guarantee. If your PC still feels wrong, also run a full antivirus scan.' 12.5 'Normal' '#9A6700' '0,14,0,0'))
 
 # 2. Privacy & telemetry - one collapsed section per group, so nothing shouts at you
 function New-Section([string]$Header) {
@@ -692,10 +778,10 @@ function New-Section([string]$Header) {
     $ex.Content = $sp
     return [pscustomobject]@{ Expander = $ex; Content = $sp }
 }
-$privacyPanel = New-TabPage 'Privacy' 'privacy' ('First, what your PC is doing: which apps used your camera, microphone and location, and what is talking to the internet right now. Then the tracking, ads and background bits you can switch off. Your security settings and Windows Update are never touched.')
+$privacyPanel = New-TabPage 'Privacy' 'privacy' ('What your PC shares, and the tracking and ads you can switch off. Security and Windows Update are never touched.')
 
 $script:DeviceSection = New-Section 'Who used your camera, microphone and location'
-[void]$script:DeviceSection.Content.Children.Add((New-Text 'Windows keeps a note of which apps used them, and when. Tick an app to switch it off: it is the same switch as in Settings, and Undo turns it back on.' 12.5 'Normal' '#4B5B5C' '0,2,0,2'))
+[void]$script:DeviceSection.Content.Children.Add((New-Text 'Tick an app to switch it off - the same switch as in Settings.' 12.5 'Normal' '#4B5B5C' '0,2,0,2'))
 $script:DeviceList = New-Object System.Windows.Controls.StackPanel
 [void]$script:DeviceList.Children.Add((New-Text 'Looking at who used them...' 13 'Normal' '#4B5B5C'))
 [void]$script:DeviceSection.Content.Children.Add($script:DeviceList)
@@ -703,41 +789,46 @@ $script:DeviceList = New-Object System.Windows.Controls.StackPanel
 
 # Live while it is open, and asleep the rest of the time.
 $script:NetSection = New-Section 'What''s talking to the internet right now'
-[void]$script:NetSection.Content.Children.Add((New-Text 'Programs with a connection open at this moment, and where to. Most of this is normal - updates, syncing, your browser, games - and it is here so you can spot anything you do not recognise. Nothing is blocked or changed.' 12.5 'Normal' '#4B5B5C' '0,2,0,6'))
+$netIntro = New-Text 'Programs connected right now, and where to. Most of it is normal. Nothing is blocked.' 12.5 'Normal' '#4B5B5C' '0,2,0,6'
+Set-MoreInfo $netIntro 'Updates, syncing, your browser and games all connect. This is here so you can spot anything you don''t recognise.'
+[void]$script:NetSection.Content.Children.Add($netIntro)
 $script:NetList = New-Object System.Windows.Controls.StackPanel
 [void]$script:NetList.Children.Add((New-Text 'Having a look...' 13 'Normal' '#4B5B5C'))
 [void]$script:NetSection.Content.Children.Add($script:NetList)
-[void]$script:NetSection.Content.Children.Add((New-Text 'Quietpane makes no connections of its own: this is Windows'' own list, and the names come from the list of addresses Windows has already looked up. Programs that use QUIC (some browsers and games) may not appear, because Windows does not record where those go.' 11.5 'Normal' '#8A9696' '0,10,0,0'))
+$netNote = New-Text 'Quietpane makes no connections of its own.' 11.5 'Normal' '#66706F' '0,10,0,0'
+Set-MoreInfo $netNote 'This is Windows'' own list, named from the addresses Windows has already looked up. Programs that use QUIC (some browsers and games) may not appear, because Windows doesn''t record where those go.'
+[void]$script:NetSection.Content.Children.Add($netNote)
 [void]$privacyPanel.Children.Add($script:NetSection.Expander)
 
 # The tab reads in two parts: what is happening on this PC, then the settings you can change.
 [void]$privacyPanel.Children.Add((New-Text 'Settings you can switch off' 15 'SemiBold' '#0F1B1C' '0,22,0,2' 'Fraunces, Georgia'))
-[void]$privacyPanel.Children.Add((New-Text 'Tick what you want, then Preview to see exactly what would change, or Apply. Anything already done says so.' 12.5 'Normal' '#4B5B5C' '0,0,0,2'))
+[void]$privacyPanel.Children.Add((New-Text 'Tick what you want, then Preview or Apply. Point at one to learn more.' 12.5 'Normal' '#4B5B5C' '0,0,0,2'))
 
 foreach ($g in @((Get-QpCatalog privacy).Items | ForEach-Object { $_.Group } | Select-Object -Unique)) {
     $items = @((Get-QpCatalog privacy).Items | Where-Object { $_.Group -eq $g })
     $sec = New-Section ('{0}   ({1} settings)' -f $g, $items.Count)
     foreach ($item in $items) {
-        Add-Option -Panel $sec.Content -Key 'privacy' -Id $item.Id -Title $item.Title -Description $item.Description -Recommended ([bool]$item.Recommended)
+        Add-Option -Panel $sec.Content -Key 'privacy' -Id $item.Id -Title $item.Title -Description $item.Description -Recommended ([bool]$item.Recommended) -Short ([string]$item.Short)
     }
     [void]$privacyPanel.Children.Add($sec.Expander)
 }
 
 # 3. Telemetry - the brand and hardware software that came with this PC
 $vendorPanel = New-TabPage 'Telemetry' 'vendors' ('')
-[void]$vendorPanel.Children.Add((New-Text 'Most PCs arrive with extras from the people who made them - the laptop maker, the graphics chip, the processor. A lot of it sits in the background and quietly reports home.' 13.5 'Normal' '#4B5B5C' '0,0,0,6'))
-[void]$vendorPanel.Children.Add((New-Text 'Below is only what was actually found on this PC. Switching these off leaves your drivers alone, and the apps themselves still open and work normally.' 13.5 'Normal' '#4B5B5C' '0,0,0,12'))
+$vendorIntroText = New-Text 'Background extras from the companies that made your PC, and what they report. Drivers are never touched, and the apps still work.' 13.5 'Normal' '#4B5B5C' '0,0,0,12'
+Set-MoreInfo $vendorIntroText 'The laptop maker, the graphics chip, the processor: most PCs arrive with helpers from each, and many quietly report home. Only what is actually on this PC is listed.'
+[void]$vendorPanel.Children.Add($vendorIntroText)
 $script:VendorIntro = New-Text 'Having a look at what came with this PC...' 13 'SemiBold' '#0F1B1C' '0,0,0,6'
 [void]$vendorPanel.Children.Add($script:VendorIntro)
 $script:VendorList = New-Object System.Windows.Controls.StackPanel
 [void]$vendorPanel.Children.Add($script:VendorList)
 
 # 4. Apps - what starts when you sign in, and apps you could remove
-$appsPanel = New-TabPage 'Apps' 'apps' ('What starts by itself when you sign in, and apps that came with Windows or were pushed onto this PC. Tick what you want, then Preview or Apply.')
+$appsPanel = New-TabPage 'Apps' 'apps' ('What starts when you sign in, and apps you never asked for. Tick, then Preview or Apply.')
 
 $script:StartupSection = New-Section 'Starts when you sign in'
 $script:StartupSection.Expander.IsExpanded = $true
-[void]$script:StartupSection.Content.Children.Add((New-Text 'Switching something off works like Task Manager: the program itself is untouched and still opens when you start it - it just stops starting on its own. Undo turns it back on.' 12.5 'Normal' '#4B5B5C' '0,2,0,2'))
+[void]$script:StartupSection.Content.Children.Add((New-Text 'Switched off the way Task Manager does it - the program still opens when you start it.' 12.5 'Normal' '#4B5B5C' '0,2,0,2'))
 $script:StartupList = New-Object System.Windows.Controls.StackPanel
 [void]$script:StartupList.Children.Add((New-Text 'Looking at what starts when you sign in...' 13 'Normal' '#4B5B5C'))
 [void]$script:StartupSection.Content.Children.Add($script:StartupList)
@@ -745,9 +836,12 @@ $script:StartupList = New-Object System.Windows.Controls.StackPanel
 
 $script:RemoveSection = New-Section 'Apps you could remove'
 $script:RemoveSection.Expander.IsExpanded = $true
-[void]$script:RemoveSection.Content.Children.Add((New-Text 'Your Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool and anything driver-related are never on this list. Changed your mind later? The Microsoft Store has them all.' 12.5 'Normal' '#4B5B5C' '0,2,0,6'))
+$appsNote = New-Text 'Essentials like the Store, Camera and Photos are never listed. Removed apps can be reinstalled from the Store.' 12.5 'Normal' '#4B5B5C' '0,2,0,6'
+Set-MoreInfo $appsNote 'Never on this list: the Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool and anything driver-related.'
+[void]$script:RemoveSection.Content.Children.Add($appsNote)
 $script:DeprovisionCb = New-Object System.Windows.Controls.CheckBox
-$script:DeprovisionCb.Content = New-Text 'Also stop removed apps being installed for new user accounts on this PC' 12.5 'Normal' '#0F1B1C' '2,0,0,0'
+$script:DeprovisionCb.Content = New-Text 'Also keep them off new user accounts' 12.5 'Normal' '#0F1B1C' '2,0,0,0'
+Set-MoreInfo $script:DeprovisionCb 'Stops removed apps being installed again for anyone who gets a new account on this PC.'
 $script:DeprovisionCb.IsChecked = $true
 $script:DeprovisionCb.Margin = Get-Thick '0,0,0,8'
 [void]$script:RemoveSection.Content.Children.Add($script:DeprovisionCb)
@@ -757,7 +851,7 @@ $script:AppsList = New-Object System.Windows.Controls.StackPanel
 [void]$appsPanel.Children.Add($script:RemoveSection.Expander)
 
 # 5. Clean-up
-$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Leftovers nobody needs: temporary files, crash dumps, old installers and caches. Everything goes to your Recycle Bin, so you have the final say. Close your games and browsers first.')
+$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Leftovers nobody needs, like temporary files and old installers. They go to your Recycle Bin. Close your browsers first.')
 $script:CleanupList = New-Object System.Windows.Controls.StackPanel
 [void]$script:CleanupList.Children.Add((New-Text 'Measuring sizes...' 13 'Normal' '#4B5B5C'))
 [void]$cleanupPanel.Children.Add($script:CleanupList)
@@ -766,11 +860,12 @@ $script:CleanupList = New-Object System.Windows.Controls.StackPanel
 $script:SpaceSection = New-Section 'Where your space went'
 $script:SpaceSection.Expander.IsExpanded = $true
 $script:SpaceSection.Expander.Margin = Get-Thick '0,22,0,0'
-[void]$script:SpaceSection.Content.Children.Add((New-Text 'The biggest folders and files on this PC. Looking changes nothing. Click a folder to look inside it; your own files can go to the Recycle Bin.' 12.5 'Normal' '#4B5B5C' '0,2,0,8'))
+[void]$script:SpaceSection.Content.Children.Add((New-Text 'Your biggest folders and files. Click a folder to look inside.' 12.5 'Normal' '#4B5B5C' '0,2,0,8'))
 $spaceButtons = New-Object System.Windows.Controls.StackPanel
 $spaceButtons.Orientation = 'Horizontal'
 $script:SpaceDrive = New-Object System.Windows.Controls.ComboBox
 $script:SpaceDrive.Margin = Get-Thick '0,0,8,0'
+[System.Windows.Automation.AutomationProperties]::SetName($script:SpaceDrive, 'Drive to look at')
 $script:SpaceDrive.MinWidth = 70
 foreach ($d in @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady })) { [void]$script:SpaceDrive.Items.Add($d.Name) }
 $script:SpaceDrive.SelectedItem = @($script:SpaceDrive.Items | Where-Object { $_ -like "$env:SystemDrive*" })[0]
@@ -788,16 +883,19 @@ $script:SpaceCrumb = New-Text '' 14 'SemiBold' '#0F1B1C' '0,10,0,2'
 $script:SpaceBanner = New-Text '' 12.5 'Normal' '#117A68' '0,0,0,4'
 $script:SpaceRows = New-Object System.Windows.Controls.StackPanel
 $script:SpaceFilesHead = New-Text 'Your biggest files' 14 'SemiBold' '#0F1B1C' '0,18,0,0'
-$script:SpaceFilesNote = New-Text 'Only files that are yours to move. Big game and program files are in the folders above, with where to remove them properly.' 12.5 'Normal' '#4B5B5C' '0,0,0,4'
+$script:SpaceFilesNote = New-Text 'Only files that are yours to move.' 12.5 'Normal' '#4B5B5C' '0,0,0,4'
+Set-MoreInfo $script:SpaceFilesNote 'Big game and program files are in the folders above, each with where to remove it properly.'
 $script:SpaceFiles = New-Object System.Windows.Controls.StackPanel
 foreach ($e in $script:SpaceStatus, $script:SpaceCrumb, $script:SpaceBanner, $script:SpaceRows, $script:SpaceFilesHead, $script:SpaceFilesNote, $script:SpaceFiles) { [void]$script:SpaceSection.Content.Children.Add($e) }
 foreach ($e in $script:SpaceCrumb, $script:SpaceBanner, $script:SpaceFilesHead, $script:SpaceFilesNote) { $e.Visibility = 'Collapsed' }
 [void]$cleanupPanel.Children.Add($script:SpaceSection.Expander)
 
 # 6. Undo
-$undoPanel = New-TabPage 'Undo' 'undo' ('Changed your mind? Every change is saved as a restore point, and Undo puts the settings back exactly as they were. Files are waiting in your Recycle Bin, and removed apps come back from the Microsoft Store.')
+$undoPanel = New-TabPage 'Undo' 'undo' ('Every change is saved as a restore point. Pick one to put it back.')
+Set-MoreInfo $undoPanel.Children[0] 'Settings go back exactly as they were. Cleaned-up files are waiting in your Recycle Bin, and removed apps come back from the Microsoft Store.'
 $script:UndoList = New-Object System.Windows.Controls.ListBox
 $script:UndoList.MinHeight = 160
+[System.Windows.Automation.AutomationProperties]::SetName($script:UndoList, 'Restore points, newest first')
 $script:UndoList.Margin = Get-Thick '0,6,0,8'
 $script:UndoList.BorderBrush = Get-Brush '#E6DFCC'
 [void]$undoPanel.Children.Add($script:UndoList)
@@ -827,14 +925,23 @@ $aboutTitle.VerticalAlignment = 'Center'
 [void]$aboutPanel.Children.Add($aboutHead)
 
 [void]$aboutPanel.Children.Add((New-GroupHeader 'Our promise'))
-foreach ($line in @(
-        'Collects nothing: no accounts, analytics, telemetry, crash reports, ads, cookies or tracking.',
-        'Connects to nothing: the app makes no network requests. Links only open when you click them.',
-        'Changes nothing without you: every change is shown first and confirmed, and settings go into a restore point you can undo.',
-        'Tidying up never deletes for good: files go to your Recycle Bin and scheduled tasks are switched off, not deleted. Three things can''t be undone - removing an app (the Microsoft Store has it), uninstalling a brand extra, and deleting a threat for good - and the app says so before you confirm.',
-        'Hides nothing: plain-text PowerShell you can read line by line, plus three small pieces of C# - for the graphics temperature, adding up folder sizes, and making shortcuts. No installer: it only copies itself to Program Files if you add shortcuts or start it when you sign in.',
-        'Free and open source under the MIT License. Not affiliated with Microsoft, NVIDIA, Intel, AMD, Google or any PC maker.')) {
-    [void]$aboutPanel.Children.Add((New-Text ('-  ' + $line) 13 'Normal' '#0F1B1C' '4,4,0,0'))
+# One short line each; point at a line for the whole of it.
+foreach ($pair in @(
+        @('Collects nothing - no accounts, tracking or ads.',
+          'No accounts, analytics, telemetry, crash reports, ads, cookies or tracking of any kind.'),
+        @('Connects to nothing - links open only when you click them.',
+          'The app makes no network requests at all.'),
+        @('Changes nothing without asking, and keeps a restore point.',
+          'Every change is shown first and confirmed, and settings go into a restore point you can undo.'),
+        @('Tidying up uses your Recycle Bin. Anything that can''t be undone says so first.',
+          'Scheduled tasks are switched off, not deleted. Three things can''t be undone - removing an app (the Microsoft Store has it), uninstalling a brand extra, and deleting a threat for good - and the app says so before you confirm.'),
+        @('Hides nothing - plain-text code you can read. No installer.',
+          'Plain-text PowerShell you can read line by line, plus three small pieces of C# - for the graphics temperature, adding up folder sizes, and making shortcuts. It only copies itself to Program Files if you add shortcuts or start it when you sign in.'),
+        @('Free and open source (MIT). Not tied to Microsoft or any PC maker.',
+          'MIT License. Not affiliated with Microsoft, NVIDIA, Intel, AMD, Google or any PC maker.'))) {
+    $t = New-Text ('-  ' + $pair[0]) 13 'Normal' '#0F1B1C' '4,4,0,0'
+    Set-MoreInfo $t $pair[1]
+    [void]$aboutPanel.Children.Add($t)
 }
 
 $aboutButtons = New-Object System.Windows.Controls.WrapPanel
@@ -857,7 +964,23 @@ $script:SignInBox.VerticalContentAlignment = 'Center'
 $script:SignInBox.Content = New-Text 'Start Quietpane when I sign in' 13.5 'SemiBold' '#0F1B1C' '2,0,0,0'
 [void]$aboutPanel.Children.Add($script:SignInBox)
 [void]$aboutPanel.Children.Add((New-Text 'It waits on the taskbar and does nothing until you click it.' 12.5 'Normal' '#4B5B5C' '22,2,0,0'))
-[void]$aboutPanel.Children.Add((New-Text 'Both open Quietpane''s own copy in Program Files, so you can move or delete the folder you unzipped. To keep Quietpane on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".' 12.5 'Normal' '#4B5B5C' '0,12,0,6'))
+# Only makes sense with the one above, so it sits under it, indented, and waits until that is ticked.
+$script:WatchBox = New-Object System.Windows.Controls.CheckBox
+$script:WatchBox.Margin = Get-Thick '22,10,0,0'
+$script:WatchBox.VerticalContentAlignment = 'Center'
+$script:WatchBox.IsEnabled = $false
+$script:WatchBox.Opacity = 0.55   # looks as unavailable as it is, until the box above is ticked
+$script:WatchBox.Content = New-Text 'Also tell me if Windows switches things back on' 13.5 'SemiBold' '#0F1B1C' '2,0,0,0'
+$script:WatchBox.ToolTip = 'Tick "Start Quietpane when I sign in" first.'
+[System.Windows.Controls.ToolTipService]::SetShowOnDisabled($script:WatchBox, $true)
+[void]$aboutPanel.Children.Add($script:WatchBox)
+$watchNote = New-Text 'Checks once as you sign in, and badges the taskbar icon if anything came back.' 12.5 'Normal' '#4B5B5C' '44,2,0,0'
+Set-MoreInfo $watchNote 'About a second of work, just after you sign in. If nothing came back, you won''t notice it at all.'
+[void]$aboutPanel.Children.Add($watchNote)
+$placeNote = New-Text 'Both use Quietpane''s own copy, so you can move the folder you unzipped.' 12.5 'Normal' '#4B5B5C' '0,12,0,6'
+Set-MoreInfo $placeNote 'The copy lives in Program Files. To keep Quietpane on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".'
+Set-MoreInfo $btnShortcut 'To keep Quietpane on the taskbar afterwards, right-click it in the Start menu and choose "Pin to taskbar".'
+[void]$aboutPanel.Children.Add($placeNote)
 
 function Get-DocText([string]$File) {
     $p = Join-Path $PSScriptRoot $File
@@ -879,6 +1002,7 @@ function New-DocExpander([string]$Header, [string]$File) {
     $tb.Padding = Get-Thick '12,10'
     $tb.FontSize = 12.5
     $tb.Margin = Get-Thick '0,6,0,0'
+    [System.Windows.Automation.AutomationProperties]::SetName($tb, $Header)
     $ex.Content = $tb
     return $ex
 }
@@ -907,7 +1031,13 @@ function Update-PlaceControls {
     try {
         $s = Test-QpShortcuts
         $btnShortcut.Content = if ($s.StartMenu -or $s.Desktop) { 'Remove from Start menu and desktop' } else { 'Add to Start menu and desktop' }
-        $script:SignInBox.IsChecked = (Test-QpSignInStart)
+        $task = Get-QpSignInTask
+        $on = [bool]($task -and "$($task.State)" -ne 'Disabled')
+        $script:SignInBox.IsChecked = $on
+        $script:WatchBox.IsEnabled = $on
+        $script:WatchBox.Opacity = $(if ($on) { 1.0 } else { 0.55 })
+        $script:WatchBox.ToolTip = $(if ($on) { $null } else { 'Tick "Start Quietpane when I sign in" first.' })
+        $script:WatchBox.IsChecked = ($on -and (Test-QpTaskWatches $task))
     } catch { }
 }
 # Taken away while this copy is the one open: it goes to the Recycle Bin once the window closes.
@@ -943,6 +1073,19 @@ $script:SignInBox.Add_Click({
         # The tick itself says it worked; only a problem, or something now in the Recycle Bin, needs words.
         if (-not $r.Ok -or $r.Copy -in 'Recycled', 'Later', 'Failed') { [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane') }
         else { $ui.Status.Text = $r.Note }
+    } catch {
+        [void][System.Windows.MessageBox]::Show("That did not work: $($_.Exception.Message)", 'Quietpane')
+    }
+    Update-PlaceControls
+})
+$script:WatchBox.Add_Click({
+    if (Test-Busy) { Update-PlaceControls; return }
+    try {
+        # The sign-in task carries this choice, so changing it means setting the task up again.
+        $r = Enable-QpSignInStart -Watch:([bool]$script:WatchBox.IsChecked)
+        if (-not $r.Ok) { [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane') }
+        elseif ($script:WatchBox.IsChecked) { $ui.Status.Text = $r.Note }
+        else { $ui.Status.Text = 'Quietpane will no longer check when you sign in. It still starts on the taskbar.' }
     } catch {
         [void][System.Windows.MessageBox]::Show("That did not work: $($_.Exception.Message)", 'Quietpane')
     }
@@ -1170,7 +1313,7 @@ function Set-OptionStatus($opt, [string]$Status) {
     switch ($Status) {
         'Applied'       { $opt.Label.Text = "$($opt.Title)   [already applied]"; $opt.Label.Foreground = Get-Brush '#117A68' }
         'Partial'       { $opt.Label.Text = "$($opt.Title)   [partly applied]";  $opt.Label.Foreground = Get-Brush '#9A6700' }
-        'NotApplicable' { $opt.Label.Text = "$($opt.Title)   [not on this PC]";  $opt.Label.Foreground = Get-Brush '#8A9696' }
+        'NotApplicable' { $opt.Label.Text = "$($opt.Title)   [not on this PC]";  $opt.Label.Foreground = Get-Brush '#66706F' }
         default         { $opt.Label.Text = $opt.Title;                          $opt.Label.Foreground = Get-Brush '#0F1B1C' }
     }
 }
@@ -1203,7 +1346,7 @@ function Update-FromState($state) {
     $apps = @($state.Apps | Where-Object { $_ })
     $script:RemoveSection.Expander.Header = New-Text ('Apps you could remove   ({0} found)' -f $apps.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
     if ($apps.Count -eq 0) { [void]$script:AppsList.Children.Add((New-Text 'No known bloat apps found on this PC.' 13 'SemiBold' '#117A68')) }
-    foreach ($a in $apps) { Add-Option -Panel $script:AppsList -Key 'apps' -Id $a.Name -Title $a.Title -Description ("{0}  ({1})" -f $a.Description, $a.Name) -Recommended ([bool]$a.Recommended) }
+    foreach ($a in $apps) { Add-Option -Panel $script:AppsList -Key 'apps' -Id $a.Name -Title $a.Title -Short $a.Description -Description ('{0}  (Windows calls it {1}.)' -f $a.Description, $a.Name) -Recommended ([bool]$a.Recommended) }
     $script:CleanupList.Children.Clear()
     $script:Options['cleanup'].Clear()
     foreach ($c in @($state.Cleanup | Where-Object { $_ })) {
@@ -1238,9 +1381,52 @@ function Update-FromState($state) {
 
 $script:CameBack = $null
 $script:LastState = $null
+
+function New-BadgeImage([int]$Count) {
+    # A small amber circle with the number in it, drawn here rather than shipped as a picture.
+    $g = New-Object System.Windows.Controls.Grid
+    $g.Width = 32; $g.Height = 32
+    $dot = New-Object System.Windows.Shapes.Ellipse
+    $dot.Fill = Get-Brush '#FFB627'; $dot.Stroke = Get-Brush '#0F1B1C'; $dot.StrokeThickness = 2
+    [void]$g.Children.Add($dot)
+    $t = New-Object System.Windows.Controls.TextBlock
+    $t.Text = if ($Count -gt 9) { '9+' } else { "$Count" }
+    $t.FontFamily = 'Segoe UI'; $t.FontWeight = 'Bold'; $t.FontSize = $(if ($Count -gt 9) { 14 } else { 19 })
+    $t.Foreground = Get-Brush '#0F1B1C'; $t.HorizontalAlignment = 'Center'; $t.VerticalAlignment = 'Center'
+    [void]$g.Children.Add($t)
+    $size = [System.Windows.Size]::new(32, 32)
+    $g.Measure($size); $g.Arrange([System.Windows.Rect]::new($size)); $g.UpdateLayout()
+    $bmp = New-Object System.Windows.Media.Imaging.RenderTargetBitmap(32, 32, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+    $bmp.Render($g)
+    $bmp.Freeze()
+    return $bmp
+}
+
+function Update-TaskbarBadge($d) {
+    <#
+        While something that switched itself back on is waiting for you, Quietpane's taskbar icon carries
+        a small badge with the number, and the window's name says what it is - which is also what a
+        screen reader reads for the taskbar button. Dealt with, both go back to normal.
+    #>
+    try {
+        if (-not $window.TaskbarItemInfo) { $window.TaskbarItemInfo = New-Object System.Windows.Shell.TaskbarItemInfo }
+        if ($d -and $d.Count) {
+            $what = if ($d.Count -eq 1) { '1 thing switched itself back on' } else { "$($d.Count) things switched themselves back on" }
+            $window.TaskbarItemInfo.Overlay = New-BadgeImage ([int]$d.Count)
+            $window.TaskbarItemInfo.Description = "Quietpane: $what"
+            $window.Title = "Quietpane - $what"
+        } else {
+            $window.TaskbarItemInfo.Overlay = $null
+            $window.TaskbarItemInfo.Description = ''
+            $window.Title = 'Quietpane - by KomodoWorks'
+        }
+    } catch { }
+}
+
 function Update-CameBack($d) {
     <# The "welcome back" panel: what switched itself back on, since when, and the likely reason. #>
     $script:CameBack = $d
+    Update-TaskbarBadge $d
     if (-not $d -or -not $d.Count) { $script:BackPanel.Visibility = 'Collapsed'; return }
     $settings = @($d.Privacy).Count + @($d.Vendors).Count
     $what = @()
@@ -1307,11 +1493,11 @@ function Update-StartupList($items) {
         [void]$script:StartupList.Children.Add((New-Text ('Set by a policy on this PC, so they stay as they are: ' + (($locked | ForEach-Object { $_.Name }) -join ', ') + '.') 12.5 'Normal' '#4B5B5C' '0,12,0,0'))
     }
     if ($off.Count) {
-        [void]$script:StartupList.Children.Add((New-Text ('Already off: ' + (($off | ForEach-Object { $_.Name }) -join ', ') + '.') 12.5 'Normal' '#8A9696' '0,12,0,0'))
+        [void]$script:StartupList.Children.Add((New-Text ('Already off: ' + (($off | ForEach-Object { $_.Name }) -join ', ') + '.') 12.5 'Normal' '#66706F' '0,12,0,0'))
     }
     $keptOn = @($kept | Where-Object On)
     if ($keptOn.Count) {
-        $t = New-Text ('Always left on: ' + (($keptOn | ForEach-Object { $_.Name }) -join ', ') + '. Windows or your drivers need these.') 12.5 'Normal' '#8A9696' '0,6,0,0'
+        $t = New-Text ('Always left on: ' + (($keptOn | ForEach-Object { $_.Name }) -join ', ') + '. Windows or your drivers need these.') 12.5 'Normal' '#66706F' '0,6,0,0'
         $t.ToolTip = ($keptOn | ForEach-Object { "$($_.Name): $($_.KeepWhy)" }) -join "`n"
         [void]$script:StartupList.Children.Add($t)
     }
@@ -1369,16 +1555,17 @@ function Update-DeviceList($devices) {
         $desktop = @($used | Where-Object { $_.Type -eq 'Desktop' -and $_.Name -ne 'Windows itself' })
         if ($open -and $d.DesktopOn -and $desktop.Count) {
             Add-Option -Panel $script:DeviceList -Key 'devices' -Id $d.DesktopId -Title "Stop all desktop programs using the $($d.Name)" -Recommended $false `
+                -Short ('Covers every one - {0} too.' -f $script:DesktopSwitchNote[$d.Kind]) `
                 -Description ("Windows can't stop one desktop program at a time, so this covers every one of them - {0} too. Leave it unticked if you use those." -f $script:DesktopSwitchNote[$d.Kind])
         } elseif (-not $d.DesktopOn) {
-            [void]$script:DeviceList.Children.Add((New-Text "Desktop programs are already blocked from the $($d.Name)." 12.5 'Normal' '#8A9696' '0,6,0,0'))
+            [void]$script:DeviceList.Children.Add((New-Text "Desktop programs are already blocked from the $($d.Name)." 12.5 'Normal' '#66706F' '0,6,0,0'))
         }
 
         $asks = @($apps | Where-Object { $open -and $_.Type -eq 'App' -and $_.Asks })
-        if ($asks.Count) { [void]$script:DeviceList.Children.Add((New-Text ('Will ask you first: ' + (($asks | ForEach-Object { $_.Name }) -join ', ') + '.') 12.5 'Normal' '#8A9696' '0,6,0,0')) }
+        if ($asks.Count) { [void]$script:DeviceList.Children.Add((New-Text ('Will ask you first: ' + (($asks | ForEach-Object { $_.Name }) -join ', ') + '.') 12.5 'Normal' '#66706F' '0,6,0,0')) }
         $off = @($apps | Where-Object { $_.Type -eq 'App' -and $_.Setting -eq 'Deny' })
-        if ($off.Count) { [void]$script:DeviceList.Children.Add((New-Text ('Already switched off: ' + (($off | ForEach-Object { $_.Name }) -join ', ') + '.') 12.5 'Normal' '#8A9696' '0,6,0,0')) }
-        if (-not $apps.Count) { [void]$script:DeviceList.Children.Add((New-Text 'Nothing has used it or asked to.' 12.5 'Normal' '#8A9696' '0,4,0,0')) }
+        if ($off.Count) { [void]$script:DeviceList.Children.Add((New-Text ('Already switched off: ' + (($off | ForEach-Object { $_.Name }) -join ', ') + '.') 12.5 'Normal' '#66706F' '0,6,0,0')) }
+        if (-not $apps.Count) { [void]$script:DeviceList.Children.Add((New-Text 'Nothing has used it or asked to.' 12.5 'Normal' '#66706F' '0,4,0,0')) }
     }
     $sum = if ($live.Count) { ($live -join ' and ') + ' in use right now' } elseif ($users.Count -eq 1) { '1 app has used them' } else { "$($users.Count) apps have used them" }
     $script:DeviceSection.Expander.Header = New-Text ("Who used your camera, microphone and location   ($sum)") 14.5 'SemiBold' $(if ($live.Count) { '#9A6700' } else { '#117A68' }) '0' 'Fraunces, Georgia'
@@ -1409,7 +1596,7 @@ function Update-NetList($c) {
         }
     }
     if ($c.LocalOnly.Count) {
-        [void]$script:NetList.Children.Add((New-Text ('Talking only on your own network, not the internet: ' + (($c.LocalOnly | Select-Object -First 6) -join ', ') + '.') 12 'Normal' '#8A9696' '0,12,0,0'))
+        [void]$script:NetList.Children.Add((New-Text ('Talking only on your own network, not the internet: ' + (($c.LocalOnly | Select-Object -First 6) -join ', ') + '.') 12 'Normal' '#66706F' '0,12,0,0'))
     }
 }
 
@@ -1476,7 +1663,7 @@ function New-SpaceRow {
         [void]$title.Inlines.Add($link)
     } else { $title.Text = $Name }
     [void]$left.Children.Add($title)
-    if ($Sub) { [void]$left.Children.Add((New-Text $Sub 11.5 'Normal' '#8A9696' '0,1,0,0')) }
+    if ($Sub) { [void]$left.Children.Add((New-Text $Sub 11.5 'Normal' '#66706F' '0,1,0,0')) }
     [void]$g.Children.Add($left)
 
     $track = New-Object System.Windows.Controls.Border
@@ -1681,7 +1868,7 @@ function Update-VendorTab($vendors) {
     $script:JunkBoxes = New-Object System.Collections.ArrayList
     $vendors = @($vendors | Where-Object { $_ })
     if ($vendors.Count -eq 0) {
-        $script:VendorIntro.Text = 'Nothing to do here. This PC has no extra brand software that we recognise. Lucky you.'
+        $script:VendorIntro.Text = 'Nothing to do here - no brand software that Quietpane recognises.'
         return
     }
     $open = (@($vendors | ForEach-Object { $_.Open }) | Measure-Object -Sum).Sum
@@ -1689,7 +1876,7 @@ function Update-VendorTab($vendors) {
     $script:VendorIntro.Text = if ($open -gt 0) {
         'Found software from {0}. There are {1} background thing(s) still switched on.' -f $names, $open
     } else {
-        'Found software from {0}. Everything we can switch off is already off. Nicely done.' -f $names
+        'Found software from {0}. Everything Quietpane can switch off is already off.' -f $names
     }
     foreach ($v in $vendors) {
         $head = if ($v.Open -gt 0) { '{0} - {1} still switched on' -f $v.Name, $v.Open } else { '{0} - all quiet' -f $v.Name }
@@ -1702,7 +1889,7 @@ function Update-VendorTab($vendors) {
         }
         if ($v.Junk.Count) {
             [void]$sec.Content.Children.Add((New-Text 'Extras you could remove (optional)' 13 'SemiBold' '#0F1B1C' '0,14,0,2' 'Fraunces, Georgia'))
-            [void]$sec.Content.Children.Add((New-Text 'These are ordinary programs, not drivers. Removing one cannot be undone, but you can always install it again from the maker''s website.' 12.5 'Normal' '#4B5B5C' '0,0,0,4'))
+            [void]$sec.Content.Children.Add((New-Text 'Ordinary programs, not drivers. Removing can''t be undone, but the maker''s website has them.' 12.5 'Normal' '#4B5B5C' '0,0,0,4'))
             foreach ($j in $v.Junk) {
                 $cb = New-Object System.Windows.Controls.CheckBox
                 $cb.Margin = Get-Thick '0,8,0,0'
@@ -1810,7 +1997,7 @@ function Set-MemoryTile([double]$Used, [double]$Total) {
     Set-MeterFill $script:TileMemory ($Used / $Total)
 }
 
-$script:HeatColours = @{ ok = '#117A68'; warn = '#9A6700'; high = '#A83232'; none = '#8A9696' }
+$script:HeatColours = @{ ok = '#117A68'; warn = '#9A6700'; high = '#A83232'; none = '#66706F' }
 function Set-HeatText($Block, $Celsius, $MaxC, [bool]$Stuck, [string]$Tip) {
     # Number and word together, so heat never depends on colour alone.
     $deg = [char]0x00B0
@@ -2164,6 +2351,9 @@ function Draw-SeverityChart {
     foreach ($c in $centre.Children) { $c.TextAlignment = 'Center' }
     [System.Windows.Controls.Canvas]::SetLeft($centre, $cx - 48); [System.Windows.Controls.Canvas]::SetTop($centre, $cy - 26)
     [void]$script:ChartCanvas.Children.Add($centre)
+    # The chart in words, for anyone who can't see it. The buttons beside it say the same, one by one.
+    $spoken = @(foreach ($k in $script:SevCounts.Keys) { '{0} {1}' -f $k, [int]$script:SevCounts[$k] }) -join ', '
+    [System.Windows.Automation.AutomationProperties]::SetName($script:ChartCanvas, ('Findings chart: {0} in all. {1}.' -f $total, $spoken))
 
     $script:LegendPanel.Children.Clear()
     $allBtn = New-Object System.Windows.Controls.Button
@@ -2192,6 +2382,8 @@ function Draw-SeverityChart {
         [void]$inner.Children.Add((New-Text "$n" 13 'SemiBold' '#0F1B1C' '0'))
         $row.Content = $inner
         $row.ToolTip = "Show only $k findings"
+        # Its content is a colour and two numbers, so say in words what it is and does.
+        [System.Windows.Automation.AutomationProperties]::SetName($row, ('{0}: {1} finding{2} - {3}. Show only these.' -f $k, $n, $(if ($n -eq 1) { '' } else { 's' }), $script:SevMeaning[$k]))
         $row.Add_Click({ $script:SevFilter = [string]$this.Tag; Show-Findings })
         [void]$script:LegendPanel.Children.Add($row)
     }
@@ -2230,6 +2422,10 @@ function Show-ChoiceDialog {
     [void]$sp.Children.Add($cancel)
     $dlg.Content = $sp
     $script:ChoiceDialog = $dlg
+    # Keyboard: Esc means Cancel, and the first choice - always the safest - starts with the focus.
+    $dlg.Add_PreviewKeyDown({ param($s, $e) if ($e.Key -eq 'Escape') { $e.Handled = $true; $script:ChoiceResult = $null; $script:ChoiceDialog.Close() } })
+    $firstChoice = @($sp.Children | Where-Object { $_ -is [System.Windows.Controls.Button] })[0]
+    if ($firstChoice) { $dlg.Add_ContentRendered({ [void]$firstChoice.Focus() }.GetNewClosure()) }
     [void]$dlg.ShowDialog()
     return $script:ChoiceResult
 }
@@ -2241,9 +2437,46 @@ function Test-FindingActionable($f) {
         if an attempt did not work, the thing is still there to try again.
     #>
     if (-not $f) { return $false }
+    # A card holding several files is actionable while any one of them still is.
+    if ($f.PSObject.Properties['Items'] -and @($f.Items).Count) { return [bool](@($f.Items | Where-Object { Test-FindingActionable $_ }).Count) }
     if ($f.Status -notin 'Detected', 'Allowed', 'Failed') { return $false }
     if ($f.Source -eq 'Microsoft Defender') { return $true }
     return [bool]($f.Path -and (Test-Path -LiteralPath $f.Path -PathType Leaf))
+}
+
+function Get-FindingById([string]$Id) {
+    # Findings, and the files listed under grouped ones.
+    foreach ($f in @($script:ScanFindings)) {
+        if ($f.Id -eq $Id) { return $f }
+        if ($f.PSObject.Properties['Items']) { foreach ($i in @($f.Items)) { if ($i.Id -eq $Id) { return $i } } }
+    }
+    return $null
+}
+
+$script:StatusWords = @{ Quarantined = 'In quarantine'; Removed = 'Removed'; Allowed = 'Left in place'; Failed = 'Last try didn''t work' }
+function New-FindingButtons($f, [switch]$Compact) {
+    # Remove it (which asks how), Quarantine, and - for a whole finding - Leave it for now.
+    $btns = New-Object System.Windows.Controls.WrapPanel
+    $remove = New-Button 'Remove it'
+    $remove.Tag = $f.Id
+    $remove.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Choose' })
+    $quar = New-Button 'Quarantine'
+    $quar.Tag = $f.Id
+    Set-MoreInfo $quar 'Moves it somewhere it can''t run. You can put it back from this tab.'
+    $quar.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Quarantine' })
+    $set = @($quar, $remove)
+    if (-not $Compact) {
+        $leave = New-Button 'Leave it for now'
+        $leave.Tag = $f.Id
+        $leave.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Allow' })
+        $set += $leave
+    }
+    foreach ($x in $set) {
+        $x.Margin = Get-Thick '0,0,8,0'
+        if ($Compact) { $x.Padding = Get-Thick '10,3' }
+        [void]$btns.Children.Add($x)
+    }
+    return $btns
 }
 
 function New-FindingCard($f) {
@@ -2264,42 +2497,45 @@ function New-FindingCard($f) {
     [void]$head.Children.Add($chip)
     [void]$head.Children.Add((New-Text $f.Title 16 'SemiBold' '#0F1B1C' '0' 'Fraunces, Georgia'))
     [void]$sp.Children.Add($head)
-    $facts = @("found by $($f.Source)")
-    if ($f.Confidence) { $facts += "confidence: $($f.Confidence)" }
-    if ($f.Status) { $facts += "status: $($f.Status)" }
-    if ($f.Category) { $facts += $f.Category }
-    [void]$sp.Children.Add((New-Text ($facts -join '   |   ') 12 'Normal' '#4B5B5C' '0,6,0,0'))
-    if ($f.What) { [void]$sp.Children.Add((New-Text $f.What 13.5 'Normal' '#0F1B1C' '0,8,0,0')) }
-    if ($f.Why)  { [void]$sp.Children.Add((New-Text $f.Why 13 'Normal' '#4B5B5C' '0,4,0,0')) }
-    if ($f.Path) { [void]$sp.Children.Add((New-Text ('Where: ' + $f.Path) 12.5 'Normal' '#4B5B5C' '0,6,0,0')) }
-    if ($f.Recommended) { [void]$sp.Children.Add((New-Text ('What to do: ' + $f.Recommended) 13 'SemiBold' '#117A68' '0,6,0,0')) }
+    # Who found it, in plain words; the rest of the fine print is under Technical details.
+    $by = if ($f.Source -eq 'Microsoft Defender') { 'Found by Microsoft Defender' } else { 'Quietpane''s own check - a warning sign, not proof' }
+    if ($f.Status -and $script:StatusWords[[string]$f.Status]) { $by += '   |   ' + $script:StatusWords[[string]$f.Status] }
+    [void]$sp.Children.Add((New-Text $by 12 'Normal' '#4B5B5C' '0,6,0,0'))
+    if ($f.What -and $f.What -ne $f.Title) { [void]$sp.Children.Add((New-Text $f.What 13.5 'Normal' '#0F1B1C' '0,8,0,0')) }
+    if ($f.Why -and $f.Why -ne $f.Technical) { [void]$sp.Children.Add((New-Text $f.Why 13 'Normal' '#4B5B5C' '0,4,0,0')) }
+    $grouped = $f.PSObject.Properties['Items'] -and @($f.Items).Count
+    if ($f.Path -and -not $grouped) { [void]$sp.Children.Add((New-Text ('Where: ' + $f.Path) 12.5 'Normal' '#4B5B5C' '0,6,0,0')) }
+    if ($f.Recommended) { [void]$sp.Children.Add((New-Text $f.Recommended 13 'SemiBold' '#117A68' '0,6,0,0')) }
 
-    if (Test-FindingActionable $f) {
-        $btns = New-Object System.Windows.Controls.WrapPanel
+    if ($grouped) {
+        # A row per file, each with its own buttons (or what happened to it).
+        foreach ($i in @($f.Items)) {
+            $row = New-Object System.Windows.Controls.StackPanel
+            $row.Margin = Get-Thick '0,8,0,0'
+            $name = New-Text $i.Title 13 'SemiBold' '#0F1B1C' '0'
+            Set-MoreInfo $name $i.Path
+            [void]$row.Children.Add($name)
+            [void]$row.Children.Add((New-Text (Split-Path $i.Path -Parent) 11.5 'Normal' '#66706F' '0,0,0,4'))
+            if (Test-FindingActionable $i) { [void]$row.Children.Add((New-FindingButtons $i -Compact)) }
+            elseif ($script:StatusWords[[string]$i.Status]) { [void]$row.Children.Add((New-Text $script:StatusWords[[string]$i.Status] 12.5 'SemiBold' '#117A68' '0')) }
+            [void]$sp.Children.Add($row)
+        }
+    } elseif (Test-FindingActionable $f) {
+        $btns = New-FindingButtons $f
         $btns.Margin = Get-Thick '0,10,0,0'
-        $remove = New-Button 'Remove it'
-        $remove.Tag = $f.Id
-        $remove.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Choose' })
-        $quar = New-Button 'Quarantine'
-        $quar.Tag = $f.Id
-        $quar.ToolTip = 'Move it into Quietpane''s own quarantine, where it cannot run. You can put it back later.'
-        $quar.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Quarantine' })
-        $leave = New-Button 'Leave it for now'
-        $leave.Tag = $f.Id
-        $leave.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Allow' })
-        foreach ($x in $remove, $quar, $leave) { $x.Margin = Get-Thick '0,0,8,0'; [void]$btns.Children.Add($x) }
         [void]$sp.Children.Add($btns)
     }
-    if ($f.Technical) {
+    $fine = @()
+    if ($f.Technical) { $fine += $f.Technical }
+    if ($f.Confidence) { $fine += "How sure: $($f.Confidence)" + $(if ($f.Category) { "   |   $($f.Category)" } else { '' }) }
+    if ($f.Sha256) { $fine += "SHA256: $($f.Sha256)" }
+    if ($fine.Count) {
         $ex = New-Object System.Windows.Controls.Expander
         $ex.Header = New-Text 'Technical details' 12.5 'SemiBold' '#4B5B5C' '0'
         $ex.Margin = Get-Thick '0,8,0,0'
-        $tech = New-Text $f.Technical 12 'Normal' '#4B5B5C' '0,6,0,0'
+        $tech = New-Text ($fine -join "`n") 12 'Normal' '#4B5B5C' '0,6,0,0'
         $tech.FontFamily = New-Object System.Windows.Media.FontFamily('Consolas, Courier New')
-        $inner = New-Object System.Windows.Controls.StackPanel
-        [void]$inner.Children.Add($tech)
-        if ($f.Sha256) { [void]$inner.Children.Add((New-Text ('SHA256: ' + $f.Sha256) 12 'Normal' '#4B5B5C' '0,6,0,0')) }
-        $ex.Content = $inner
+        $ex.Content = $tech
         [void]$sp.Children.Add($ex)
     }
     $b.Child = $sp
@@ -2322,7 +2558,7 @@ function Show-Findings {
     # Buttons only appear where there is a file left to act on. Say so once, rather than leaving
     # people wondering why a finding has no buttons.
     if (-not @($shown | Where-Object { Test-FindingActionable $_ }).Count) {
-        [void]$script:FindingsPanel.Children.Add((New-Text 'None of these needs an action from you: they are settings and signs to look at, not files to remove. What to do about each one is written under it.' 12.5 'Normal' '#4B5B5C' '0,0,0,8'))
+        [void]$script:FindingsPanel.Children.Add((New-Text 'None of these are files to remove. Each one says what to do.' 12.5 'Normal' '#4B5B5C' '0,0,0,8'))
     }
     foreach ($f in $shown) { [void]$script:FindingsPanel.Children.Add((New-FindingCard $f)) }
     if ($list.Count -gt $shown.Count) {
@@ -2332,7 +2568,7 @@ function Show-Findings {
 
 function Invoke-FindingAction([string]$Id, [string]$Action) {
     if (Test-Busy) { return }   # ask nothing we cannot then carry out
-    $f = @($script:ScanFindings | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
+    $f = Get-FindingById $Id
     if (-not $f) { return }
     $where = if ($f.Path) { "`n$($f.Path)" } else { '' }
     $force = $false
@@ -2349,7 +2585,9 @@ function Invoke-FindingAction([string]$Id, [string]$Action) {
         }
         $options += @{ Key = 'Quarantine'; Label = 'Quarantine it with Quietpane'; Primary = ($f.Source -ne 'Microsoft Defender'); Note = 'Moved somewhere it cannot run. You can restore it from this tab.' }
         $options += @{ Key = 'RecycleBin'; Label = 'Move it to the Recycle Bin'; Note = 'Stays on your PC until you empty the bin.' }
-        $options += @{ Key = 'Delete'; Label = 'Delete it permanently'; Note = 'Gone for good. Quietpane cannot undo this one.' }
+        # Quietpane's own checks can be wrong, so say so where it matters most.
+        $deleteNote = if ($f.Source -eq 'Microsoft Defender') { 'Gone for good. Quietpane cannot undo this one.' } else { 'Gone for good - only if you''re sure. Quietpane''s checks can be wrong.' }
+        $options += @{ Key = 'Delete'; Label = 'Delete it permanently'; Note = $deleteNote }
         $chosen = Show-ChoiceDialog -Title 'Quietpane' -Message "What should happen to this?`n`n$($f.Title)$where" -Options $options
         if (-not $chosen) { return }
         $Action = $chosen
@@ -2384,7 +2622,7 @@ function Update-QuarantineList {
     }
     $script:QuarantineBox.Visibility = 'Visible'
     $script:QuarantineBox.Header = New-Text ('In quarantine ({0})' -f $items.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
-    [void]$script:QuarantinePanel.Children.Add((New-Text 'These files were moved somewhere they cannot run. They are still on this PC until you delete them.' 12.5 'Normal' '#4B5B5C' '0,0,0,8'))
+    [void]$script:QuarantinePanel.Children.Add((New-Text 'Moved where they can''t run - still on this PC until you delete them.' 12.5 'Normal' '#4B5B5C' '0,0,0,8'))
     foreach ($i in $items) {
         $row = New-Object System.Windows.Controls.Border
         $row.BorderBrush = Get-Brush '#E6DFCC'; $row.BorderThickness = Get-Thick '0,0,0,1'
@@ -2664,6 +2902,8 @@ $ui.Tabs.Add_SelectionChanged({
     param($s, $e)
     if ($e.OriginalSource -eq $ui.Tabs) { Update-Buttons; Set-TimerQuick }
 })
+# F5 reads the PC again, as in most Windows apps. (If something is already running, the status line says so.)
+$window.Add_PreviewKeyDown({ param($s, $e) if ($e.Key -eq 'F5') { $e.Handled = $true; Update-State } })
 
 $window.Add_Closing({
     param($s, $e)
@@ -2677,6 +2917,97 @@ $window.Add_Closing({
 $ui.Tabs.SelectedIndex = 0
 
 # ------------------------------------------------------------------ self-test / snapshot
+function Get-UnnamedControls {
+    <#
+        Every control you can reach with the keyboard that a screen reader would have no name for. Used
+        by the self-test, so a control added later without a name is caught rather than shipped.
+    #>
+    $found = New-Object System.Collections.ArrayList
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($window)
+    while ($stack.Count) {
+        $el = $stack.Pop()
+        $reachable = ($el -is [System.Windows.Controls.Primitives.ButtonBase] -or $el -is [System.Windows.Controls.Expander] -or
+                      $el -is [System.Windows.Controls.TabItem] -or $el -is [System.Windows.Controls.ComboBox] -or
+                      $el -is [System.Windows.Controls.ListBox] -or $el -is [System.Windows.Controls.TextBox] -or
+                      ($el -is [System.Windows.Controls.ScrollViewer] -and $el.Focusable))
+        if ($reachable) {
+            $name = ''
+            try { $name = [System.Windows.Automation.Peers.UIElementAutomationPeer]::CreatePeerForElement($el).GetName() } catch { }
+            if (-not "$name".Trim()) { [void]$found.Add($el.GetType().Name) }
+        } elseif ($el -is [System.Windows.Documents.Hyperlink]) {
+            $name = ''
+            try { $name = [System.Windows.Automation.Peers.ContentElementAutomationPeer]::CreatePeerForElement($el).GetName() } catch { }
+            if (-not "$name".Trim()) { [void]$found.Add('Hyperlink') }
+        }
+        foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($el)) { if ($child -is [System.Windows.DependencyObject]) { $stack.Push($child) } }
+    }
+    return @($found)
+}
+function Get-TabWords {
+    <#
+        How many words each tab shows - its text, labels and buttons, not the details log. Used by the
+        self-test (QP_WORDS=1) to keep the window from filling up with words again.
+    #>
+    foreach ($tab in $ui.Tabs.Items) {
+        $words = 0
+        $stack = New-Object System.Collections.Stack
+        $stack.Push($tab.Content)
+        while ($stack.Count) {
+            $el = $stack.Pop()
+            $text = ''
+            if ($el -is [System.Windows.Controls.TextBlock] -and $el.Visibility -eq 'Visible') { $text = $el.Text }
+            elseif ($el -is [System.Windows.Controls.ContentControl] -and $el.Content -is [string]) { $text = $el.Content }
+            elseif ($el -is [System.Windows.Controls.HeaderedContentControl] -and $el.Header -is [string]) { $text = $el.Header }
+            if ($el -is [System.Windows.Controls.TextBox]) { $text = '' }   # the policy documents, read on demand
+            $words += @("$text" -split '\s+' | Where-Object { $_ -match '\w' }).Count
+            if ($el -is [System.Windows.UIElement] -and $el.Visibility -ne 'Visible') { continue }
+            foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($el)) { if ($child -is [System.Windows.DependencyObject]) { $stack.Push($child) } }
+        }
+        '{0}={1}' -f $tab.Header, $words
+    }
+}
+function Test-FindingCards {
+    <#
+        A Medium file, a Low file, one card holding two files, and a setting. Every file gets Quarantine
+        and Remove; the setting gets neither. Returns how many Quarantine buttons were drawn (4 is right)
+        and how many controls on those cards have no name. The test files are its own, in Temp.
+    #>
+    $dir = Join-Path $env:TEMP ('qp-cards-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($dir)
+    try {
+        $files = foreach ($n in 'one.exe', 'two.exe', 'three.exe', 'four.exe') { $p = Join-Path $dir $n; [IO.File]::WriteAllText($p, 'test'); $p }
+        $medium = New-QpFinding -Severity Medium -Title 'Medium file' -Path $files[0] -Confidence Heuristic
+        $low = New-QpFinding -Severity Low -Title 'Low file' -Path $files[1] -Confidence Heuristic
+        $group = New-QpFinding -Severity Medium -Title '2 unsigned programs' -Confidence Heuristic
+        $group | Add-Member -NotePropertyName Items -NotePropertyValue @((New-QpFinding -Severity Medium -Title 'three.exe' -Path $files[2]), (New-QpFinding -Severity Medium -Title 'four.exe' -Path $files[3]))
+        $setting = New-QpFinding -Severity Medium -Title 'A proxy is configured' -Confidence Heuristic
+        $script:ScanFindings = @($medium, $low, $group, $setting)
+        $script:SevFilter = 'All'
+        Show-Findings
+        $quarantine = 0
+        $stack = New-Object System.Collections.Stack
+        $stack.Push($script:FindingsPanel)
+        while ($stack.Count) {
+            $el = $stack.Pop()
+            if ($el -is [System.Windows.Controls.Button] -and $el.Content -eq 'Quarantine') { $quarantine++ }
+            foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($el)) { if ($child -is [System.Windows.DependencyObject]) { $stack.Push($child) } }
+        }
+        return [pscustomobject]@{ Quarantine = $quarantine; Unnamed = @(Get-UnnamedControls).Count }
+    } finally {
+        [IO.Directory]::Delete($dir, $true)   # the four test files made above
+        $script:ScanFindings = @()
+        $script:FindingsPanel.Children.Clear()
+    }
+}
+function Test-Badge {
+    # The taskbar badge draws and clears again.
+    Update-TaskbarBadge ([pscustomobject]@{ Count = 3 })
+    $drawn = $null -ne $window.TaskbarItemInfo.Overlay -and $window.Title -like '*3 things*'
+    Update-TaskbarBadge $null
+    return ($drawn -and $null -eq $window.TaskbarItemInfo.Overlay -and $window.Title -eq 'Quietpane - by KomodoWorks')
+}
+
 if ($SelfTest) {
     # A PC with nothing on it at all: every part of the window has to cope with empty lists and with
     # a part that could not be read, rather than leaving a blank tab behind.
@@ -2689,7 +3020,14 @@ if ($SelfTest) {
         Update-NetList ([pscustomobject]@{ Programs = @(); LocalOnly = @(); Internet = 0; At = (Get-Date) })
         Show-Findings
         Update-TickCount
-        '{0} tabs, empty state drawn OK, status: {1}' -f $ui.Tabs.Items.Count, $ui.Status.Text
+        $unnamed = @(Get-UnnamedControls)
+        '{0} tabs, empty state drawn OK, unnamed controls: {1} {2}, status: {3}' -f $ui.Tabs.Items.Count, $unnamed.Count, ($unnamed -join ','), $ui.Status.Text
+        return
+    }
+    if ($env:QP_WORDS) {
+        # Words per tab, with this PC's real state drawn in (read-only, as the snapshot does).
+        Update-FromState (& $script:ReadState)
+        'words: ' + ((Get-TabWords) -join ', ')
         return
     }
     if ($Snapshot) {
@@ -2722,7 +3060,9 @@ if ($SelfTest) {
         $fs = [IO.File]::Create($Snapshot); $enc.Save($fs); $fs.Close()
     }
     $iconSizes = if ($window.Icon.Decoder) { @($window.Icon.Decoder.Frames).Count } else { 0 }
-    '{0} tabs, {1} privacy items, logo loaded: {2}, icon sizes: {3}, window built OK' -f $ui.Tabs.Items.Count, $script:Options['privacy'].Count, [bool]$logo, $iconSizes
+    $unnamed = @(Get-UnnamedControls)
+    $cards = Test-FindingCards
+    '{0} tabs, {1} privacy items, logo loaded: {2}, icon sizes: {3}, unnamed controls: {4} {5}, badge: {6}, finding quarantine buttons: {7} (unnamed {8}), window built OK' -f $ui.Tabs.Items.Count, $script:Options['privacy'].Count, [bool]$logo, $iconSizes, $unnamed.Count, ($unnamed -join ','), $(if (Test-Badge) { 'OK' } else { 'failed' }), $cards.Quarantine, $cards.Unnamed
     return
 }
 
@@ -2745,23 +3085,46 @@ function Show-Welcome {
 }
 
 $script:FirstShown = $false
+$script:LastReadAt = $null
+function Start-FirstRead {
+    # In the background, the first read of the PC. Before it: shortcuts and the sign-in start always open
+    # Quietpane's own copy, so keep that copy current and point back any shortcut that still opens a
+    # folder that may have moved (it does nothing if you have neither). After it, the About tab's button
+    # and tick boxes are filled in, once that is settled.
+    Start-Work -StatusText 'Reading the current state of this PC...' -Work {
+        try { [void](Sync-QpInstall) } catch { Write-QpLog "Could not check the shortcuts: $($_.Exception.Message)" 'WARN' }
+        Get-QpState
+    } -OnDone {
+        param($s)
+        Update-FromState $s; Update-PlaceControls; $script:LastReadAt = Get-Date
+        # The sign-in check is done and nobody has opened the window: back to doing nothing at all.
+        if (-not $script:FirstShown) { $timer.Stop() }
+    }
+}
 function Start-FirstShow {
     if ($script:FirstShown) { return }
     $script:FirstShown = $true
     if (-not (Show-Welcome)) { $window.Close(); return }
     $ui.LogBox.AppendText(('Quietpane {0} - Developed by KomodoWorks.com. Started {1}. Administrator: {2}. This app makes no network connections.' -f $info.Version, (Get-QpStamp 'yyyy-MM-dd HH:mm'), (Test-IsAdmin)) + [Environment]::NewLine)
     if (-not $timer.IsEnabled) { $timer.Start() }
-    # In the background, with the first read of the PC: shortcuts and the sign-in start always open
-    # Quietpane's own copy, so keep that copy current and point back any shortcut that still opens a
-    # folder that may have moved (it does nothing if you have neither). Then the About tab's button and
-    # tick box are filled in, once that is settled.
-    Start-Work -StatusText 'Reading the current state of this PC...' -Work {
-        try { [void](Sync-QpInstall) } catch { Write-QpLog "Could not check the shortcuts: $($_.Exception.Message)" 'WARN' }
-        Get-QpState
-    } -OnDone { param($s) Update-FromState $s; Update-PlaceControls }
+    # A check made at sign-in a few minutes ago is still fresh, and one may still be under way;
+    # otherwise read the PC now.
+    $fresh = $script:LastReadAt -and ((Get-Date) - $script:LastReadAt).TotalMinutes -lt 10
+    if (-not $script:Job -and -not $fresh) { Start-FirstRead }
     Start-LiveSampler
 }
+function Start-SignInCheck {
+    <#
+        Started at sign-in with "tell me if Windows switches things back on": read the PC once, quietly,
+        exactly as opening Quietpane would. If anything came back, Update-CameBack puts the badge on the
+        taskbar icon; if nothing did, nothing shows at all. Never before the welcome has been accepted.
+    #>
+    if (-not (Test-Path $acceptFile)) { return }
+    if (-not $timer.IsEnabled) { $timer.Start() }
+    Start-FirstRead
+}
 $window.Add_ContentRendered({ Start-FirstShow })
+if ($Minimized -and $Watch) { $window.Add_Loaded({ Start-SignInCheck }) }
 # Opened minimised at sign-in, Windows never sends ContentRendered - so start the first time it is opened.
 $window.Add_StateChanged({ if ($window.WindowState -ne 'Minimized') { Start-FirstShow }; Set-TimerQuick })
 # Opened minimised at sign-in, even the clock waits until Quietpane is first opened.

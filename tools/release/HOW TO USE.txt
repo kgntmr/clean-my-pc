@@ -33,11 +33,19 @@ ALSO IN THE APP
    About      One button puts Quietpane in your Start menu and on your
               desktop, and a tick box starts it when you sign in. Both
               keep working even if you move or delete this folder.
+              Another tick box has it tell you - with a small badge on
+              its taskbar icon - if Windows switches things back on.
    Undo       Changed your mind? Everything recorded can be put back.
               Cleaned-up files are in your Recycle Bin.
 
    Open Quietpane again now and then. Big Windows updates sometimes switch
    things back on, and Home will tell you what came back.
+
+   Every line is kept short. Point at anything - or Tab to it - to see the
+   full explanation.
+
+   Quietpane works with just a keyboard (Tab, arrow keys, Enter, Esc, and
+   F5 to look again) and with screen readers such as Narrator.
 
 JUST WANT A CHECK-UP THAT CHANGES NOTHING?
    Double-click "Safety scan only". For anything it finds, you choose what

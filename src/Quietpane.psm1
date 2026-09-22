@@ -19,7 +19,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.11.1'
+$script:AppVersion  = '1.12.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -869,8 +869,13 @@ function Update-QpQuietNote {
         Save-Note $now ((Get-Date).ToString('s')) $win
         return $nothing
     }
-    $gonePrivacy = @(@($old.Privacy) | Where-Object { $_ -and $now.Privacy -notcontains $_ })
-    $goneVendors = @(@($old.Vendors) | Where-Object { $_ -and $now.Vendors -notcontains $_ })
+    # Only what is really on again counts. A setting this PC no longer has, one a newer Quietpane no longer
+    # lists, or a brand extra whose app was uninstalled hasn't "come back" - it has gone, and saying
+    # otherwise would be a false alarm (and, with the sign-in check, a badge for nothing).
+    $gonePrivacy = @(@($old.Privacy) | Where-Object { $_ -and $State.Privacy[$_] -in 'NotApplied', 'Partial' })
+    $vendorNow = @{}
+    foreach ($v in @($State.Vendors | Where-Object { $_ })) { foreach ($i in @($v.Items)) { $vendorNow[[string]$i.Id] = [string]$i.Status } }
+    $goneVendors = @(@($old.Vendors) | Where-Object { $_ -and $vendorNow[$_] -in 'NotApplied', 'Partial' })
     $backApps    = @($now.AppsPresent | Where-Object { $_ -and @($old.AppsPresent) -notcontains $_ })
     # Only startup items that still exist and are on again count; one that was uninstalled hasn't "come back".
     $backStart   = @(@($old.StartupOff) | Where-Object { $id = $_; $id -and $now.StartupOff -notcontains $id -and @($State.Startup | Where-Object { $_.Id -eq $id -and $_.On }).Count })
@@ -2295,16 +2300,37 @@ function Test-QpSignInStart {
     return [bool]($t -and "$($t.State)" -ne 'Disabled')
 }
 
-function Get-QpSignInAction([string]$Script) {
-    New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument ('-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}" -Minimized' -f $Script)
+function Get-QpSignInAction {
+    <#
+        What the sign-in task runs. -Watch adds "check once, quietly, for anything Windows switched back
+        on" - the choice lives in the task itself, so there is no separate setting to get out of step.
+    #>
+    param([string]$Script, [switch]$Watch)
+    $argLine = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}" -Minimized' -f $Script
+    if ($Watch) { $argLine += ' -Watch' }
+    New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument $argLine
+}
+
+function Test-QpTaskWatches($Task) {
+    <# Whether a sign-in task also checks for things that came back. #>
+    return [bool]($Task -and @(@($Task.Actions) | Where-Object { "$($_.Arguments)" -match '(^|\s)-Watch(\s|$)' }).Count)
+}
+
+function Test-QpSignInWatch {
+    param([string]$Name = $script:SignInTaskName)
+    return (Test-QpTaskWatches (Get-QpSignInTask -Name $Name))
 }
 
 function Test-QpOwnSignInTask($Task) {
     <# Quietpane's own sign-in task, exactly as Quietpane makes it. A task that only borrows the name is not. #>
     if (-not $Task -or $Task.TaskPath -ne '\' -or $Task.TaskName -ne $script:SignInTaskName) { return $false }
     $a = @($Task.Actions)
-    $want = Get-QpSignInAction (Join-Path $script:InstallRoot 'Quietpane.ps1')
-    return ($a.Count -eq 1 -and $a[0].Execute -ieq $want.Execute -and $a[0].Arguments -ceq $want.Arguments)
+    if ($a.Count -ne 1) { return $false }
+    $opens = Join-Path $script:InstallRoot 'Quietpane.ps1'
+    foreach ($want in (Get-QpSignInAction $opens), (Get-QpSignInAction $opens -Watch)) {
+        if ($a[0].Execute -ieq $want.Execute -and $a[0].Arguments -ceq $want.Arguments) { return $true }
+    }
+    return $false
 }
 
 function New-QpSignInTask {
@@ -2313,18 +2339,19 @@ function New-QpSignInTask {
         this way Windows doesn't ask you for them every time you sign in. Only describes the task;
         Register-QpSignInTask is what hands it to Windows.
     #>
-    param([string]$Script)
+    param([string]$Script, [switch]$Watch)
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
     $trigger.Delay = 'PT20S'   # let Windows finish signing you in first
     # A laptop on battery still starts it, and it is never stopped for running "too long".
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -Priority 6
     $parts = @{
-        Action      = Get-QpSignInAction $Script
+        Action      = Get-QpSignInAction $Script -Watch:$Watch
         Trigger     = $trigger
         Principal   = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
         Settings    = $settings
-        Description = 'Opens Quietpane on the taskbar when you sign in. Switch it off in Quietpane > About.'
+        Description = $(if ($Watch) { 'Opens Quietpane on the taskbar when you sign in, and checks once for anything Windows switched back on. Change this in Quietpane > About.' }
+                        else { 'Opens Quietpane on the taskbar when you sign in. Switch it off in Quietpane > About.' })
     }
     $task = New-ScheduledTask @parts
     $task.Author = 'KomodoWorks'
@@ -2332,20 +2359,28 @@ function New-QpSignInTask {
 }
 
 function Register-QpSignInTask {
-    param([string]$Script, [string]$Name = $script:SignInTaskName)
-    Register-ScheduledTask -TaskPath '\' -TaskName $Name -InputObject (New-QpSignInTask -Script $Script) -Force -ErrorAction Stop | Out-Null
+    param([string]$Script, [string]$Name = $script:SignInTaskName, [switch]$Watch)
+    Register-ScheduledTask -TaskPath '\' -TaskName $Name -InputObject (New-QpSignInTask -Script $Script -Watch:$Watch) -Force -ErrorAction Stop | Out-Null
 }
 
 function Enable-QpSignInStart {
-    <# Opens Quietpane quietly on the taskbar each time you sign in, from its own copy in Program Files. #>
-    param([string]$InstallRoot = $script:InstallRoot, [string]$Name = $script:SignInTaskName)
+    <#
+        Opens Quietpane quietly on the taskbar each time you sign in, from its own copy in Program Files.
+        With -Watch it also checks once for anything Windows switched back on. Calling it again with or
+        without -Watch is how that choice is changed.
+    #>
+    param([string]$InstallRoot = $script:InstallRoot, [string]$Name = $script:SignInTaskName, [switch]$Watch)
     if (-not (Test-QpAdmin)) { return [pscustomobject]@{ Ok = $false; Note = 'Quietpane needs administrator rights for this, so nothing was changed.' } }
     $copy = Install-QpCopy -To $InstallRoot
     if (-not $copy.Ok) { return [pscustomobject]@{ Ok = $false; Note = $copy.Note } }
-    try { Register-QpSignInTask -Script (Join-Path $InstallRoot 'Quietpane.ps1') -Name $Name }
+    try { Register-QpSignInTask -Script (Join-Path $InstallRoot 'Quietpane.ps1') -Name $Name -Watch:$Watch }
     catch {
         Write-QpLog "Could not set Quietpane to start when you sign in: $(Get-QpFailureReason $_.Exception)" 'WARN'
         return [pscustomobject]@{ Ok = $false; Note = 'Windows would not let Quietpane start when you sign in, so nothing was changed.' }
+    }
+    if ($Watch) {
+        Write-QpLog 'Quietpane will open on the taskbar when you sign in, and check once for anything that switched back on.' 'OK'
+        return [pscustomobject]@{ Ok = $true; Note = 'When you sign in, Quietpane will check once, quietly. If anything switched back on, its taskbar icon gets a small badge.' }
     }
     Write-QpLog 'Quietpane will open on the taskbar when you sign in.' 'OK'
     [pscustomobject]@{ Ok = $true; Note = 'Quietpane will open on the taskbar each time you sign in, and wait there until you click it.' }
@@ -2390,7 +2425,7 @@ function Sync-QpInstall {
     if ($task) {
         $opens = Get-QpLinkScript ((@($task.Actions) | ForEach-Object { $_.Arguments }) -join ' ')
         if (-not (Test-QpSamePath $opens $p.Script) -and (Test-QpAdmin)) {
-            try { Register-QpSignInTask -Script $p.Script -Name $Name; $result.Repaired++; Write-QpLog "Starting at sign-in now opens Quietpane's own copy." 'OK' }
+            try { Register-QpSignInTask -Script $p.Script -Name $Name -Watch:(Test-QpTaskWatches $task); $result.Repaired++; Write-QpLog "Starting at sign-in now opens Quietpane's own copy." 'OK' }
             catch { Write-QpLog "Could not update the sign-in start: $(Get-QpFailureReason $_.Exception)" 'WARN' }
         }
     }
@@ -3049,6 +3084,18 @@ function New-QpFinding {
     }
 }
 
+function Split-QpFindingDetail {
+    <#
+        A check's detail, split for the window: plain sentences are the "why", and paths, commands,
+        registry values, dates and lists are the technical part. Each line goes to exactly one side.
+    #>
+    param([string]$Detail)
+    $lines = @("$Detail" -split "`r?`n" | Where-Object { $_.Trim() })
+    $plain = @($lines | Where-Object { $_ -match '\s\S+\s' -and $_ -match '[.!?)]\s*$' -and $_ -notmatch '[A-Za-z]:\\|\\\\|^\s*\S+\s*=|HK(LM|CU)|^\s*\d{4}-\d\d-\d\d|^\s*-\s' })
+    $tech = @($lines | Where-Object { $plain -notcontains $_ })
+    [pscustomobject]@{ Why = ($plain -join ' '); Technical = ($tech -join "`n") }
+}
+
 function Get-QpDefenderFindings {
     <# Everything Defender has detected on this PC, in Quietpane's shape. Read-only. #>
     $state = Get-QpDefenderState
@@ -3550,13 +3597,33 @@ function Invoke-QpAudit {
         }
     }
 
-    function Add-Finding([string]$Section, [string]$Severity, [string]$Title, [string]$Detail = '') {
-        # Quietpane's own checks. They are heuristics: useful signals, never proof, and never a family name.
+    function Add-Finding([string]$Section, [string]$Severity, [string]$Title, [string]$Detail = '', [string]$Path = '', [string]$Todo = '', $Items = $null) {
+        <#
+            Quietpane's own checks. They are heuristics: useful signals, never proof, and never a family
+            name. The detail is split so the window shows it once: plain sentences become the "why",
+            paths, commands and values the technical part. The report keeps the whole detail.
+            -Path is the one file the finding is about, when there is one: that is what makes Quarantine
+            and Remove possible, and its fingerprint lets Quietpane check it is still the same file first.
+            -Items is a list of such files under one heading (one card, a row each).
+        #>
         $confidence = if ($Severity -eq 'Info') { 'Informational' } else { 'Heuristic' }
-        [void]$findings.Add((New-QpFinding -Section $Section -Severity $Severity -Title $Title -Detail $Detail `
+        $split = Split-QpFindingDetail $Detail
+        $hash = ''
+        if ($Path) {
+            if (Test-Path -LiteralPath $Path -PathType Leaf) { $hash = Get-QpFileHash $Path } else { $Path = '' }   # folders are shown, never moved
+        }
+        $f = New-QpFinding -Section $Section -Severity $Severity -Title $Title -Detail $Detail `
             -Source 'Quietpane check' -Method 'Heuristic check' -Confidence $confidence `
-            -Object $Title -What $Title -Why $Detail -Technical $Detail))
+            -Object $Title -Path $Path -Sha256 $hash -What '' -Why $split.Why -Technical $split.Technical -Recommended $Todo
+        if ($Items) { $f | Add-Member -NotePropertyName Items -NotePropertyValue @($Items) }
+        [void]$findings.Add($f)
     }
+    function New-FileItem([string]$File, [string]$Note, [string]$Severity = 'Medium') {
+        # One file under a grouped finding, with everything Quarantine and Remove need.
+        New-QpFinding -Section 'Files' -Severity $Severity -Title (Split-Path $File -Leaf) -Source 'Quietpane check' -Method 'Heuristic check' `
+            -Confidence 'Heuristic' -Object $File -Path $File -Sha256 (Get-QpFileHash $File) -Technical $Note
+    }
+    $todoFile = 'If you don''t recognise it, quarantine it - you can put it back later.'
 
     $suspiciousCmd = '(?i)(cmd(\.exe)?\s+/c\s+start\s+\S*(https?:|www\.))|(\bstart\s+(https?://|www\.))|\bmshta\b|\bwscript\b|\bcscript\b|powershell[^;|]*\s-(e|enc|encodedcommand)\s|-w(indowstyle)?\s+hidden|downloadstring|\\AppData\\Local\\Temp\\|\\Users\\Public\\'
     $suspiciousTask = '(?i)reg(\.exe)?\s+add\s+\S*\\CurrentVersion\\Run|\bstart\s+\S*(https?://|www\.)|\bmshta\b|\bwscript\b|\bcscript\b|powershell[^;]*\s-(e|enc|encodedcommand)\s|downloadstring|invoke-webrequest|\\AppData\\Local\\Temp\\|\\Users\\Public\\'
@@ -3653,7 +3720,9 @@ function Invoke-QpAudit {
             $exists = (-not $targetExe) -or (Test-Path -LiteralPath $targetExe)
             if (-not $disabled -and $exists) { $startupOn++ }
             $state = if ($disabled) { ' (disabled in Task Manager)' } else { '' }
-            if ($target -match $suspiciousCmd -or $_.Extension -match '\.(bat|cmd|vbs|js|ps1|hta)$') { Add-Finding 'Startup & persistence' 'High' "Suspicious item in Startup folder: $($_.Name)$state" "$($_.FullName)`n-> $target" }
+            if ($target -match $suspiciousCmd -or $_.Extension -match '\.(bat|cmd|vbs|js|ps1|hta)$') {
+                Add-Finding 'Startup & persistence' 'High' "Suspicious item in Startup folder: $($_.Name)$state" "$($_.FullName)`n-> $target`nIt runs a script or a hidden command every time you sign in." -Path $_.FullName -Todo $todoFile
+            }
             elseif (-not $exists) { Add-Finding 'Startup & persistence' 'Info' "Leftover item in Startup folder: $($_.Name)$state" "$($_.FullName)`n-> $target`nThe program it points to no longer exists. Harmless - you can delete this shortcut." }
             else { Add-Finding 'Startup & persistence' 'Info' "Startup folder item: $($_.Name)$state" "$($_.FullName)`n-> $target" }
         }
@@ -3733,7 +3802,7 @@ function Invoke-QpAudit {
         # Only look at the executable itself, not its arguments (arguments often mention AppData legitimately).
         $exePath = if ($_.PathName -match '^\s*"([^"]+)"') { $matches[1] } elseif ($_.PathName -match '^\s*(\S+?\.exe)\b') { $matches[1] } else { $_.PathName }
         if ($exePath -match '(?i)\\AppData\\|\\Temp\\|\\Users\\Public\\') {
-            Add-Finding 'Services' 'Medium' "Service runs from a user folder: $($_.DisplayName)" "$($_.Name)`n$($_.PathName)`nState: $($_.State), start: $($_.StartMode)"
+            Add-Finding 'Services' 'Medium' "Service runs from a user folder: $($_.DisplayName)" "$($_.Name)`n$($_.PathName)`nState: $($_.State), start: $($_.StartMode)`nReal services almost always live in Program Files or Windows." -Path $exePath -Todo $todoFile
         }
     }
 
@@ -3778,7 +3847,7 @@ function Invoke-QpAudit {
         $signedIn[$Dir] = $found
         return $found
     }
-    foreach ($u in @($unsigned | Where-Object Status -eq 'HashMismatch')) { Add-Finding 'Files' 'High' "Modified signed program (signature broken): $(Split-Path $u.File -Leaf)" "$($u.File)`nThe file was signed by its publisher but has been altered since - typical of cracks or infected files." }
+    foreach ($u in @($unsigned | Where-Object Status -eq 'HashMismatch')) { Add-Finding 'Files' 'High' "Modified signed program (signature broken): $(Split-Path $u.File -Leaf)" "$($u.File)`nThe file was signed by its publisher but has been altered since - typical of cracks or infected files." -Path $u.File -Todo $todoFile }
     $alone = New-Object System.Collections.ArrayList
     $helpers = New-Object System.Collections.ArrayList
     foreach ($u in @($unsigned | Where-Object Status -ne 'HashMismatch')) {
@@ -3786,7 +3855,11 @@ function Invoke-QpAudit {
         if ($sib) { [void]$helpers.Add([pscustomobject]@{ U = $u; Sibling = $sib }) } else { [void]$alone.Add($u) }
     }
     $plain = @($alone | Select-Object -First 40)
-    if ($plain.Count) { Add-Finding 'Files' 'Medium' "$($plain.Count) unsigned program(s) in user folders (newest first)" ((($plain | ForEach-Object { '{0:yyyy-MM-dd}  {1}' -f $_.Date, $_.File }) -join "`n") + "`nUnsigned doesn't mean harmful, but make sure you recognise each one.") }
+    if ($plain.Count) {
+        # One card, a row per program, each with its own buttons - rather than a card each.
+        $rows = @(foreach ($u in $plain) { New-FileItem $u.File ('{0:yyyy-MM-dd}  {1}' -f $u.Date, $u.File) })
+        Add-Finding 'Files' 'Medium' "$($plain.Count) unsigned program(s) in user folders (newest first)" ((($plain | ForEach-Object { '{0:yyyy-MM-dd}  {1}' -f $_.Date, $_.File }) -join "`n") + "`nUnsigned doesn't mean harmful, but make sure you recognise each one.") -Todo 'Quarantine any you don''t recognise - you can put them back later.' -Items $rows
+    }
     $help = @($helpers | Select-Object -First 40)
     if ($help.Count) { Add-Finding 'Files' 'Info' "$($help.Count) unsigned helper file(s) belonging to signed programs" ((($help | ForEach-Object { "{0:yyyy-MM-dd}  {1}`n            next to {2}" -f $_.U.Date, $_.U.File, $_.Sibling }) -join "`n") + "`nMany apps ship small unsigned helpers (for example crash reporters) next to their signed main program. Lower risk.") }
 
@@ -3804,7 +3877,7 @@ function Invoke-QpAudit {
             Select-Object -ExpandProperty FullName
     }
     foreach ($i in @($indicators | Select-Object -Unique -First 25)) {
-        Add-Finding 'Files' 'Medium' 'Cracked/unofficial software indicator' "$i`nCracked games and software are one of the most common ways adware and password stealers get onto PCs."
+        Add-Finding 'Files' 'Medium' 'Cracked/unofficial software indicator' "$i`nCracked games and software are one of the most common ways adware and password stealers get onto PCs." -Path $i -Todo $todoFile
     }
 
     # ---- 8. Browsers
@@ -4063,7 +4136,7 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
     $lookedAt = if ($Scanned -gt 0) { ' &middot; {0:N0} things looked at' -f $Scanned } else { '' }
     [void]$sb.Append(('<p class="meta">{0} &middot; version {1} &middot; read-only scan, nothing was changed{2}{3}</p>' -f (Get-QpStamp 'yyyy-MM-dd HH:mm'), $script:AppVersion, $lookedAt, $adminNote))
     # Severity doughnut plus a written legend: the chart never carries meaning through colour alone.
-    $colours = @{ Critical = '#7b1d1d'; High = '#a83232'; Medium = '#9a6700'; Low = '#8a8578'; Info = '#117a68' }
+    $colours = @{ Critical = '#7b1d1d'; High = '#a83232'; Medium = '#9a6700'; Low = '#6e695c'; Info = '#117a68' }   # all pass WCAG AA under white text
     $meaning = @{ Critical = 'act now'; High = 'act on it'; Medium = 'worth a look'; Low = 'minor'; Info = 'just so you know' }
     $plain = @{}
     foreach ($s in 'Critical', 'High', 'Medium', 'Low', 'Info') { $plain[$s] = [int]$Counts[$s] }
@@ -4113,9 +4186,10 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpShortcutPaths, Test-QpShortcuts, New-QpShortcuts, Remove-QpShortcuts, Initialize-QpShortcut, Get-QpOwnShortcuts,
     Install-QpCopy, Remove-QpCopy, Start-QpCopyRemoval, Get-QpAppVersion, Compare-QpVersion, Test-QpCopyMatches, Sync-QpInstall,
     Get-QpSignInTask, Test-QpSignInStart, Enable-QpSignInStart, Disable-QpSignInStart, Test-QpOwnSignInTask, New-QpSignInTask, Get-QpSignInAction,
+    Test-QpSignInWatch, Test-QpTaskWatches,
     Get-QpConnections, Get-QpAddressLabel, Test-QpPrivateAddress,
     Get-QpVendorStatus, Invoke-QpVendor, Invoke-QpVendorUninstall, Split-QpUninstallCommand,
-    Get-QpRegValue, Get-QpTasksByPath, Get-QpTasksMatching, Get-QpStamp,
+    Get-QpRegValue, Get-QpTasksByPath, Get-QpTasksMatching, Get-QpStamp, Split-QpFindingDetail,
     Get-QpDefenderState, Get-QpDefenderFindings, Invoke-QpThreatScan, Invoke-QpRemediate, Get-QpAllowList, Resolve-QpThreatInfo, New-QpFinding,
     New-QpDonutSvg, New-QpReportHtml, Get-QpFileHash,
     Invoke-QpQuarantine, Get-QpQuarantineItems, Restore-QpQuarantineItem, Remove-QpQuarantineItem, Test-QpProtectedPath, Test-QpFindingStillTrue,

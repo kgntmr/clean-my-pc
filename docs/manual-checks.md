@@ -103,6 +103,25 @@ These need eyes, not assertions:
   not ask for administrator rights. Task Manager shows it using no processor time until you click it;
   then it opens and looks at the PC as usual. The Safety scan lists the task as "Quietpane's own
   sign-in start".
+- **Told when things come back.** Tick "Also tell me if Windows switches things back on" too. Switch
+  one of your startup items back on in Task Manager, sign out and back in. Quietpane's taskbar icon
+  shows a small amber "1", and hovering it says "1 thing switched itself back on"; opening it shows
+  the Welcome back panel. "That was me" (or switching it off again) clears the badge. With nothing
+  back on, the icon has no badge at all. Untick the box and the next sign-in doesn't check.
+- **Short on screen, full underneath.** On Privacy, each setting is one line and one short note. Point
+  at one (or Tab to it) and the full explanation appears; Narrator reads the same words. Nothing that
+  warns about a side effect is hidden: "Turn off printing" still says "only if you never print".
+- **Medium and Low findings can be acted on.** After a Safety scan, a Medium finding with a file behind
+  it - unsigned programs, a cracked-software file, a service running from a user folder - has
+  Quarantine and Remove it. The unsigned-programs card has buttons on each row, and quarantining one
+  row leaves the others alone. A finding about a setting (a proxy, the firewall) has no buttons.
+- **Keyboard only.** Put the mouse away. Tab moves through every button, tick box and link with a
+  teal outline around the one you're on; Ctrl+Tab changes tab; Space or Enter presses; arrow keys and
+  Page Down scroll a page; F5 reads the PC again; Esc closes the choice window, which opens with the
+  safest choice already selected.
+- **With Narrator.** Ctrl+Win+Enter starts Narrator. Moving through the window, every control is read
+  by name (the Safety scan's legend reads like "High: 2 findings - ... Show only these"), and the
+  status line is read out as it changes, such as "All done - nothing running".
 - **Taking them away.** Untick the box and remove the shortcuts. The task is gone from Task
   Scheduler, and `C:\Program Files\Quietpane` is in the Recycle Bin - straight away if you opened
   Quietpane from the unzipped folder, or a moment after closing it if you opened it from the Start menu.

@@ -13,7 +13,7 @@
             '-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
 
     (all on one line). An elevated window says "Administrator:" in its title bar and starts in
-    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated with -Live: 162 checks run.
+    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated with -Live: 171 checks run.
 
     No real malware is ever used. The only live test writes the EICAR string - the harmless standard file
     the antivirus industry publishes so people can check their protection works - into a temporary folder,
@@ -42,7 +42,7 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 }
 function Section([string]$Name) { Write-Host "`n$Name" -ForegroundColor Cyan }
 
-$colours = @{ Critical = '#7b1d1d'; High = '#a83232'; Medium = '#9a6700'; Low = '#8a8578'; Info = '#117a68' }
+$colours = @{ Critical = '#7b1d1d'; High = '#a83232'; Medium = '#9a6700'; Low = '#6e695c'; Info = '#117a68' }
 
 Section 'Threat names to plain language'
 Test-Case 'ransomware becomes Critical' { (Resolve-QpThreatInfo -ThreatName 'Ransom:Win32/WannaCrypt.A!ml').Tier -eq 'Critical' }
@@ -744,6 +744,26 @@ Test-Case 'an app that came back is reported; one that went is not' {
     $gone = Update-QpQuietNote -State (New-FakeState -Apps @()) -Path $notePath
     $back.Count -eq 1 -and $back.Apps[0].Id -eq 'Returned' -and $back.Apps[0].Title -eq 'App Returned' -and $gone.Count -eq 0
 }
+Test-Case 'a setting this PC no longer has, or Quietpane no longer lists, is never reported as back' {
+    Update-QpQuietNote -State (New-FakeState $pIds[0..2]) -Path $notePath -Accept | Out-Null
+    # One setting is no longer on this PC at all, and the note also names one a newer catalog dropped.
+    $note = Get-Content -LiteralPath $notePath -Raw | ConvertFrom-Json
+    $note.Privacy = @(@($note.Privacy) + 'retired.setting')
+    $note | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $notePath -Encoding UTF8
+    $s = New-FakeState $pIds[1..2]; $s.Privacy[$pIds[0]] = 'NotApplicable'
+    (Update-QpQuietNote -State $s -Path $notePath).Count -eq 0
+}
+Test-Case 'a brand extra is reported when it is back on, not when its app was uninstalled' {
+    function New-VendorState([string]$Status) {
+        $s = New-FakeState $pIds[0..2]
+        if ($Status) { $s.Vendors = @([pscustomobject]@{ Name = 'Brand'; Items = @([pscustomobject]@{ Id = 'brand.helper'; Title = 'Brand helper'; Status = $Status }) }) }
+        $s
+    }
+    Update-QpQuietNote -State (New-VendorState 'Applied') -Path $notePath -Accept | Out-Null
+    $uninstalled = Update-QpQuietNote -State (New-VendorState '') -Path $notePath
+    $backOn = Update-QpQuietNote -State (New-VendorState 'NotApplied') -Path $notePath
+    $uninstalled.Count -eq 0 -and $backOn.Count -eq 1 -and $backOn.Vendors[0].Title -eq 'Brand helper'
+}
 Test-Case 'a startup item back on is reported; an uninstalled one is not' {
     Update-QpQuietNote -State (New-FakeState -Startup @((New-FakeStartup 's1' $false), (New-FakeStartup 's2' $false))) -Path $notePath -Accept | Out-Null
     $d = Update-QpQuietNote -State (New-FakeState -Startup @((New-FakeStartup 's1' $true))) -Path $notePath   # s1 back on, s2 gone
@@ -1140,6 +1160,20 @@ Test-Case 'the safety scan knows Quietpane''s own sign-in task, but not one that
     $moved = [pscustomobject]@{ TaskPath = '\Other\'; TaskName = 'Quietpane (KomodoWorks)'; Actions = $good.Actions }
     (Test-QpOwnSignInTask $good) -and -not (Test-QpOwnSignInTask $bad) -and -not (Test-QpOwnSignInTask $moved)
 }
+Test-Case 'the sign-in start can also check once for things that came back, and the task itself carries that choice' {
+    $plain = New-QpSignInTask -Script 'C:\Program Files\Quietpane\Quietpane.ps1'
+    $watch = New-QpSignInTask -Script 'C:\Program Files\Quietpane\Quietpane.ps1' -Watch
+    @($plain.Actions)[0].Arguments -like '*-Minimized' -and @($watch.Actions)[0].Arguments -like '*-Minimized -Watch' -and
+    -not (Test-QpTaskWatches $plain) -and (Test-QpTaskWatches $watch) -and $watch.Description -match 'checks once'
+}
+Test-Case 'the safety scan knows both kinds of Quietpane sign-in task as its own, and nothing with extras' {
+    $pf = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+    $opens = Join-Path $pf 'Quietpane\Quietpane.ps1'
+    $watching = [pscustomobject]@{ TaskPath = '\'; TaskName = 'Quietpane (KomodoWorks)'; Actions = @(Get-QpSignInAction $opens -Watch) }
+    $extra = [pscustomobject]@{ TaskPath = '\'; TaskName = 'Quietpane (KomodoWorks)'
+        Actions = @([pscustomobject]@{ Execute = (Get-QpSignInAction $opens).Execute; Arguments = (Get-QpSignInAction $opens -Watch).Arguments + ' -Other' }) }
+    (Test-QpOwnSignInTask $watching) -and -not (Test-QpOwnSignInTask $extra)
+}
 Test-Case 'switching the sign-in start on and off (needs administrator rights)' {
     if (-not (Test-QpAdmin)) { return 'skip' }
     $name = 'Quietpane test - safe to delete'
@@ -1148,6 +1182,10 @@ Test-Case 'switching the sign-in start on and off (needs administrator rights)' 
         $on = Enable-QpSignInStart -InstallRoot $to -Name $name
         $t = Get-QpSignInTask -Name $name
         $ok = $on.Ok -and $t -and (Test-QpSignInStart -Name $name) -and "$($t.Principal.RunLevel)" -eq 'Highest' -and (Get-QpAppVersion $to)
+        # Ticking "also tell me" and unticking it again sets the same task up with and without -Watch.
+        $ok = $ok -and -not (Test-QpSignInWatch -Name $name)
+        $ok = $ok -and (Enable-QpSignInStart -InstallRoot $to -Name $name -Watch).Ok -and (Test-QpSignInWatch -Name $name)
+        $ok = $ok -and (Enable-QpSignInStart -InstallRoot $to -Name $name).Ok -and -not (Test-QpSignInWatch -Name $name)
         # The copy is this test's own; it goes first, so switching off has nothing to send to your Recycle Bin.
         [IO.Directory]::Delete($to, $true)
         $off = Disable-QpSignInStart -InstallRoot $to -Name $name
@@ -1185,14 +1223,82 @@ Test-Case 'the window''s calls into Windows only name the app and ask for a shar
     ($calls -join ';') -eq 'shell32!SetCurrentProcessExplicitAppUserModelID;user32!SetProcessDPIAware'
 }
 
+Section 'Plain words, and something to do about them'
+Test-Case 'a check''s detail splits into plain words on the card and technical lines underneath' {
+    $d = Split-QpFindingDetail "C:\Users\me\AppData\Local\Temp\thing.exe`nHKCU:\Software\Run = thing.exe`n2026-09-22  C:\x\y.exe`nThis launches a hidden command every time you sign in."
+    $d.Why -eq 'This launches a hidden command every time you sign in.' -and
+    $d.Technical -match 'thing\.exe' -and $d.Technical -match 'HKCU' -and $d.Technical -notmatch 'launches a hidden'
+}
+Test-Case 'every privacy setting has a plain title and a short line, with the full text kept for the tooltip' {
+    $items = @((Get-QpCatalog privacy).Items)
+    $longTitles = @($items | Where-Object { @("$($_.Title)" -split '\s+').Count -gt 9 })
+    $longShorts = @($items | Where-Object { @("$($_.Short)" -split '\s+').Count -gt 12 })
+    $jargon = @($items | Where-Object { $_.Title -match '(?i)DiagTrack|group-policy|CEIP|registry|policy value' })
+    $items.Count -eq 32 -and @($items | Where-Object { -not $_.Short }).Count -eq 0 -and
+    @($items | Where-Object { -not $_.Description }).Count -eq 0 -and
+    $longTitles.Count -eq 0 -and $longShorts.Count -eq 0 -and $jargon.Count -eq 0
+}
+$cardsOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String
+Test-Case 'files found by Quietpane''s own checks can be quarantined or removed, whatever their level' {
+    # A Medium file, a Low file and two files listed on one card: four in all. A setting gets no buttons.
+    $cardsOut -match 'finding quarantine buttons: 4 \(unnamed 0\)'
+}
+Test-Case 'the window keeps its words down' {
+    $env:QP_WORDS = '1'
+    try { $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String }
+    finally { Remove-Item Env:\QP_WORDS -ErrorAction SilentlyContinue }
+    if ($out -notmatch 'words: ([^\r\n]+)') { return $false }   # [^\r\n], or the last tab keeps the carriage return
+    $counts = @{}
+    foreach ($pair in ($matches[1] -split ',\s*')) { if ($pair -match '^(.+)=(\d+)$') { $counts[$matches[1]] = [int]$matches[2] } }
+    $total = ($counts.Values | Measure-Object -Sum).Sum
+    # Room to grow, but not back to where it was (2,900 words, Privacy alone 1,340).
+    $counts.Count -eq 9 -and $total -lt 2300 -and $counts['Privacy'] -lt 950 -and $counts['Home'] -lt 200 -and $counts['About'] -lt 210
+}
+
+Section 'Keyboards and screen readers'
+$selfTestOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String
+Test-Case 'every control you can reach with the keyboard has a name a screen reader can say' {
+    $selfTestOut -match 'unnamed controls: 0 ' -and $selfTestOut -match 'window built OK'
+}
+Test-Case 'the taskbar badge for things that came back draws, and clears again' {
+    $selfTestOut -match 'badge: OK'
+}
+Test-Case 'the newer accessibility features are switched on before the window''s code loads' {
+    # Too late once WPF is loaded, so the order in the file is what matters.
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $switchAt = $src.IndexOf("'Switch.UseLegacyAccessibilityFeatures'")
+    $switchAt -gt 0 -and $switchAt -lt $src.IndexOf('Add-Type -AssemblyName PresentationFramework') -and
+    $src -match 'Switch\.UseLegacyAccessibilityFeatures\.3' -and $src -match 'AutomationProperties\.LiveSetting="Polite"'
+}
+Test-Case 'all text is dark enough to read (WCAG AA, 4.5 to 1)' {
+    # Every colour the window uses for text on its cream background, and white on every severity badge.
+    function Get-Lum([string]$Hex) {
+        $c = @(1, 3, 5 | ForEach-Object { [Convert]::ToInt32($Hex.Substring($_, 2), 16) / 255.0 } |
+            ForEach-Object { if ($_ -le 0.03928) { $_ / 12.92 } else { [math]::Pow(($_ + 0.055) / 1.055, 2.4) } })
+        0.2126 * $c[0] + 0.7152 * $c[1] + 0.0722 * $c[2]
+    }
+    function Get-Contrast([string]$A, [string]$B) { $x = Get-Lum $A; $y = Get-Lum $B; ([math]::Max($x, $y) + 0.05) / ([math]::Min($x, $y) + 0.05) }
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $onCream = @([regex]::Matches($src, "New-Text [^\r\n]*?'(#[0-9A-Fa-f]{6})'") | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -ne '#FFFDF8' } | Sort-Object -Unique)
+    $tooLight = @($onCream | Where-Object { (Get-Contrast $_ '#FAF6EC') -lt 4.5 })
+    $badges = @([regex]::Match($src, 'SevColours = \[ordered\]@\{([^}]+)\}').Groups[1].Value -split ';' | ForEach-Object { if ($_ -match "'(#[0-9A-Fa-f]{6})'") { $matches[1] } })
+    $weakBadges = @($badges | Where-Object { (Get-Contrast '#FFFDF8' $_) -lt 4.5 })
+    $onCream.Count -gt 3 -and $badges.Count -eq 5 -and $tooLight.Count -eq 0 -and $weakBadges.Count -eq 0
+}
+Test-Case 'the choice dialog closes with Esc and starts on the safest choice' {
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $src -match "Key -eq 'Escape'" -and $src -match 'firstChoice\.Focus\(\)'
+}
+
 Section 'When things go wrong'
 Test-Case 'the window still draws on a PC with nothing on it, and says what could not be read' {
-    # Every list empty, and one part reported as unreadable: nothing may be left blank or throw.
+    # Every list empty, and one part reported as unreadable: nothing may be left blank or throw, and
+    # every control on the empty screens still has a name.
     $env:QP_EMPTYSTATE = '1'
     try {
         $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String
     } finally { Remove-Item Env:\QP_EMPTYSTATE -ErrorAction SilentlyContinue }
-    $out -match 'empty state drawn OK' -and $out -match 'could not be read' -and $out -notmatch 'Exception|ParserError'
+    $out -match 'empty state drawn OK' -and $out -match 'could not be read' -and $out -match 'unnamed controls: 0 ' -and $out -notmatch 'Exception|ParserError'
 }
 Test-Case 'a part of the read that fails does not take the rest with it' {
     $s = Get-QpState
