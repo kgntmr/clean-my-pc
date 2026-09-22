@@ -27,7 +27,8 @@ ALSO IN THE APP
    Privacy    See which apps used your camera, microphone and location,
               and when - and switch them off. Also what is talking to
               the internet right now, and where to.
-   Apps       Choose what starts when you sign in.
+   Apps       Choose what starts when you sign in - and see what each one
+              is costing you, heaviest first.
    Free up    "Where your space went" shows the biggest folders and files,
     space     so you can see where your disk went.
    About      One button puts Quietpane in your Start menu and on your

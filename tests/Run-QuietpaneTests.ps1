@@ -1223,6 +1223,47 @@ Test-Case 'the window''s calls into Windows only name the app and ask for a shar
     ($calls -join ';') -eq 'shell32!SetCurrentProcessExplicitAppUserModelID;user32!SetProcessDPIAware'
 }
 
+Section 'What signing in costs'
+# The window's own self-test, shared by the checks below and in the next two sections.
+$cardsOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String
+Test-Case 'what a startup program costs is measured from the program itself, never guessed' {
+    # PowerShell is running right now (this test is it); the made-up one is not.
+    $here = (Get-Process -Id $PID).Path
+    $items = @(
+        [pscustomobject]@{ Id = 'running'; Name = 'PowerShell'; Target = $here },
+        [pscustomobject]@{ Id = 'gone'; Name = 'Not here'; Target = 'C:\nowhere\QuietpaneNoSuchProgram.exe' }
+    )
+    $costs = @(Get-QpSignInCost -Items $items)
+    $run = @($costs | Where-Object { $_.Id -eq 'running' })[0]
+    $gone = @($costs | Where-Object { $_.Id -eq 'gone' })[0]
+    $run.Running -and $run.MemoryMB -gt 0 -and -not $gone.Running -and $gone.MemoryMB -eq 0 -and $null -eq $gone.WindowsSeconds
+}
+Test-Case 'Windows'' own timing is used where there is one, and left out where there isn''t' {
+    $here = (Get-Process -Id $PID).Path
+    $exe = Split-Path $here -Leaf
+    $record = [pscustomobject]@{ Boot = $null; Slow = @{ $exe.ToLowerInvariant() = [pscustomobject]@{ Name = $exe; Seconds = 4.2; When = (Get-Date) } }; Stale = $false }
+    $with = @(Get-QpSignInCost -Items @([pscustomobject]@{ Id = 'x'; Name = 'PowerShell'; Target = $here }) -Record $record)[0]
+    $without = @(Get-QpSignInCost -Items @([pscustomobject]@{ Id = 'x'; Name = 'PowerShell'; Target = $here }))[0]
+    $with.WindowsSeconds -eq 4.2 -and $null -eq $without.WindowsSeconds
+}
+Test-Case 'a cost reads as plain words, and says nothing it cannot back up' {
+    $running = Format-QpSignInCost ([pscustomobject]@{ Running = $true; MemoryMB = 500; Copies = 2; StartedAfterSeconds = 6.5; WindowsSeconds = 3.2 })
+    $quiet = Format-QpSignInCost ([pscustomobject]@{ Running = $false; MemoryMB = 0; Copies = 0; StartedAfterSeconds = $null; WindowsSeconds = $null })
+    $shy = Format-QpSignInCost ([pscustomobject]@{ Running = $true; MemoryMB = 40; Copies = 1; StartedAfterSeconds = $null; WindowsSeconds = $null })
+    $running -eq 'Windows timed it at 3.2 seconds, using 500 MB in 2 copies now, started 6.5 seconds after you signed in.' -and
+    $quiet -eq 'Not running at the moment.' -and $shy -eq 'Using 40 MB now.'
+}
+Test-Case 'Windows'' restart record is read if it is there, and simply absent if not' {
+    # The log needs administrator rights, so without them there is nothing to read - and the window
+    # carries on without it. With them, whatever comes back has to make sense.
+    $r = Get-QpBootRecord
+    if (-not $r) { return 'skip' }
+    $null -ne $r.Slow -and ($null -eq $r.Boot -or ($r.Boot.Seconds -gt 0 -and $r.Boot.When -and $r.Boot.ToDesktopSeconds -ge 0))
+}
+Test-Case 'the heaviest comes first, with the total and Windows'' own figure' {
+    $cardsOut -match 'sign-in costs: Slow starter,Heavy app,Idle helper; total line: True; restart line: True; windows timing: True; copies: True'
+}
+
 Section 'Plain words, and something to do about them'
 Test-Case 'a check''s detail splits into plain words on the card and technical lines underneath' {
     $d = Split-QpFindingDetail "C:\Users\me\AppData\Local\Temp\thing.exe`nHKCU:\Software\Run = thing.exe`n2026-09-22  C:\x\y.exe`nThis launches a hidden command every time you sign in."
@@ -1238,7 +1279,6 @@ Test-Case 'every privacy setting has a plain title and a short line, with the fu
     @($items | Where-Object { -not $_.Description }).Count -eq 0 -and
     $longTitles.Count -eq 0 -and $longShorts.Count -eq 0 -and $jargon.Count -eq 0
 }
-$cardsOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String
 Test-Case 'files found by Quietpane''s own checks can be quarantined or removed, whatever their level' {
     # A Medium file, a Low file and two files listed on one card: four in all. A setting gets no buttons.
     $cardsOut -match 'finding quarantine buttons: 4 \(unnamed 0\)'

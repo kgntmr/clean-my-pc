@@ -108,6 +108,12 @@ These need eyes, not assertions:
   shows a small amber "1", and hovering it says "1 thing switched itself back on"; opening it shows
   the Welcome back panel. "That was me" (or switching it off again) clears the badge. With nothing
   back on, the icon has no badge at all. Untick the box and the next sign-in doesn't check.
+- **What signing in costs.** Apps > Starts when you sign in. Each program that is running says how much
+  memory it is using and how long after sign-in it started; the heaviest is at the top, and the line
+  above adds them up. Open something heavy (a browser), press F5, and its figure goes up. A program
+  that isn't running says so rather than guessing. With a recent full restart, the "Windows timed your
+  last restart at N seconds" line appears with its date; point at it for the breakdown. Compare a
+  couple of the figures with Task Manager > Startup apps and Details - they should agree.
 - **Short on screen, full underneath.** On Privacy, each setting is one line and one short note. Point
   at one (or Tab to it) and the full explanation appears; Narrator reads the same words. Nothing that
   warns about a side effect is hidden: "Turn off printing" still says "only if you never print".

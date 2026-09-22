@@ -19,7 +19,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.12.0'
+$script:AppVersion  = '1.13.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -1460,6 +1460,143 @@ function Get-QpStartupItems {
     return @($out)
 }
 
+#region ---------------------------------------------------------------- what signing in costs
+# What each startup program actually costs you, measured rather than guessed:
+#   * the memory it is using now, and how long after you signed in it started (always available);
+#   * what Windows itself recorded about it, when Windows has a record.
+# Windows only measures a full restart - not waking from sleep, and not a shutdown with fast startup -
+# so its record is often weeks old. It is always shown with its date, and never mixed up with today.
+
+function Get-QpSignInTime {
+    <# When this Windows session signed in, and when the PC last started. Never throws. #>
+    $boot = $null; $logon = $null
+    try { $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { }
+    try {
+        # The oldest process of this sign-in session is the closest honest mark for "when you signed in".
+        $session = (Get-Process -Id $PID -ErrorAction Stop).SessionId
+        foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+            try {
+                if ($p.SessionId -ne $session) { continue }
+                $started = $p.StartTime      # some processes refuse to say; those are skipped
+                if (-not $logon -or $started -lt $logon) { $logon = $started }
+            } catch { }
+        }
+    } catch { }
+    if (-not $logon) { $logon = $boot }
+    [pscustomobject]@{ Boot = $boot; Logon = $logon }
+}
+
+function Get-QpBootRecord {
+    <#
+        What Windows recorded about the last full restart: how long it took, and which programs it
+        noticed holding it up. Needs administrator rights and the Diagnostics-Performance log; without
+        either, this is simply $null and the rest of the feature carries on without it.
+    #>
+    param([int]$MaxEvents = 120)
+    try {
+        $events = @(Get-WinEvent -LogName 'Microsoft-Windows-Diagnostics-Performance/Operational' -MaxEvents $MaxEvents -ErrorAction Stop)
+    } catch { return $null }
+    if (-not $events.Count) { return $null }
+    function Read-Fields($Event) {
+        $f = @{}
+        try { foreach ($d in ([xml]$Event.ToXml()).Event.EventData.Data) { $f[[string]$d.Name] = [string]$d.'#text' } } catch { }
+        return $f
+    }
+    $last = @($events | Where-Object { $_.Id -eq 100 } | Select-Object -First 1)[0]
+    $boot = $null
+    if ($last) {
+        $f = Read-Fields $last
+        $boot = [pscustomobject]@{
+            When = $last.TimeCreated
+            Seconds = [math]::Round(([double]$f['BootTime']) / 1000, 1)
+            ToDesktopSeconds = [math]::Round(([double]$f['MainPathBootTime']) / 1000, 1)
+            AfterDesktopSeconds = [math]::Round(([double]$f['BootPostBootTime']) / 1000, 1)
+            StartupApps = [int]$f['BootNumStartupApps']
+        }
+    }
+    # Programs Windows timed at start-up (id 101). The most recent figure for each wins.
+    $slow = @{}
+    foreach ($e in @($events | Where-Object { $_.Id -eq 101 })) {
+        $f = Read-Fields $e
+        $name = [string]$f['Name']
+        if (-not $name -or $slow.ContainsKey($name.ToLowerInvariant())) { continue }
+        $slow[$name.ToLowerInvariant()] = [pscustomobject]@{
+            Name = $name; Friendly = [string]$f['FriendlyName']; Path = [string]$f['Path']
+            Seconds = [math]::Round(([double]$f['TotalTime']) / 1000, 1); When = $e.TimeCreated
+        }
+    }
+    [pscustomobject]@{ Boot = $boot; Slow = $slow; Stale = [bool]($boot -and ((Get-Date) - $boot.When).TotalDays -gt 30) }
+}
+
+function Get-QpSignInCost {
+    <#
+        Adds to each startup item what it is costing: memory in use now, how long after sign-in it
+        started, and Windows' own figure where there is one. Items that are not running say so rather
+        than guessing. Read-only.
+    #>
+    param($Items, $Record = $null, $Times = $null)
+    if ($null -eq $Times) { $Times = Get-QpSignInTime }
+    $procs = @{}
+    foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+        try {
+            $key = $p.ProcessName.ToLowerInvariant()
+            $mb = 0; try { $mb = [math]::Round($p.WorkingSet64 / 1MB) } catch { }
+            # Some programs won't say when they started (another user's, or one with more rights than
+            # us). That's no reason to call them "not running": the memory still counts.
+            $started = $null; try { $started = $p.StartTime } catch { }
+            $cur = $procs[$key]
+            if ($cur) {
+                $cur.MemoryMB += $mb
+                if ($started -and (-not $cur.Started -or $started -lt $cur.Started)) { $cur.Started = $started }
+                $cur.Count++
+            } else {
+                $procs[$key] = [pscustomobject]@{ MemoryMB = $mb; Started = $started; Count = 1 }
+            }
+        } catch { }   # a process that ends while it is being read
+    }
+    $out = New-Object System.Collections.ArrayList
+    foreach ($i in @($Items | Where-Object { $_ })) {
+        $exe = if ($i.Target) { Split-Path $i.Target -Leaf } else { '' }
+        $key = if ($exe) { [IO.Path]::GetFileNameWithoutExtension($exe).ToLowerInvariant() } else { '' }
+        $run = if ($key -and $procs.ContainsKey($key)) { $procs[$key] } else { $null }
+        $windows = if ($Record -and $exe -and $Record.Slow.ContainsKey($exe.ToLowerInvariant())) { $Record.Slow[$exe.ToLowerInvariant()] } else { $null }
+        $after = $null
+        if ($run -and $run.Started -and $Times.Logon) {
+            $secs = ($run.Started - $Times.Logon).TotalSeconds
+            if ($secs -ge 0 -and $secs -le 180) { $after = [math]::Round($secs, 1) }   # later than three minutes: you started it yourself
+        }
+        [void]$out.Add([pscustomobject]@{
+            Id = $i.Id; Name = $i.Name; Running = [bool]$run
+            MemoryMB = $(if ($run) { [int]$run.MemoryMB } else { 0 })
+            Copies = $(if ($run) { [int]$run.Count } else { 0 })
+            StartedAfterSeconds = $after
+            WindowsSeconds = $(if ($windows) { $windows.Seconds } else { $null })
+            WindowsWhen = $(if ($windows) { $windows.When } else { $null })
+        })
+    }
+    return @($out)
+}
+
+function Format-QpSignInCost {
+    <# The cost of one startup item, in plain words. Empty when there is nothing honest to say. #>
+    param($Cost)
+    if (-not $Cost) { return '' }
+    $bits = @()
+    if ($Cost.WindowsSeconds) { $bits += ('Windows timed it at {0} seconds' -f $Cost.WindowsSeconds) }
+    if ($Cost.Running) {
+        $mem = if ($Cost.MemoryMB -ge 1024) { '{0:N1} GB' -f ($Cost.MemoryMB / 1024) } else { '{0} MB' -f $Cost.MemoryMB }
+        $copies = if ($Cost.Copies -gt 1) { ' in {0} copies' -f $Cost.Copies } else { '' }
+        $bits += ('using {0}{1} now' -f $mem, $copies)
+        if ($null -ne $Cost.StartedAfterSeconds) { $bits += ('started {0} seconds after you signed in' -f $Cost.StartedAfterSeconds) }
+    } else {
+        $bits += 'not running at the moment'
+    }
+    $text = ($bits -join ', ')
+    return ($text.Substring(0, 1).ToUpper() + $text.Substring(1) + '.')
+}
+
+#endregion
+
 function Set-QpStartupApproved {
     <# Writes the same 12 bytes Task Manager does: 03 = switched off (plus when), 02 = on. #>
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name, [bool]$On)
@@ -2896,11 +3033,18 @@ function Get-QpState {
         }
     }
     try {
+        # Read once, then cost it: what signing in costs is about these very items.
+        $startup = Read-Part 'what starts at sign-in' { @(Get-QpStartupItems) } @()
         @{
             Privacy  = Read-Part 'the privacy settings' { Get-QpPrivacyStatus } @{}
             Vendors  = Read-Part 'the brand extras' { @(Get-QpVendorStatus) } @()
             Apps     = Read-Part 'the installed apps' { @(Get-QpBloatApps) } @()
-            Startup  = Read-Part 'what starts at sign-in' { @(Get-QpStartupItems) } @()
+            Startup  = $startup
+            SignIn   = Read-Part 'what signing in costs' {
+                $times = Get-QpSignInTime
+                $record = Get-QpBootRecord
+                [pscustomobject]@{ Times = $times; Record = $record; Costs = @(Get-QpSignInCost -Items $startup -Record $record -Times $times) }
+            } $null
             Devices  = Read-Part 'camera, microphone and location use' { @(Get-QpDeviceUse) } @()
             Cleanup  = Read-Part 'what can be cleaned up' { @(Get-QpCleanupTargets) } @()
             Restore  = Read-Part 'the restore points' { @(Get-QpRestorePoints) } @()
@@ -4180,6 +4324,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpPrivacyStatus, Invoke-QpPrivacy,
     Get-QpBloatApps, Invoke-QpRemoveApps,
     Get-QpStartupItems, Invoke-QpStartup, Set-QpStartupApproved, Get-QpStartupAdvice,
+    Get-QpSignInTime, Get-QpBootRecord, Get-QpSignInCost, Format-QpSignInCost,
     Get-QpDeviceUse, Invoke-QpDeviceAccess, Format-QpWhen,
     Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpRecycleBinLimit, Move-QpToRecycleBin,
     Get-QpSpaceUse, Get-QpSpaceAdvice, Invoke-QpSpaceRecycle, Get-QpInstallPlaces,

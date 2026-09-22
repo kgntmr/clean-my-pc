@@ -1336,7 +1336,7 @@ function Update-FromState($state) {
     }
     foreach ($o in $script:Options['privacy']) { Set-OptionStatus $o ([string]$state.Privacy[$o.Id]) }
     Show-Part 'the brand extras' { Update-VendorTab @($state.Vendors) }
-    Show-Part 'what starts at sign-in' { Update-StartupList @($state.Startup | Where-Object { $_ }) }
+    Show-Part 'what starts at sign-in' { Update-StartupList @($state.Startup | Where-Object { $_ }) $state.SignIn }
     Show-Part 'camera, microphone and location use' { Update-DeviceList @($state.Devices | Where-Object { $_ }) }
     if (@($state.Problems).Count) {
         $ui.Status.Text = 'Some of this PC could not be read: ' + (@($state.Problems) -join ', ') + '. The rest is up to date.'
@@ -1466,19 +1466,36 @@ $btnThatWasMe.Add_Click({
     Update-CameBack $null
 })
 
-function Update-StartupList($items) {
+function Update-StartupList($items, $signIn) {
     <#
-        Only what is switched on can be ticked. Everything else is summed up in a line, so the list stays
-        short: what's already off, what's always left on (and why), and what a policy controls.
+        Only what is switched on can be ticked, worst first: what Windows timed at sign-in, then what is
+        using the most memory. Everything else is summed up in a line, so the list stays short: what's
+        already off, what's always left on (and why), and what a policy controls.
     #>
     $script:StartupList.Children.Clear()
     $script:Options['startup'].Clear()
-    $on     = @($items | Where-Object { $_.On -and -not $_.Keep -and -not $_.Locked } | Sort-Object Name)
+    $costs = @{}
+    foreach ($c in @($signIn.Costs | Where-Object { $_ })) { $costs[[string]$c.Id] = $c }
+    $on     = @($items | Where-Object { $_.On -and -not $_.Keep -and -not $_.Locked } |
+        Sort-Object -Property @{ Expression = { [double]($costs[[string]$_.Id].WindowsSeconds) }; Descending = $true },
+                              @{ Expression = { [int]($costs[[string]$_.Id].MemoryMB) }; Descending = $true }, Name)
     $off    = @($items | Where-Object { -not $_.On -and -not $_.Keep } | Sort-Object Name)
     $kept   = @($items | Where-Object { $_.Keep })
     $locked = @($items | Where-Object { $_.Locked -and $_.On -and -not $_.Keep })
     $script:StartupSection.Expander.Header = New-Text ('Starts when you sign in   ({0} on, {1} off)' -f ($on.Count + @($kept | Where-Object On).Count + $locked.Count), ($off.Count + @($kept | Where-Object { -not $_.On }).Count)) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
     if (-not $on.Count) { [void]$script:StartupList.Children.Add((New-Text 'Nothing extra starts when you sign in.' 13 'SemiBold' '#117A68' '0,8,0,0')) }
+    else {
+        # What this is costing you, measured: memory in use now, and Windows' own timing where it has one.
+        $mb = (@($on | ForEach-Object { $costs[[string]$_.Id] } | Where-Object { $_ -and $_.Running }) | Measure-Object -Property MemoryMB -Sum).Sum
+        if ($mb) { [void]$script:StartupList.Children.Add((New-Text ('Together they are using {0} right now.' -f (Format-QpBytes ([double]$mb * 1MB))) 12.5 'SemiBold' '#0F1B1C' '0,8,0,0')) }
+        $boot = $signIn.Record.Boot
+        if ($boot) {
+            $line = 'Windows timed your last restart at {0} seconds, {1}.' -f $boot.Seconds, (Format-QpWhen $boot.When)
+            $t = New-Text $line 12.5 'Normal' '#4B5B5C' '0,2,0,0'
+            Set-MoreInfo $t ('{0} seconds to the desktop, then {1} more finishing off in the background. Windows only times a full restart - not waking from sleep - so this can be weeks old.' -f $boot.ToDesktopSeconds, $boot.AfterDesktopSeconds)
+            [void]$script:StartupList.Children.Add($t)
+        }
+    }
     foreach ($i in $on) {
         $bits = @()
         if ($i.Note) { $bits += $i.Note }
@@ -1486,8 +1503,10 @@ function Update-StartupList($items) {
         $who = if ($i.Publisher) { "From $($i.Publisher)." } else { 'The publisher isn''t recorded.' }
         if ($i.Everyone) { $who += ' Starts for everyone who uses this PC.' }
         $bits += $who
-        Add-Option -Panel $script:StartupList -Key 'startup' -Id $i.Id -Title $i.Name -Description ($bits -join ' ') -Recommended $false
-        $script:Options['startup'][$script:Options['startup'].Count - 1].CheckBox.ToolTip = $i.Command
+        if ($i.Command) { $bits += $i.Command }
+        $cost = $costs[[string]$i.Id]
+        Add-Option -Panel $script:StartupList -Key 'startup' -Id $i.Id -Title $i.Name -Recommended $false `
+            -Short (Format-QpSignInCost $cost) -Description ($bits -join ' ')
     }
     if ($locked.Count) {
         [void]$script:StartupList.Children.Add((New-Text ('Set by a policy on this PC, so they stay as they are: ' + (($locked | ForEach-Object { $_.Name }) -join ', ') + '.') 12.5 'Normal' '#4B5B5C' '0,12,0,0'))
@@ -3000,6 +3019,37 @@ function Test-FindingCards {
         $script:FindingsPanel.Children.Clear()
     }
 }
+function Test-SignInCosts {
+    <#
+        Three startup programs with known costs: one Windows timed, one heavy, one not running. The
+        worst must come first, each line must say its cost, and the total must add up.
+    #>
+    $items = @(
+        [pscustomobject]@{ Id = 'a'; Name = 'Idle helper'; On = $true; Keep = $false; Locked = $false; Publisher = 'Test'; Command = 'a.exe'; Note = ''; Missing = $false; Everyone = $false },
+        [pscustomobject]@{ Id = 'b'; Name = 'Heavy app'; On = $true; Keep = $false; Locked = $false; Publisher = 'Test'; Command = 'b.exe'; Note = ''; Missing = $false; Everyone = $false },
+        [pscustomobject]@{ Id = 'c'; Name = 'Slow starter'; On = $true; Keep = $false; Locked = $false; Publisher = 'Test'; Command = 'c.exe'; Note = ''; Missing = $false; Everyone = $false }
+    )
+    $signIn = [pscustomobject]@{
+        Times = [pscustomobject]@{ Logon = (Get-Date); Boot = (Get-Date) }
+        Record = [pscustomobject]@{ Boot = [pscustomobject]@{ When = (Get-Date).AddDays(-2); Seconds = 35.5; ToDesktopSeconds = 18.5; AfterDesktopSeconds = 17 }; Slow = @{}; Stale = $false }
+        Costs = @(
+            [pscustomobject]@{ Id = 'a'; Name = 'Idle helper'; Running = $false; MemoryMB = 0; Copies = 0; StartedAfterSeconds = $null; WindowsSeconds = $null; WindowsWhen = $null },
+            [pscustomobject]@{ Id = 'b'; Name = 'Heavy app'; Running = $true; MemoryMB = 500; Copies = 2; StartedAfterSeconds = 6.5; WindowsSeconds = $null; WindowsWhen = $null },
+            [pscustomobject]@{ Id = 'c'; Name = 'Slow starter'; Running = $true; MemoryMB = 80; Copies = 1; StartedAfterSeconds = 2; WindowsSeconds = 3.2; WindowsWhen = (Get-Date).AddDays(-2) }
+        )
+    }
+    Update-StartupList $items $signIn
+    $order = @($script:Options['startup'] | ForEach-Object { $_.Title }) -join ','
+    $text = @()
+    foreach ($child in $script:StartupList.Children) { if ($child -is [System.Windows.Controls.TextBlock]) { $text += $child.Text } }
+    $all = $text -join ' | '
+    $result = '{0}; total line: {1}; restart line: {2}; windows timing: {3}; copies: {4}' -f $order,
+        [bool]($all -match 'using 580\.0 MB right now'), [bool]($all -match 'timed your last restart at 35\.5 seconds'),
+        [bool]($all -match 'Windows timed it at 3.2 seconds'), [bool]($all -match 'in 2 copies')
+    $script:StartupList.Children.Clear()
+    $script:Options['startup'].Clear()
+    return $result
+}
 function Test-Badge {
     # The taskbar badge draws and clears again.
     Update-TaskbarBadge ([pscustomobject]@{ Count = 3 })
@@ -3063,6 +3113,7 @@ if ($SelfTest) {
     $unnamed = @(Get-UnnamedControls)
     $cards = Test-FindingCards
     '{0} tabs, {1} privacy items, logo loaded: {2}, icon sizes: {3}, unnamed controls: {4} {5}, badge: {6}, finding quarantine buttons: {7} (unnamed {8}), window built OK' -f $ui.Tabs.Items.Count, $script:Options['privacy'].Count, [bool]$logo, $iconSizes, $unnamed.Count, ($unnamed -join ','), $(if (Test-Badge) { 'OK' } else { 'failed' }), $cards.Quarantine, $cards.Unnamed
+    'sign-in costs: ' + (Test-SignInCosts)
     return
 }
 
