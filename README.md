@@ -43,7 +43,7 @@ Just want a check-up that changes nothing? Double-click **Safety scan only** ins
 - **Can be undone.** Changes go into a restore point, and clean-up only moves files to your Recycle Bin. The three exceptions say so before you confirm: removing an app, uninstalling a brand extra, and deleting a threat for good.
 - **Leaves your security alone.** Defender, SmartScreen, the firewall and Windows Update are never touched.
 - **Owns up when something goes wrong.** If a part of your PC can't be read, that part says so and the rest still works. One job runs at a time, only one copy of the app opens at once, and an error never takes the window down with it.
-- **Hides nothing.** Plain-text PowerShell you can read, plus three short C# blocks (the graphics driver's temperature, adding up folder sizes, and making the Start-menu shortcut) and two lines that give the app its own taskbar icon and a sharp window. No installer, no `.exe`.
+- **Hides nothing.** Plain-text PowerShell you can read, plus three short C# blocks (the graphics driver's temperature, adding up folder sizes, and making the Start-menu shortcut) and two lines that give the app its own taskbar icon and a sharp window. No installer and no `.exe`: it runs from the folder you unzip, and only copies itself to Program Files if you ask for shortcuts or to start it when you sign in.
 
 ## What's inside
 
@@ -63,7 +63,7 @@ Every finding says who found it: **Microsoft Defender** (a real detection, named
 
 **Free up space** moves temp files, crash dumps, caches and old installers to the Recycle Bin. **Where your space went** then answers the bigger question: it adds up every folder on a drive (about ten seconds) and shows the biggest, so you can look inside them. Your own files can go to the Recycle Bin; Windows, installed programs and games are explained instead, with where to remove them properly. Nothing bigger than your Recycle Bin can hold is ever sent there, because Windows would delete it for good.
 
-**Undo** puts back every recorded change. **About** holds the policies, readable offline, and a button that adds Quietpane to your Start menu and desktop with its own icon, so it is easy to find and pins to the taskbar properly.
+**Undo** puts back every recorded change. **About** holds the policies, readable offline, and **Quietpane on this PC**: one button adds it to your Start menu and desktop with its own icon, so it is easy to find and pins to the taskbar properly, and a tick box starts it when you sign in, waiting on the taskbar and doing nothing until you click it. Both open Quietpane's own copy in `C:\Program Files\Quietpane`, so moving or deleting the folder you unzipped never breaks them. Opening a newer Quietpane brings that copy up to date, and an older one never replaces it.
 
 ## What it deliberately doesn't do
 
@@ -85,7 +85,7 @@ Every finding says who found it: **Microsoft Defender** (a real detection, named
    ```
    You'll find exactly two matches: the scanner's **detection patterns** in `src/Quietpane.psm1`, which are text it looks *for* in malicious startup entries, not network calls.
 3. **Watch it.** Open **Resource Monitor** (`resmon`) → **Network** while you use the app. Nothing connects. Your browser opens only when **you** click a link.
-4. **See what it keeps.** `%ProgramData%\Quietpane` holds restore points and their logs, the audit log, the quarantine, and a few small notes (see the [Privacy Policy](PRIVACY.md)). Scan reports go on your Desktop. Delete any of it whenever you like.
+4. **See what it keeps.** `%ProgramData%\Quietpane` holds restore points and their logs, the audit log, the quarantine, and a few small notes (see the [Privacy Policy](PRIVACY.md)). Scan reports go on your Desktop. Delete any of it whenever you like. Only if you add shortcuts or the sign-in start: `C:\Program Files\Quietpane` holds a copy of the app's own files, and Task Scheduler has one task, **Quietpane (KomodoWorks)**, which the Safety scan labels as Quietpane's own.
 
 ## FAQ
 
@@ -104,8 +104,11 @@ That service, task or program isn't on your Windows version, or is already gone.
 **Is my download genuine?**
 Only download from this repository's [Releases](https://github.com/kgntmr/quietpane/releases) page. [Here's how to check the file](SECURITY.md#check-that-your-download-is-genuine).
 
+**I moved the Quietpane folder and my shortcut stopped working.**
+Shortcuts made before 1.11.0 opened the folder you unzipped. Double-click **Start Quietpane** in the folder's new place once: it points every Quietpane shortcut, including one pinned to the taskbar, at its own copy in Program Files, so it can't happen again.
+
 **How do I remove Quietpane?**
-Removing it doesn't undo its changes, so use **Undo** first if you want your PC back as it was. Then delete the Quietpane folder and any Quietpane-Report files on your Desktop. Your undo history stays in `C:\ProgramData\Quietpane` until you delete that too.
+Removing it doesn't undo its changes, so use **Undo** first if you want your PC back as it was. If you added shortcuts or the sign-in start, take them away in **About** (Quietpane's copy in Program Files goes to the Recycle Bin with them). Then delete the Quietpane folder and any Quietpane-Report files on your Desktop. Your undo history stays in `C:\ProgramData\Quietpane` until you delete that too.
 
 ## Privacy, terms and security
 
@@ -140,7 +143,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
   ```powershell
   Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
   ```
-  An elevated window says "Administrator:" in its title bar. All 140 checks run there.
+  An elevated window says "Administrator:" in its title bar. 153 checks run there; the one left over only runs on a PC without Defender.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what still needs a person, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files.
 - **Contribute:** the lists in [`src/catalog/`](src/catalog) are plain data, so adding a setting, app, folder, brand or startup note needs no code. Describe side effects honestly, and test with **Preview** first. The reasons behind a few design choices are in [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md).
 

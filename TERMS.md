@@ -1,6 +1,6 @@
 # Terms of Use: Quietpane
 
-**Last updated: 21 September 2026**
+**Last updated: 22 September 2026**
 
 These terms explain, in plain language, how you may use Quietpane. The software itself is licensed under the [MIT License](LICENSE). Where these terms and the MIT License differ on copyright or licensing, the MIT License applies.
 
@@ -9,7 +9,7 @@ Quietpane is developed by **KomodoWorks**, an independent technology studio in D
 It is **free**. There's no purchase, no subscription, no account and no in-app offer.
 
 ## 2. What it does
-Quietpane can look at your computer without changing it (the Safety scan, the Health tab, "Where your space went", "What's talking to the internet" and the record of which apps used your camera, microphone and location). When you choose to, it can also change Windows and application settings, switch off services, scheduled tasks and startup items, stop an app using the camera, microphone or location, add entries to the Windows hosts file, remove pre-installed apps, run a program's own uninstaller, move files and folders you pick to the Recycle Bin, add or remove its own Start menu and desktop shortcuts, and deal with threats: ask Microsoft Defender to remove them, quarantine them, or delete them.
+Quietpane can look at your computer without changing it (the Safety scan, the Health tab, "Where your space went", "What's talking to the internet" and the record of which apps used your camera, microphone and location). When you choose to, it can also change Windows and application settings, switch off services, scheduled tasks and startup items, stop an app using the camera, microphone or location, add entries to the Windows hosts file, remove pre-installed apps, run a program's own uninstaller, move files and folders you pick to the Recycle Bin, add or remove its own Start menu and desktop shortcuts, start itself when you sign in (a task in Task Scheduler), keep its own copy in Program Files for those two to open, and deal with threats: ask Microsoft Defender to remove them, quarantine them, or delete them.
 
 **It only makes changes you have chosen and confirmed.** Before applying settings you can use "Preview" to see exactly what would change.
 

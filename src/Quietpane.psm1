@@ -13,12 +13,13 @@
       * Tidying up only ever moves files to the Recycle Bin. The single exception is a threat the
         user chooses to delete for good, which is confirmed twice and written to the audit log.
       * Quarantined files are moved, never altered, and can be restored byte-for-byte.
-      * Scheduled tasks are disabled, never deleted.
+      * Other programs' scheduled tasks are disabled, never deleted. (Quietpane's own sign-in task,
+        which you switch on in About, goes completely when you switch it off.)
       * Security (Defender, SmartScreen, firewall) and Windows Update are never touched.
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.10.0'
+$script:AppVersion  = '1.11.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -1812,14 +1813,23 @@ function Get-QpConnections {
 
 #endregion
 
-#region ---------------------------------------------------------------- Start menu and desktop shortcuts
+#region ---------------------------------------------------------------- Start menu, desktop and sign-in
 
 # A shortcut that carries the same app id as the window, so Windows treats them as one app: the
 # taskbar shows the emblem, and "Pin to taskbar" pins something that really opens Quietpane.
-# Nothing is installed: these are two small .lnk files in your own Start menu and desktop folders,
-# and Undo (or the button) puts them in the Recycle Bin again.
+#
+# Shortcuts and the sign-in start never point at the folder you unzipped: folders get moved, renamed
+# and deleted, and a shortcut can't follow them. They open Quietpane's own copy in Program Files
+# instead, made the first time you ask for either. Program Files is also the only safe home for
+# something that starts with administrator rights, because ordinary programs can't change what is in
+# it. When you take both away again, the copy goes to the Recycle Bin.
 
 $script:AppUserModelId = 'KomodoWorks.Quietpane'
+$script:InstallRoot = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) 'Quietpane'
+$script:SignInTaskName = 'Quietpane (KomodoWorks)'
+# What the copy is made of: the app and the documents its About tab shows. Tests and build tools stay behind.
+$script:AppFileNames = @('Quietpane.ps1', 'Start Quietpane.cmd', 'Safety scan only.cmd', 'README.md', 'PRIVACY.md', 'TERMS.md', 'SECURITY.md', 'LICENSE')
+$script:AppFolderNames = @('src', 'assets')
 $script:ShortcutSource = @'
 using System;
 using System.Runtime.InteropServices;
@@ -1902,75 +1912,356 @@ public static class QuietpaneShortcut {
         Marshal.FinalReleaseComObject(link);
         return id;
     }
+
+    // Reads what a shortcut hands to the program it opens, so Quietpane can tell which copy it opens.
+    public static string ReadArguments(string linkPath) {
+        var link = (IShellLinkW)new ShellLink();
+        ((IPersistFile)link).Load(linkPath, 0);
+        var text = new System.Text.StringBuilder(2048);
+        link.GetArguments(text, text.Capacity);
+        Marshal.FinalReleaseComObject(link);
+        return text.ToString();
+    }
 }
 '@
 
-function Get-QpShortcutPaths {
-    <# Where the two shortcuts go: your own Start menu and your own desktop. Nothing system-wide. #>
-    $root = Split-Path $PSScriptRoot -Parent
-    [pscustomobject]@{
-        StartMenu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Quietpane.lnk'
-        Desktop   = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Quietpane.lnk'
-        AppRoot   = $root
-        Script    = Join-Path $root 'Quietpane.ps1'
-        Icon      = Join-Path $script:AssetsRoot 'quietpane.ico'
-        Temporary = ($env:TEMP -and $root.StartsWith(([IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase))
+function Test-QpSamePath([string]$A, [string]$B) {
+    if (-not $A -or -not $B) { return $false }
+    try { return ([IO.Path]::GetFullPath($A).TrimEnd('\') -ieq [IO.Path]::GetFullPath($B).TrimEnd('\')) } catch { return $false }
+}
+
+function Compare-QpVersion([string]$A, [string]$B) {
+    <# -1, 0 or 1, the way version numbers compare: 1.10.0 is newer than 1.9.2. #>
+    try { return ([version]$A).CompareTo([version]$B) } catch { return [math]::Sign([string]::Compare($A, $B, $true)) }
+}
+
+function Get-QpAppVersion([string]$Root) {
+    <# The version of the Quietpane in that folder, or nothing if the folder isn't Quietpane. #>
+    if (-not $Root) { return '' }
+    $engine = Join-Path $Root 'src\Quietpane.psm1'
+    if (-not (Test-Path -LiteralPath $engine -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $Root 'Quietpane.ps1') -PathType Leaf)) { return '' }
+    # -TotalCount closes the file straight after, so the copy can be replaced a moment later.
+    foreach ($line in @(Get-Content -LiteralPath $engine -TotalCount 80)) {
+        if ($line -match "^\`$script:AppVersion\s*=\s*'([^']+)'") { return $matches[1] }
+    }
+    return ''
+}
+
+function Get-QpAppFileList([string]$Root) {
+    <# The files that make up Quietpane, relative to its folder. #>
+    $Root = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($n in $script:AppFileNames) { if (Test-Path -LiteralPath (Join-Path $Root $n) -PathType Leaf) { $list.Add($n) } }
+    foreach ($d in $script:AppFolderNames) {
+        $dir = Join-Path $Root $d
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+        foreach ($f in @(Get-ChildItem -LiteralPath $dir -Recurse -File -Force -ErrorAction SilentlyContinue)) { $list.Add($f.FullName.Substring($Root.Length + 1)) }
+    }
+    return @($list | Sort-Object)
+}
+
+function Test-QpCopyMatches([string]$From, [string]$To) {
+    <# True when every Quietpane file in $From is in $To, byte for byte. #>
+    foreach ($rel in (Get-QpAppFileList $From)) {
+        $a = Join-Path $From $rel; $b = Join-Path $To $rel
+        if (-not (Test-Path -LiteralPath $b -PathType Leaf)) { return $false }
+        if ((Get-Item -LiteralPath $a).Length -ne (Get-Item -LiteralPath $b).Length) { return $false }
+        if ((Get-FileHash -LiteralPath $a).Hash -ne (Get-FileHash -LiteralPath $b).Hash) { return $false }
+    }
+    return $true
+}
+
+function Install-QpCopy {
+    <#
+        Makes Quietpane's own copy in Program Files, or brings it up to date. It only moves forward:
+        opening an older Quietpane never replaces a newer copy. Files are copied over the old ones and
+        nothing is deleted. Needs administrator rights, like the rest of the app.
+    #>
+    param([string]$From = (Split-Path $PSScriptRoot -Parent), [string]$To = $script:InstallRoot)
+    if (Test-QpSamePath $From $To) { return [pscustomobject]@{ Ok = $true; Changed = $false; Note = '' } }
+    $fromVersion = Get-QpAppVersion $From
+    if (-not $fromVersion) { return [pscustomobject]@{ Ok = $false; Changed = $false; Note = 'Quietpane could not find its own files, so nothing was changed.' } }
+    $toVersion = Get-QpAppVersion $To
+    if ($toVersion) {
+        $cmp = Compare-QpVersion $fromVersion $toVersion
+        if ($cmp -lt 0) { return [pscustomobject]@{ Ok = $true; Changed = $false; Note = "Quietpane's own copy is newer ($toVersion), so it was left as it is." } }
+        if ($cmp -eq 0 -and (Test-QpCopyMatches $From $To)) { return [pscustomobject]@{ Ok = $true; Changed = $false; Note = '' } }
+    }
+    try {
+        # The engine goes last: a copy that stops half way still reads as the old version, and is
+        # simply finished the next time Quietpane opens.
+        $engine = 'src\Quietpane.psm1'
+        $files = @(Get-QpAppFileList $From | Where-Object { $_ -ne $engine }) + @($engine)
+        foreach ($rel in $files) {
+            $target = Join-Path $To $rel
+            $dir = Split-Path $target -Parent
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
+            Copy-Item -LiteralPath (Join-Path $From $rel) -Destination $target -Force -ErrorAction Stop
+        }
+    } catch {
+        Write-QpLog "Could not copy Quietpane to $To : $(Get-QpFailureReason $_.Exception)" 'WARN'
+        return [pscustomobject]@{ Ok = $false; Changed = $false; Note = "Windows would not let Quietpane copy itself to $To, so nothing was changed." }
+    }
+    $what = if (-not $toVersion) { "made ($fromVersion)" } elseif ($toVersion -eq $fromVersion) { 'put right' } else { "brought up to date ($toVersion to $fromVersion)" }
+    Write-QpLog "Quietpane's own copy in $To was $what." 'OK'
+    [pscustomobject]@{ Ok = $true; Changed = $true; Note = '' }
+}
+
+function Remove-QpCopy {
+    <#
+        Sends Quietpane's own copy to the Recycle Bin once nothing uses it. If that copy is the one open
+        right now it can't go yet, and 'Later' tells the window to send it as it closes.
+    #>
+    param([string]$InstallRoot = $script:InstallRoot)
+    if (-not (Test-Path -LiteralPath $InstallRoot)) { return 'None' }
+    # Only ever a folder that really is a copy of Quietpane.
+    if (-not (Get-QpAppVersion $InstallRoot)) { Write-QpLog "$InstallRoot does not look like Quietpane, so it was left alone." 'WARN'; return 'Failed' }
+    if (Test-QpSamePath (Split-Path $PSScriptRoot -Parent) $InstallRoot) { return 'Later' }
+    if (Move-QpToRecycleBin -Path $InstallRoot) { Write-QpLog "Quietpane's own copy in $InstallRoot is in the Recycle Bin." 'OK'; return 'Recycled' }
+    Write-QpLog "Could not move $InstallRoot to the Recycle Bin, so it was left where it is." 'WARN'
+    return 'Failed'
+}
+
+function Start-QpCopyRemoval {
+    <#
+        For the window, as it closes, when its own copy was taken away while it was open. A hidden
+        PowerShell waits for this one to finish, then sends Program Files\Quietpane to the Recycle Bin,
+        the same way any other tidy-up does. It never acts on any other folder.
+    #>
+    $root = $script:InstallRoot
+    if (-not (Test-Path -LiteralPath $root) -or $root -match '[''"]' -or -not (Get-QpAppVersion $root)) { return $false }
+    # Too big for the bin would mean Windows deletes it for good, so it would stay instead.
+    $limit = Get-QpRecycleBinLimit $root
+    if ($limit -le 0 -or (Get-QpSize @($root)) -gt $limit) { Write-QpLog "The Recycle Bin can't take $root, so it was left where it is." 'WARN'; return $false }
+    $command = "Wait-Process -Id $PID -ErrorAction SilentlyContinue; Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('$root', 'OnlyErrorDialogs', 'SendToRecycleBin')"
+    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    # Started from the Windows folder, so it isn't "inside" the folder it is about to move.
+    Start-Process -FilePath $ps -WorkingDirectory $env:WINDIR -WindowStyle Hidden -ArgumentList ('-NoProfile -NonInteractive -Command "{0}"' -f $command) | Out-Null
+    return $true
+}
+
+function Get-QpCopyNote([string]$State, [string]$Root = $script:InstallRoot) {
+    switch ($State) {
+        'Recycled' { " Quietpane's own copy from Program Files is in the Recycle Bin too." }
+        'Later'    { " Quietpane's own copy in Program Files goes to the Recycle Bin when you close this window." }
+        'Failed'   { " Quietpane's own copy is still in $Root." }
+        default    { '' }
     }
 }
 
-function Test-QpShortcuts {
-    $p = Get-QpShortcutPaths
-    [pscustomobject]@{ StartMenu = (Test-Path -LiteralPath $p.StartMenu); Desktop = (Test-Path -LiteralPath $p.Desktop) }
+function Get-QpShortcutPaths {
+    <# Where the shortcuts go (your own Start menu and desktop - nothing system-wide) and what they open. #>
+    param([string]$InstallRoot = $script:InstallRoot)
+    $root = Split-Path $PSScriptRoot -Parent
+    [pscustomobject]@{
+        StartMenu   = Join-Path ([Environment]::GetFolderPath('Programs')) 'Quietpane.lnk'
+        Desktop     = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Quietpane.lnk'
+        Pinned      = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
+        AppRoot     = $root
+        InstallRoot = $InstallRoot
+        Script      = Join-Path $InstallRoot 'Quietpane.ps1'
+        Icon        = Join-Path $InstallRoot 'assets\quietpane.ico'
+        FromCopy    = (Test-QpSamePath $root $InstallRoot)
+    }
 }
 
 function Initialize-QpShortcut {
     if (-not ('QuietpaneShortcut' -as [type])) { Add-Type -TypeDefinition $script:ShortcutSource -ErrorAction Stop }
 }
 
-function New-QpShortcuts {
+function Get-QpLinkScript([string]$Arguments) {
+    <# Which Quietpane.ps1 a shortcut or task opens, read from its -File part. #>
+    if ($Arguments -match '-File\s+"([^"]+)"') { return $matches[1] }
+    return ''
+}
+
+function Get-QpOwnShortcuts {
     <#
-        Puts Quietpane in your Start menu and on your desktop, with the KomodoWorks emblem. Both point
-        at this folder, so if you move it later, make them again. Undo removes them.
+        Quietpane's shortcuts: the Start menu and desktop ones, and any copy of them pinned to the
+        taskbar. Only shortcuts carrying Quietpane's app id count, so one you made yourself is left alone.
     #>
-    $p = Get-QpShortcutPaths
-    if (-not (Test-Path -LiteralPath $p.Script)) { return [pscustomobject]@{ Ok = $false; Note = 'Quietpane cannot find its own files, so it did not make a shortcut.' } }
-    if ($p.Temporary) {
-        return [pscustomobject]@{ Ok = $false; Note = 'Quietpane is running from a temporary folder, so a shortcut would stop working. Unzip it somewhere you keep things first, then try again.' }
-    }
+    param($Paths = (Get-QpShortcutPaths))
     Initialize-QpShortcut
+    $candidates = @(@{ Path = $Paths.StartMenu; Kind = 'StartMenu' }, @{ Path = $Paths.Desktop; Kind = 'Desktop' })
+    if ($Paths.Pinned -and (Test-Path -LiteralPath $Paths.Pinned)) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $Paths.Pinned -Filter '*.lnk' -File -Force -ErrorAction SilentlyContinue)) { $candidates += @{ Path = $f.FullName; Kind = 'Pinned' } }
+    }
+    $out = New-Object System.Collections.ArrayList
+    foreach ($c in $candidates) {
+        if (-not $c.Path -or -not (Test-Path -LiteralPath $c.Path -PathType Leaf)) { continue }
+        try {
+            if ([QuietpaneShortcut]::ReadAppId($c.Path) -ne $script:AppUserModelId) { continue }
+            [void]$out.Add([pscustomobject]@{ Path = $c.Path; Kind = $c.Kind; Script = (Get-QpLinkScript ([QuietpaneShortcut]::ReadArguments($c.Path))) })
+        } catch { }
+    }
+    return @($out)
+}
+
+function Test-QpShortcuts {
+    param($Paths = (Get-QpShortcutPaths))
+    $own = @(Get-QpOwnShortcuts -Paths $Paths)
+    [pscustomobject]@{
+        StartMenu = (@($own | Where-Object { $_.Kind -eq 'StartMenu' }).Count -gt 0)
+        Desktop   = (@($own | Where-Object { $_.Kind -eq 'Desktop' }).Count -gt 0)
+        Pinned    = (@($own | Where-Object { $_.Kind -eq 'Pinned' }).Count -gt 0)
+    }
+}
+
+function Set-QpShortcut([string]$Link, $Paths) {
     $target = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
     # (not $args: PowerShell keeps that name for a function's own arguments)
-    $argLine = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}"' -f $p.Script
-    $own = -not $script:Session
-    if ($own) { Start-QpSession 'shortcuts' }
-    $made = @()
-    try {
-        foreach ($link in $p.StartMenu, $p.Desktop) {
-            $existed = Test-Path -LiteralPath $link
-            try {
-                [QuietpaneShortcut]::Create($link, $target, $argLine, $p.AppRoot, $p.Icon, 'Quietpane - take your Windows PC back', $script:AppUserModelId)
-                if (-not $existed) { Add-QpUndo @{ Type = 'FileCreated'; Path = $link } }
-                $made += (Split-Path $link -Leaf)
-                Write-QpLog "Shortcut ready: $link" 'OK'
-            } catch {
-                Write-QpLog "Could not make the shortcut at $link : $(Get-QpFailureReason $_.Exception)" 'WARN'
-            }
-        }
-    } finally { if ($own) { Stop-QpSession } }
-    if (-not $made.Count) { return [pscustomobject]@{ Ok = $false; Note = 'Windows would not let Quietpane make the shortcuts.' } }
-    [pscustomobject]@{ Ok = $true; Note = 'Quietpane is in your Start menu and on your desktop. To keep it on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".' }
+    $argLine = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}"' -f $Paths.Script
+    [QuietpaneShortcut]::Create($Link, $target, $argLine, $Paths.InstallRoot, $Paths.Icon, 'Quietpane - take your Windows PC back', $script:AppUserModelId)
+}
+
+function New-QpShortcuts {
+    <#
+        Puts Quietpane in your Start menu and on your desktop, with the KomodoWorks emblem. They open
+        Quietpane's own copy, so moving or deleting the folder you unzipped doesn't break them.
+    #>
+    param([string]$InstallRoot = $script:InstallRoot)
+    $p = Get-QpShortcutPaths -InstallRoot $InstallRoot
+    $copy = Install-QpCopy -To $InstallRoot
+    if (-not $copy.Ok) { return [pscustomobject]@{ Ok = $false; Note = $copy.Note } }
+    Initialize-QpShortcut
+    $made = 0
+    foreach ($link in $p.StartMenu, $p.Desktop) {
+        try { Set-QpShortcut $link $p; $made++; Write-QpLog "Shortcut ready: $link" 'OK' }
+        catch { Write-QpLog "Could not make the shortcut at $link : $(Get-QpFailureReason $_.Exception)" 'WARN' }
+    }
+    if (-not $made) { return [pscustomobject]@{ Ok = $false; Note = 'Windows would not let Quietpane make the shortcuts.' } }
+    [pscustomobject]@{ Ok = $true; Note = 'Quietpane is in your Start menu and on your desktop, and they keep working even if you move or delete the folder you unzipped. To keep it on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".' }
 }
 
 function Remove-QpShortcuts {
-    <# Takes the two shortcuts away again. They go to the Recycle Bin, like everything else. #>
-    $p = Get-QpShortcutPaths
+    <# Takes the Start menu and desktop shortcuts away again. They go to the Recycle Bin, like everything else. #>
+    param([string]$InstallRoot = $script:InstallRoot, [string]$TaskName = $script:SignInTaskName)
+    $p = Get-QpShortcutPaths -InstallRoot $InstallRoot
+    $own = @(Get-QpOwnShortcuts -Paths $p)
     $gone = 0
-    foreach ($link in $p.StartMenu, $p.Desktop) {
-        if (-not (Test-Path -LiteralPath $link)) { continue }
-        if (Move-QpToRecycleBin -Path $link -SizeBytes ((Get-Item -LiteralPath $link).Length)) { $gone++; Write-QpLog "Shortcut removed: $link" 'OK' }
-        else { Write-QpLog "Could not remove the shortcut at $link" 'WARN' }
+    foreach ($l in @($own | Where-Object { $_.Kind -ne 'Pinned' })) {
+        if (Move-QpToRecycleBin -Path $l.Path) { $gone++; Write-QpLog "Shortcut removed: $($l.Path)" 'OK' }
+        else { Write-QpLog "Could not remove the shortcut at $($l.Path)" 'WARN' }
     }
-    [pscustomobject]@{ Ok = ($gone -gt 0); Note = $(if ($gone) { 'The shortcuts are in your Recycle Bin. Quietpane itself is untouched.' } else { 'There were no Quietpane shortcuts to remove.' }) }
+    $note = if ($gone) { 'The shortcuts are in your Recycle Bin.' } else { 'There were no Quietpane shortcuts to remove.' }
+    $copy = 'Kept'
+    if (-not (Get-QpSignInTask -Name $TaskName)) { $copy = Remove-QpCopy -InstallRoot $InstallRoot }
+    $note += Get-QpCopyNote $copy $InstallRoot
+    if (@($own | Where-Object { $_.Kind -eq 'Pinned' }).Count) { $note += ' It is still pinned to your taskbar: right-click it there and choose "Unpin from taskbar".' }
+    [pscustomobject]@{ Ok = ($gone -gt 0); Note = $note; Copy = $copy }
+}
+
+function Get-QpSignInTask {
+    param([string]$Name = $script:SignInTaskName)
+    try { return (Get-ScheduledTask -TaskPath '\' -TaskName $Name -ErrorAction Stop) } catch { return $null }
+}
+
+function Test-QpSignInStart {
+    param([string]$Name = $script:SignInTaskName)
+    $t = Get-QpSignInTask -Name $Name
+    return [bool]($t -and "$($t.State)" -ne 'Disabled')
+}
+
+function Get-QpSignInAction([string]$Script) {
+    New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument ('-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}" -Minimized' -f $Script)
+}
+
+function Test-QpOwnSignInTask($Task) {
+    <# Quietpane's own sign-in task, exactly as Quietpane makes it. A task that only borrows the name is not. #>
+    if (-not $Task -or $Task.TaskPath -ne '\' -or $Task.TaskName -ne $script:SignInTaskName) { return $false }
+    $a = @($Task.Actions)
+    $want = Get-QpSignInAction (Join-Path $script:InstallRoot 'Quietpane.ps1')
+    return ($a.Count -eq 1 -and $a[0].Execute -ieq $want.Execute -and $a[0].Arguments -ceq $want.Arguments)
+}
+
+function New-QpSignInTask {
+    <#
+        A task in Task Scheduler rather than a Run entry, because Quietpane needs administrator rights:
+        this way Windows doesn't ask you for them every time you sign in. Only describes the task;
+        Register-QpSignInTask is what hands it to Windows.
+    #>
+    param([string]$Script)
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+    $trigger.Delay = 'PT20S'   # let Windows finish signing you in first
+    # A laptop on battery still starts it, and it is never stopped for running "too long".
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -Priority 6
+    $parts = @{
+        Action      = Get-QpSignInAction $Script
+        Trigger     = $trigger
+        Principal   = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+        Settings    = $settings
+        Description = 'Opens Quietpane on the taskbar when you sign in. Switch it off in Quietpane > About.'
+    }
+    $task = New-ScheduledTask @parts
+    $task.Author = 'KomodoWorks'
+    return $task
+}
+
+function Register-QpSignInTask {
+    param([string]$Script, [string]$Name = $script:SignInTaskName)
+    Register-ScheduledTask -TaskPath '\' -TaskName $Name -InputObject (New-QpSignInTask -Script $Script) -Force -ErrorAction Stop | Out-Null
+}
+
+function Enable-QpSignInStart {
+    <# Opens Quietpane quietly on the taskbar each time you sign in, from its own copy in Program Files. #>
+    param([string]$InstallRoot = $script:InstallRoot, [string]$Name = $script:SignInTaskName)
+    if (-not (Test-QpAdmin)) { return [pscustomobject]@{ Ok = $false; Note = 'Quietpane needs administrator rights for this, so nothing was changed.' } }
+    $copy = Install-QpCopy -To $InstallRoot
+    if (-not $copy.Ok) { return [pscustomobject]@{ Ok = $false; Note = $copy.Note } }
+    try { Register-QpSignInTask -Script (Join-Path $InstallRoot 'Quietpane.ps1') -Name $Name }
+    catch {
+        Write-QpLog "Could not set Quietpane to start when you sign in: $(Get-QpFailureReason $_.Exception)" 'WARN'
+        return [pscustomobject]@{ Ok = $false; Note = 'Windows would not let Quietpane start when you sign in, so nothing was changed.' }
+    }
+    Write-QpLog 'Quietpane will open on the taskbar when you sign in.' 'OK'
+    [pscustomobject]@{ Ok = $true; Note = 'Quietpane will open on the taskbar each time you sign in, and wait there until you click it.' }
+}
+
+function Disable-QpSignInStart {
+    param([string]$InstallRoot = $script:InstallRoot, [string]$Name = $script:SignInTaskName)
+    if (Get-QpSignInTask -Name $Name) {
+        # Quietpane's own task goes completely. (Other programs' tasks are only ever switched off.)
+        try { Unregister-ScheduledTask -TaskPath '\' -TaskName $Name -Confirm:$false -ErrorAction Stop }
+        catch { return [pscustomobject]@{ Ok = $false; Note = 'Windows would not let Quietpane switch this off, so it still starts when you sign in.' } }
+        Write-QpLog 'Quietpane no longer starts when you sign in.' 'OK'
+    }
+    $copy = 'Kept'
+    $links = @(Get-QpOwnShortcuts -Paths (Get-QpShortcutPaths -InstallRoot $InstallRoot) | Where-Object { $_.Kind -ne 'Pinned' })
+    if (-not $links.Count) { $copy = Remove-QpCopy -InstallRoot $InstallRoot }
+    [pscustomobject]@{ Ok = $true; Note = 'Quietpane no longer starts when you sign in.' + (Get-QpCopyNote $copy $InstallRoot); Copy = $copy }
+}
+
+function Sync-QpInstall {
+    <#
+        Runs as Quietpane opens. If it has shortcuts or starts when you sign in, this makes sure they all
+        open Quietpane's own copy - pointing back any that still open the folder you unzipped - and
+        brings that copy up to date when you open a newer Quietpane. With no shortcuts and no sign-in
+        start, it does nothing at all.
+    #>
+    param([string]$InstallRoot = $script:InstallRoot, [string]$Name = $script:SignInTaskName, $Paths = $null)
+    $p = if ($Paths) { $Paths } else { Get-QpShortcutPaths -InstallRoot $InstallRoot }
+    $links = @(Get-QpOwnShortcuts -Paths $p)
+    $task = Get-QpSignInTask -Name $Name
+    $result = [pscustomobject]@{ InUse = ($links.Count -gt 0 -or $null -ne $task); Ok = $true; Updated = $false; Repaired = 0 }
+    if (-not $result.InUse) { return $result }
+    $copy = Install-QpCopy -From $p.AppRoot -To $InstallRoot
+    if (-not $copy.Ok) { $result.Ok = $false; return $result }
+    $result.Updated = $copy.Changed
+    if ($copy.Note) { Write-QpLog $copy.Note 'INFO' }
+    foreach ($l in $links) {
+        if (Test-QpSamePath $l.Script $p.Script) { continue }
+        try { Set-QpShortcut $l.Path $p; $result.Repaired++; Write-QpLog "This shortcut now opens Quietpane's own copy: $($l.Path)" 'OK' }
+        catch { Write-QpLog "Could not update the shortcut at $($l.Path) : $(Get-QpFailureReason $_.Exception)" 'WARN' }
+    }
+    if ($task) {
+        $opens = Get-QpLinkScript ((@($task.Actions) | ForEach-Object { $_.Arguments }) -join ' ')
+        if (-not (Test-QpSamePath $opens $p.Script) -and (Test-QpAdmin)) {
+            try { Register-QpSignInTask -Script $p.Script -Name $Name; $result.Repaired++; Write-QpLog "Starting at sign-in now opens Quietpane's own copy." 'OK' }
+            catch { Write-QpLog "Could not update the sign-in start: $(Get-QpFailureReason $_.Exception)" 'WARN' }
+        }
+    }
+    return $result
 }
 
 #endregion
@@ -3212,6 +3503,10 @@ function Invoke-QpAudit {
         $scanned++
         $actions = (@($t.Actions) | ForEach-Object { ("{0} {1}" -f $_.Execute, $_.Arguments).Trim() }) -join ' ; '
         $id = "$($t.TaskPath)$($t.TaskName)"
+        if (Test-QpOwnSignInTask $t) {
+            Add-Finding 'Scheduled tasks' 'Info' "Quietpane's own sign-in start: $id" "You switched this on in Quietpane > About. It opens Quietpane from $($script:InstallRoot) when you sign in.`nAction: $actions"
+            continue
+        }
         if ($actions -match $suspiciousTask) {
             $detail = "Action: $actions`nState: $($t.State)"
             $taskFile = Join-Path $env:WINDIR ("System32\Tasks\" + $t.TaskPath.TrimStart('\') + $t.TaskName)
@@ -3651,7 +3946,9 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpDeviceUse, Invoke-QpDeviceAccess, Format-QpWhen,
     Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpRecycleBinLimit, Move-QpToRecycleBin,
     Get-QpSpaceUse, Get-QpSpaceAdvice, Invoke-QpSpaceRecycle, Get-QpInstallPlaces,
-    Get-QpShortcutPaths, Test-QpShortcuts, New-QpShortcuts, Remove-QpShortcuts, Initialize-QpShortcut,
+    Get-QpShortcutPaths, Test-QpShortcuts, New-QpShortcuts, Remove-QpShortcuts, Initialize-QpShortcut, Get-QpOwnShortcuts,
+    Install-QpCopy, Remove-QpCopy, Start-QpCopyRemoval, Get-QpAppVersion, Compare-QpVersion, Test-QpCopyMatches, Sync-QpInstall,
+    Get-QpSignInTask, Test-QpSignInStart, Enable-QpSignInStart, Disable-QpSignInStart, Test-QpOwnSignInTask, New-QpSignInTask, Get-QpSignInAction,
     Get-QpConnections, Get-QpAddressLabel, Test-QpPrivateAddress,
     Get-QpVendorStatus, Invoke-QpVendor, Invoke-QpVendorUninstall,
     Get-QpDefenderState, Get-QpDefenderFindings, Invoke-QpThreatScan, Invoke-QpRemediate, Get-QpAllowList, Resolve-QpThreatInfo, New-QpFinding,

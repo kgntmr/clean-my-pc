@@ -91,7 +91,18 @@ These need eyes, not assertions:
   for QUIC, which Windows does not list.
 - **Start menu and desktop.** About > Add to Start menu and desktop. Both shortcuts show the emblem,
   open Quietpane, and right-click > Pin to taskbar gives one taskbar button, not two, while it runs.
-  The button then offers to remove them again, and Undo removes them too.
+  `C:\Program Files\Quietpane` now exists. Close Quietpane, move or rename the folder you unzipped,
+  and check the Start menu, desktop and taskbar shortcuts all still open it.
+- **Old shortcuts are repaired.** With a shortcut made by 1.10.0 (it opens the unzipped folder), open
+  1.11.0 from its folder once. The details log says each shortcut now opens Quietpane's own copy.
+- **Starting when you sign in.** Tick "Start Quietpane when I sign in", sign out and back in. About
+  20 seconds later Quietpane is on the taskbar, minimised, without taking the focus, and Windows did
+  not ask for administrator rights. Task Manager shows it using no processor time until you click it;
+  then it opens and looks at the PC as usual. The Safety scan lists the task as "Quietpane's own
+  sign-in start".
+- **Taking them away.** Untick the box and remove the shortcuts. The task is gone from Task
+  Scheduler, and `C:\Program Files\Quietpane` is in the Recycle Bin - straight away if you opened
+  Quietpane from the unzipped folder, or a moment after closing it if you opened it from the Start menu.
 - **Stop.** Start "Check this PC", press **Stop** after a few seconds. The progress line changes to
   "Stopping as soon as it is safe to...", then the summary says the check was stopped and that
   nothing was changed. No report is written to the Desktop.

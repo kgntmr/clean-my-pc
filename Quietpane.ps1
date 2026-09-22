@@ -12,6 +12,7 @@
     Double-click "Start Quietpane" to open the app. From PowerShell:
         .\Quietpane.ps1                          open the app (asks for administrator rights)
         .\Quietpane.ps1 -Scan                    run only the read-only scan and open the HTML report
+        .\Quietpane.ps1 -Minimized               open on the taskbar, out of the way (used at sign-in)
         .\Quietpane.ps1 -SelfTest                build the window without showing it (used for testing)
         .\Quietpane.ps1 -SelfTest -Snapshot x.png -SnapshotTab 1
                                                  also render the window to an image (used for screenshots)
@@ -20,6 +21,7 @@
 #>
 param(
     [switch]$Scan,
+    [switch]$Minimized,
     [switch]$SelfTest,
     [string]$Snapshot,
     [int]$SnapshotTab = 0
@@ -37,6 +39,7 @@ function Test-IsAdmin {
 if (-not $SelfTest -and -not (Test-IsAdmin)) {
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
     if ($Scan) { $argList += '-Scan' } else { $argList = @('-WindowStyle', 'Hidden') + $argList }
+    if ($Minimized) { $argList += '-Minimized' }
     try {
         Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argList | Out-Null
     } catch {
@@ -274,6 +277,9 @@ try {
     if ($work.Height -gt 200 -and $window.Height -gt ($work.Height - 40)) { $window.Height = [math]::Max(480, $work.Height - 40) }
 } catch { }
 
+# Started at sign-in: wait on the taskbar without taking the focus, and do nothing until clicked.
+if ($Minimized -and -not $SelfTest) { $window.WindowState = 'Minimized'; $window.ShowActivated = $false }
+
 # A mistake inside the window must never take the whole app down with it: say what happened, write it
 # to the details log, and carry on. Nothing on the PC is changed by an error here.
 $window.Dispatcher.add_UnhandledException({
@@ -292,6 +298,9 @@ $ui = @{}
 foreach ($n in 'Tabs', 'LogBox', 'Status', 'BtnRecommended', 'BtnNone', 'BtnPreview', 'BtnApply', 'HeaderLogo',
                'LinkHeader', 'LinkFooter', 'LinkPrivacy', 'LinkTerms', 'LinkContact', 'VersionRun',
                'LinkDetails', 'AdvancedButtons', 'LogRow', 'LogSplitter') { $ui[$n] = $window.FindName($n) }
+# What the engine does straight from this window (shortcuts, starting at sign-in) goes in the details
+# log too. Background jobs have their own log line, set up in Start-Work.
+Set-QpLogSink { param($line) try { $ui.LogBox.AppendText($line + [Environment]::NewLine) } catch { } }
 
 $brushConv = New-Object System.Windows.Media.BrushConverter
 $thickConv = New-Object System.Windows.ThicknessConverter
@@ -823,7 +832,7 @@ foreach ($line in @(
         'Connects to nothing: the app makes no network requests. Links only open when you click them.',
         'Changes nothing without you: every change is shown first and confirmed, and settings go into a restore point you can undo.',
         'Tidying up never deletes for good: files go to your Recycle Bin and scheduled tasks are switched off, not deleted. Three things can''t be undone - removing an app (the Microsoft Store has it), uninstalling a brand extra, and deleting a threat for good - and the app says so before you confirm.',
-        'Hides nothing: plain-text PowerShell you can read line by line, plus a few lines of C# that ask the graphics driver for its temperature. No installer.',
+        'Hides nothing: plain-text PowerShell you can read line by line, plus three small pieces of C# - for the graphics temperature, adding up folder sizes, and making shortcuts. No installer: it only copies itself to Program Files if you add shortcuts or start it when you sign in.',
         'Free and open source under the MIT License. Not affiliated with Microsoft, NVIDIA, Intel, AMD, Google or any PC maker.')) {
     [void]$aboutPanel.Children.Add((New-Text ('-  ' + $line) 13 'Normal' '#0F1B1C' '4,4,0,0'))
 }
@@ -834,10 +843,21 @@ $btnSite = New-Button 'Visit KomodoWorks.com' -Primary
 $btnMail = New-Button "Email $($info.BrandEmail)"
 $btnRepo = New-Button 'Source code on GitHub'
 $btnData = New-Button 'Open this app''s data folder'
-$btnShortcut = New-Button 'Add to Start menu and desktop'
-foreach ($b in $btnSite, $btnShortcut, $btnMail, $btnRepo, $btnData) { $b.Margin = Get-Thick '0,0,8,8'; [void]$aboutButtons.Children.Add($b) }
+foreach ($b in $btnSite, $btnMail, $btnRepo, $btnData) { $b.Margin = Get-Thick '0,0,8,8'; [void]$aboutButtons.Children.Add($b) }
 [void]$aboutPanel.Children.Add($aboutButtons)
-[void]$aboutPanel.Children.Add((New-Text 'The shortcuts carry the KomodoWorks emblem and point at this folder, so if you move it later, add them again. To keep Quietpane on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".' 12.5 'Normal' '#4B5B5C' '0,0,0,6'))
+
+# The two ways to reach Quietpane without hunting for the folder again.
+[void]$aboutPanel.Children.Add((New-GroupHeader 'Quietpane on this PC'))
+$btnShortcut = New-Button 'Add to Start menu and desktop' '0,8,0,0'
+$btnShortcut.HorizontalAlignment = 'Left'
+[void]$aboutPanel.Children.Add($btnShortcut)
+$script:SignInBox = New-Object System.Windows.Controls.CheckBox
+$script:SignInBox.Margin = Get-Thick '0,14,0,0'
+$script:SignInBox.VerticalContentAlignment = 'Center'
+$script:SignInBox.Content = New-Text 'Start Quietpane when I sign in' 13.5 'SemiBold' '#0F1B1C' '2,0,0,0'
+[void]$aboutPanel.Children.Add($script:SignInBox)
+[void]$aboutPanel.Children.Add((New-Text 'It waits on the taskbar and does nothing until you click it.' 12.5 'Normal' '#4B5B5C' '22,2,0,0'))
+[void]$aboutPanel.Children.Add((New-Text 'Both open Quietpane''s own copy in Program Files, so you can move or delete the folder you unzipped. To keep Quietpane on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".' 12.5 'Normal' '#4B5B5C' '0,12,0,6'))
 
 function Get-DocText([string]$File) {
     $p = Join-Path $PSScriptRoot $File
@@ -878,35 +898,60 @@ function Show-Doc($expander) {
 }
 $ui.LinkHeader.Add_Click({ Open-AsUser $info.BrandUrl })
 $ui.LinkFooter.Add_Click({ Open-AsUser $info.BrandUrl })
-$ui.LinkContact.Add_Click({ Open-AsUser "mailto:$($info.BrandEmail)?subject=Clean%20My%20PC" })
+$ui.LinkContact.Add_Click({ Open-AsUser "mailto:$($info.BrandEmail)?subject=Quietpane" })
 $ui.LinkPrivacy.Add_Click({ Show-Doc $script:PrivacyExpander })
 $ui.LinkTerms.Add_Click({ Show-Doc $script:TermsExpander })
-function Update-ShortcutButton {
-    # The one button does both jobs, so there is only ever one thing to click.
-    $s = Test-QpShortcuts
-    $btnShortcut.Content = if ($s.StartMenu -or $s.Desktop) { 'Remove from Start menu and desktop' } else { 'Add to Start menu and desktop' }
+function Update-PlaceControls {
+    # The button and the tick box always show how things really are. The one button does both jobs,
+    # so there is only ever one thing to click.
+    try {
+        $s = Test-QpShortcuts
+        $btnShortcut.Content = if ($s.StartMenu -or $s.Desktop) { 'Remove from Start menu and desktop' } else { 'Add to Start menu and desktop' }
+        $script:SignInBox.IsChecked = (Test-QpSignInStart)
+    } catch { }
+}
+# Taken away while this copy is the one open: it goes to the Recycle Bin once the window closes.
+$script:RemoveCopyOnClose = $false
+function Set-CopyFollowUp($Result) {
+    if ($Result.Copy -eq 'Later') { $script:RemoveCopyOnClose = $true }
+    elseif ($Result.Ok -and -not $Result.Copy) { $script:RemoveCopyOnClose = $false }   # added again: keep it
 }
 $btnShortcut.Add_Click({
+    if (Test-Busy) { return }
     $s = Test-QpShortcuts
     try {
         if ($s.StartMenu -or $s.Desktop) {
-            $msg = "Remove Quietpane from your Start menu and desktop?`n`nThe shortcuts go to your Recycle Bin. Quietpane itself stays exactly where it is."
+            $msg = "Remove Quietpane from your Start menu and desktop?`n`nThe shortcuts go to your Recycle Bin."
             if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
             $r = Remove-QpShortcuts
         } else {
             $r = New-QpShortcuts
         }
+        Set-CopyFollowUp $r
         [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane')
     } catch {
         [void][System.Windows.MessageBox]::Show("That did not work: $($_.Exception.Message)", 'Quietpane')
     }
-    Update-ShortcutButton
-    try { Update-UndoList @(Get-QpRestorePoints) } catch { }
+    Update-PlaceControls
+})
+# Click, not Checked: only a person ticking the box changes anything, never the window updating it.
+$script:SignInBox.Add_Click({
+    if (Test-Busy) { Update-PlaceControls; return }
+    try {
+        $r = if ($script:SignInBox.IsChecked) { Enable-QpSignInStart } else { Disable-QpSignInStart }
+        Set-CopyFollowUp $r
+        # The tick itself says it worked; only a problem, or something now in the Recycle Bin, needs words.
+        if (-not $r.Ok -or $r.Copy -in 'Recycled', 'Later', 'Failed') { [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane') }
+        else { $ui.Status.Text = $r.Note }
+    } catch {
+        [void][System.Windows.MessageBox]::Show("That did not work: $($_.Exception.Message)", 'Quietpane')
+    }
+    Update-PlaceControls
 })
 
 $btnSite.Add_Click({ Open-AsUser $info.BrandUrl })
 $btnRepo.Add_Click({ Open-AsUser $info.RepoUrl })
-$btnMail.Add_Click({ Open-AsUser "mailto:$($info.BrandEmail)?subject=Clean%20My%20PC" })
+$btnMail.Add_Click({ Open-AsUser "mailto:$($info.BrandEmail)?subject=Quietpane" })
 $btnData.Add_Click({
     if (Test-Path $info.DataRoot) { Open-AsUser $info.DataRoot }
     else { [void][System.Windows.MessageBox]::Show('Nothing saved yet. Restore points show up here after your first change.', 'Quietpane') }
@@ -1234,7 +1279,7 @@ function Update-StartupList($items) {
     $kept   = @($items | Where-Object { $_.Keep })
     $locked = @($items | Where-Object { $_.Locked -and $_.On -and -not $_.Keep })
     $script:StartupSection.Expander.Header = New-Text ('Starts when you sign in   ({0} on, {1} off)' -f ($on.Count + @($kept | Where-Object On).Count + $locked.Count), ($off.Count + @($kept | Where-Object { -not $_.On }).Count)) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
-    if (-not $on.Count) { [void]$script:StartupList.Children.Add((New-Text 'Nothing extra starts when you sign in. Lovely.' 13 'SemiBold' '#117A68' '0,8,0,0')) }
+    if (-not $on.Count) { [void]$script:StartupList.Children.Add((New-Text 'Nothing extra starts when you sign in.' 13 'SemiBold' '#117A68' '0,8,0,0')) }
     foreach ($i in $on) {
         $bits = @()
         if ($i.Note) { $bits += $i.Note }
@@ -1706,7 +1751,7 @@ function Update-HomeCards($state) {
     } else {
         $script:CardBrands.Border.Visibility = 'Collapsed'
     }
-    if ($script:HomeCounts.Total -eq 0) { $btnOneClick.Content = 'Your PC is already lovely' } else { $btnOneClick.Content = 'Quiet my PC now' }
+    if ($script:HomeCounts.Total -eq 0) { $btnOneClick.Content = 'Your PC looks quiet' } else { $btnOneClick.Content = 'Quiet my PC now' }
     Update-Meters
 }
 
@@ -2253,7 +2298,7 @@ function Show-Findings {
     $list = @($script:ScanFindings)
     if ($script:SevFilter -ne 'All') { $list = @($list | Where-Object { $_.Severity -eq $script:SevFilter }) }
     if (-not $list.Count) {
-        $msg = if ($script:SevFilter -eq 'All') { 'Nothing was found. Lovely.' } else { "Nothing at $($script:SevFilter) level." }
+        $msg = if ($script:SevFilter -eq 'All') { 'Nothing was found.' } else { "Nothing at $($script:SevFilter) level." }
         [void]$script:FindingsPanel.Children.Add((New-Text $msg 13.5 'SemiBold' '#117A68' '0,4,0,0'))
         return
     }
@@ -2664,13 +2709,23 @@ function Show-Welcome {
     return $true
 }
 
-$window.Add_ContentRendered({
+$script:FirstShown = $false
+function Start-FirstShow {
+    if ($script:FirstShown) { return }
+    $script:FirstShown = $true
     if (-not (Show-Welcome)) { $window.Close(); return }
     $ui.LogBox.AppendText(('Quietpane {0} - Developed by KomodoWorks.com. Started {1}. Administrator: {2}. This app makes no network connections.' -f $info.Version, (Get-Date -Format 'yyyy-MM-dd HH:mm'), (Test-IsAdmin)) + [Environment]::NewLine)
+    # Shortcuts and the sign-in start always open Quietpane's own copy: keep that copy current, and
+    # point back any shortcut that still opens a folder that may have moved. Does nothing if you have neither.
+    try { [void](Sync-QpInstall) } catch { $ui.LogBox.AppendText("Could not check the shortcuts: $($_.Exception.Message)" + [Environment]::NewLine) }
     Update-State
     Start-LiveSampler
-    Update-ShortcutButton
-})
+    Update-PlaceControls
+}
+$window.Add_ContentRendered({ Start-FirstShow })
+# Opened minimised at sign-in, Windows never sends ContentRendered - so start the first time it is opened.
+$window.Add_StateChanged({ if ($window.WindowState -ne 'Minimized') { Start-FirstShow } })
 $timer.Start()
 [void]$window.ShowDialog()
 Stop-LiveSampler   # in case the window went away without Closing firing
+if ($script:RemoveCopyOnClose) { try { [void](Start-QpCopyRemoval) } catch { } }

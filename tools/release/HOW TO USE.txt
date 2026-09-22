@@ -31,7 +31,8 @@ ALSO IN THE APP
    Free up    "Where your space went" shows the biggest folders and files,
     space     so you can see where your disk went.
    About      One button puts Quietpane in your Start menu and on your
-              desktop, so it is easy to find again.
+              desktop, and a tick box starts it when you sign in. Both
+              keep working even if you move or delete this folder.
    Undo       Changed your mind? Everything recorded can be put back.
               Cleaned-up files are in your Recycle Bin.
 
@@ -53,8 +54,10 @@ A WINDOW FULL OF CODE OPENED?
 
 REMOVING QUIETPANE
    Removing it does not undo its changes, so use Undo first if you want
-   your PC back exactly as it was. Then delete the Quietpane folder and
-   any Quietpane-Report files on your Desktop. Nothing is installed.
+   your PC back exactly as it was. If you added shortcuts or the sign-in
+   start, take them away in About - Quietpane's copy in Program Files
+   goes to the Recycle Bin with them. Then delete the Quietpane folder
+   and any Quietpane-Report files on your Desktop.
    Your undo history stays in C:\ProgramData\Quietpane - delete that too
    once you're sure you won't need it.
 

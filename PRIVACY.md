@@ -1,6 +1,6 @@
 # Privacy Policy: Quietpane
 
-**Last updated: 21 September 2026**
+**Last updated: 22 September 2026**
 
 Quietpane is free, open-source software developed by **KomodoWorks**, an independent technology studio in Dublin, Ireland ([komodoworks.com](https://www.komodoworks.com)).
 Contact: **info@komodoworks.com**
@@ -27,7 +27,7 @@ The app runs only on your PC, only when you start it, and only does what you cli
 | **Apps tab: what starts when you sign in** | The programs set to start at sign-in (the usual Run entries, the Startup folders and Store apps), with each program's name and publisher from its own file details | Shown on screen only |
 | **Privacy tab: what's talking to the internet** (only while that section is open) | Windows' own list of connections open right now: the program, its process, and the address and port at the other end. Names for those addresses come from the list of addresses Windows has already looked up (its DNS cache), and the names of Windows services from Windows itself. **Quietpane makes no network requests: nothing is looked up online, and no address is sent anywhere.** | Shown on screen, refreshed every 5 seconds while you are looking, and nothing at all when the section is closed. **None of it is saved.** |
 | **Free up space: where your space went** (only when you press Look) | The names, sizes and dates of folders and files on the drive you pick - never their contents, which are not opened - plus the list of installed programs Windows keeps, so a game or program can be named rather than offered for deletion | Shown on screen only. If you move something to the Recycle Bin, that is recorded in a restore point like any other change. |
-| **Start menu and desktop shortcuts** (only when you press the button) | Nothing | Two small shortcut files in your own Start menu and desktop folders, pointing at the Quietpane folder. The button removes them again, and Undo does too. |
+| **Start menu and desktop shortcuts, and starting when you sign in** (only when you choose them in About) | Nothing | Two small shortcut files in your own Start menu and desktop folders; if you tick it, one task in Task Scheduler, **Quietpane (KomodoWorks)**, that opens Quietpane when you sign in; and a copy of the app in `C:\Program Files\Quietpane` for both to open, so moving the folder you unzipped can't break them. The copy is the app's own files only - none of your data. Taking both away in About removes all of it, and the copy goes to your Recycle Bin. |
 | **Privacy tab: who used your camera, microphone and location** | Windows' own record of which apps and programs used them and when (the one behind Settings > Privacy & security), each app's allow/deny setting, and the names of those apps from the Start menu and from each program's file details | Shown on screen only. Nothing about it is saved. |
 | **Privacy, Telemetry, Apps** (only when you click Apply) | The settings, services, tasks, apps, startup items, camera/microphone/location permissions and hosts-file entries you ticked, and any brand extra you chose to uninstall (using its own uninstaller). Switching a startup item off writes the same small on/off marker Task Manager does; switching an app off for the camera, microphone or location writes the same "Deny" that Settings does. | Restore points and logs in `%ProgramData%\Quietpane\restore\` on your PC. These hold the previous values, so Undo can put them back. |
 | **Clean up space** (only when you click Apply) | The folders you ticked | Files are moved to **your Recycle Bin** |
@@ -47,7 +47,7 @@ All processing happens locally on your own device, under your control, for your 
 You can remove everything the app has stored at any time:
 - **Scan reports:** delete `Quietpane-Report-*.html` from your Desktop.
 - **Everything else it keeps** (restore points and logs, the audit log, the quarantine, and the small note files above): delete the folder `%ProgramData%\Quietpane`, and `%ProgramData%\CleanMyPC` if you used the app under its former name. Do this once you're sure you won't need Undo. Anything in the quarantine is deleted with it, and deleting that part needs administrator rights.
-- **The app itself:** delete the folder you extracted it to. There is no installer and nothing else to remove.
+- **The app itself:** if you added shortcuts or the sign-in start, take them away in About first (that sends Quietpane's copy in Program Files to the Recycle Bin too). Then delete the folder you extracted it to. There is no installer and nothing else to remove.
 
 ## When you leave the app
 

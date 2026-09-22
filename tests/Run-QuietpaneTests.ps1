@@ -13,7 +13,7 @@
             '-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
 
     (all on one line). An elevated window says "Administrator:" in its title bar and starts in
-    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated: 140 checks run.
+    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated with -Live: 153 checks run.
 
     No real malware is ever used. The only live test writes the EICAR string - the harmless standard file
     the antivirus industry publishes so people can check their protection works - into a temporary folder,
@@ -926,7 +926,7 @@ Test-Case 'reading the real list never throws' {
     $null -ne $r -and $r.Internet -ge 0 -and $null -ne $r.At
 }
 
-Section 'Start menu and desktop shortcuts'
+Section 'Start menu, desktop and sign-in'
 Test-Case 'a shortcut carries the app id, so the taskbar treats it as Quietpane' {
     Initialize-QpShortcut
     $lnk = Join-Path $env:TEMP 'QuietpaneShortcutTest.lnk'
@@ -938,13 +938,117 @@ Test-Case 'a shortcut carries the app id, so the taskbar treats it as Quietpane'
     [IO.File]::Delete($lnk)
     $ok
 }
-Test-Case 'shortcuts go in your own Start menu and desktop, never system-wide' {
+Test-Case 'shortcuts go in your own Start menu and desktop, and open Quietpane''s own copy in Program Files' {
     $p = Get-QpShortcutPaths
     $s = Test-QpShortcuts
+    $pf = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
     $p.StartMenu.StartsWith($env:APPDATA, [StringComparison]::OrdinalIgnoreCase) -and
     $p.Desktop.StartsWith([Environment]::GetFolderPath('DesktopDirectory'), [StringComparison]::OrdinalIgnoreCase) -and
-    (Test-Path $p.Icon) -and $null -ne $s.StartMenu -and $null -ne $s.Desktop
+    $p.Script -ieq (Join-Path $pf 'Quietpane\Quietpane.ps1') -and $p.Icon -like '*\Quietpane\assets\quietpane.ico' -and
+    $null -ne $s.StartMenu -and $null -ne $s.Desktop -and $null -ne $s.Pinned
 }
+Test-Case 'version numbers compare as numbers, not as text' {
+    (Compare-QpVersion '1.10.0' '1.9.2') -eq 1 -and (Compare-QpVersion '1.9.2' '1.10.0') -eq -1 -and (Compare-QpVersion '1.11.0' '1.11.0') -eq 0
+}
+
+# A pretend Program Files, Start menu and taskbar in a temporary folder: the real ones are never touched.
+$copyArea = Join-Path $env:TEMP ('QpCopyTest-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$copyTo = Join-Path $copyArea 'Program Files\Quietpane'
+Test-Case 'Quietpane''s own copy has everything it needs to run, and none of the tests or tools' {
+    $r = Install-QpCopy -From $root -To $copyTo
+    $r.Ok -and $r.Changed -and (Get-QpAppVersion $copyTo) -eq (Get-QpInfo).Version -and
+    (Test-Path (Join-Path $copyTo 'src\catalog\network.psd1')) -and (Test-Path (Join-Path $copyTo 'assets\quietpane.ico')) -and
+    (Test-Path (Join-Path $copyTo 'PRIVACY.md')) -and -not (Test-Path (Join-Path $copyTo 'tests')) -and -not (Test-Path (Join-Path $copyTo 'tools')) -and
+    (Test-QpCopyMatches $root $copyTo)
+}
+Test-Case 'opening the same version again leaves the copy alone' {
+    $r = Install-QpCopy -From $root -To $copyTo
+    $r.Ok -and -not $r.Changed
+}
+Test-Case 'a copy that was changed or only half made is put right' {
+    Set-Content -LiteralPath (Join-Path $copyTo 'README.md') -Value 'changed' -Encoding ASCII
+    $r = Install-QpCopy -From $root -To $copyTo
+    $r.Changed -and (Test-QpCopyMatches $root $copyTo)
+}
+Test-Case 'an older Quietpane never replaces a newer copy' {
+    $engine = Join-Path $copyTo 'src\Quietpane.psm1'
+    $text = [IO.File]::ReadAllText($engine) -replace "(?m)^\`$script:AppVersion\s*=\s*'[^']+'", "`$`$script:AppVersion  = '99.0.0'"
+    [IO.File]::WriteAllText($engine, $text)
+    $r = Install-QpCopy -From $root -To $copyTo
+    $r.Ok -and -not $r.Changed -and (Get-QpAppVersion $copyTo) -eq '99.0.0'
+}
+Test-Case 'a folder that isn''t Quietpane is never sent to the Recycle Bin' {
+    $other = Join-Path $copyArea 'Not Quietpane'
+    New-Item -ItemType Directory -Force -Path $other | Out-Null
+    (Remove-QpCopy -InstallRoot $other) -eq 'Failed' -and (Test-Path $other) -and (Remove-QpCopy -InstallRoot (Join-Path $copyArea 'missing')) -eq 'None'
+}
+Test-Case 'shortcuts that still open a moved folder are pointed at Quietpane''s own copy, and yours are left alone' {
+    Initialize-QpShortcut
+    $links = Join-Path $copyArea 'links'; $pinned = Join-Path $links 'TaskBar'
+    New-Item -ItemType Directory -Force -Path $pinned | Out-Null
+    $fresh = Join-Path $copyArea 'Program Files 2\Quietpane'
+    $p = [pscustomobject]@{
+        StartMenu = Join-Path $links 'Quietpane.lnk'; Desktop = Join-Path $links 'Desktop Quietpane.lnk'; Pinned = $pinned
+        AppRoot = $root; InstallRoot = $fresh; Script = Join-Path $fresh 'Quietpane.ps1'; Icon = Join-Path $fresh 'assets\quietpane.ico'; FromCopy = $false
+    }
+    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $old = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "D:\Moved away\Quietpane.ps1"'
+    $appId = (Get-QpInfo).AppId
+    [QuietpaneShortcut]::Create($p.StartMenu, $ps, $old, $root, '', 'Quietpane', $appId)
+    [QuietpaneShortcut]::Create((Join-Path $pinned 'Quietpane.lnk'), $ps, $old, $root, '', 'Quietpane', $appId)
+    [QuietpaneShortcut]::Create($p.Desktop, $ps, $old, $root, '', 'Mine', '')   # someone's own, without Quietpane's app id
+    $r = Sync-QpInstall -InstallRoot $fresh -Name 'Quietpane test - no such task' -Paths $p
+    $want = '*-File "' + (Join-Path $fresh 'Quietpane.ps1') + '"*'
+    $r.InUse -and $r.Updated -and $r.Repaired -eq 2 -and (Get-QpAppVersion $fresh) -eq (Get-QpInfo).Version -and
+    ([QuietpaneShortcut]::ReadArguments($p.StartMenu) -like $want) -and
+    ([QuietpaneShortcut]::ReadArguments((Join-Path $pinned 'Quietpane.lnk')) -like $want) -and
+    ([QuietpaneShortcut]::ReadArguments($p.Desktop) -eq $old)
+}
+Test-Case 'with no shortcuts and no sign-in start, opening Quietpane changes nothing at all' {
+    $empty = Join-Path $copyArea 'nothing'
+    New-Item -ItemType Directory -Force -Path $empty | Out-Null
+    $none = Join-Path $copyArea 'Program Files 3\Quietpane'
+    $p = [pscustomobject]@{ StartMenu = Join-Path $empty 'a.lnk'; Desktop = Join-Path $empty 'b.lnk'; Pinned = $empty; AppRoot = $root; InstallRoot = $none; Script = Join-Path $none 'Quietpane.ps1'; Icon = ''; FromCopy = $false }
+    $r = Sync-QpInstall -InstallRoot $none -Name 'Quietpane test - no such task' -Paths $p
+    -not $r.InUse -and -not (Test-Path $none)
+}
+Test-Case 'starting at sign-in waits for sign-in to finish, runs on battery, and is never stopped for running too long' {
+    $t = New-QpSignInTask -Script 'C:\Program Files\Quietpane\Quietpane.ps1'
+    $a = @($t.Actions)[0]; $tr = @($t.Triggers)[0]
+    $t.Principal.RunLevel -eq 'Highest' -and $t.Principal.LogonType -eq 'Interactive' -and
+    $tr.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and $tr.Delay -eq 'PT20S' -and
+    -not $t.Settings.DisallowStartIfOnBatteries -and -not $t.Settings.StopIfGoingOnBatteries -and $t.Settings.ExecutionTimeLimit -eq 'PT0S' -and
+    $a.Execute -like '*\System32\WindowsPowerShell\v1.0\powershell.exe' -and
+    $a.Arguments -like '*-File "C:\Program Files\Quietpane\Quietpane.ps1" -Minimized' -and $t.Author -eq 'KomodoWorks'
+}
+Test-Case 'the safety scan knows Quietpane''s own sign-in task, but not one that only borrows its name' {
+    $pf = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+    $good = [pscustomobject]@{ TaskPath = '\'; TaskName = 'Quietpane (KomodoWorks)'; Actions = @(Get-QpSignInAction (Join-Path $pf 'Quietpane\Quietpane.ps1')) }
+    $bad = [pscustomobject]@{ TaskPath = '\'; TaskName = 'Quietpane (KomodoWorks)'; Actions = @(Get-QpSignInAction 'C:\Users\Public\other.ps1') }
+    $moved = [pscustomobject]@{ TaskPath = '\Other\'; TaskName = 'Quietpane (KomodoWorks)'; Actions = $good.Actions }
+    (Test-QpOwnSignInTask $good) -and -not (Test-QpOwnSignInTask $bad) -and -not (Test-QpOwnSignInTask $moved)
+}
+Test-Case 'switching the sign-in start on and off (needs administrator rights)' {
+    if (-not (Test-QpAdmin)) { return 'skip' }
+    $name = 'Quietpane test - safe to delete'
+    $to = Join-Path $copyArea 'Program Files 4\Quietpane'
+    try {
+        $on = Enable-QpSignInStart -InstallRoot $to -Name $name
+        $t = Get-QpSignInTask -Name $name
+        $ok = $on.Ok -and $t -and (Test-QpSignInStart -Name $name) -and "$($t.Principal.RunLevel)" -eq 'Highest' -and (Get-QpAppVersion $to)
+        # The copy is this test's own; it goes first, so switching off has nothing to send to your Recycle Bin.
+        [IO.Directory]::Delete($to, $true)
+        $off = Disable-QpSignInStart -InstallRoot $to -Name $name
+        $ok -and $off.Ok -and -not (Get-QpSignInTask -Name $name) -and $off.Copy -in 'None', 'Kept'
+    } finally { try { Unregister-ScheduledTask -TaskPath '\' -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue } catch { } }
+}
+Test-Case 'opened minimised at sign-in, the window still starts working the first time it is opened' {
+    # Windows never sends ContentRendered to a window that starts minimised, so the window also listens
+    # for the first time it is opened.
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $src -match 'Add_ContentRendered\(\{ Start-FirstShow \}\)' -and $src -match 'Add_StateChanged\(\{[^}]*Start-FirstShow'
+}
+try { [IO.Directory]::Delete($copyArea, $true) } catch { }
 
 Section 'The app icon'
 Add-Type -AssemblyName PresentationCore
