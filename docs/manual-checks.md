@@ -58,6 +58,9 @@ These need eyes, not assertions:
   Task Manager should drop to nothing: it reads nothing until the Health tab is back on screen.
 - **Undo is up to date straight away.** Apply something, then open the Undo tab at once: the new
   restore point is at the top, with the right number of changes. Nothing ever shows "0 change(s)".
+- **Opening is smooth.** From the Start menu, the window can be dragged the moment it appears - it
+  never stops responding while it reads the PC. A Safety scan's "Checking what is reporting home"
+  step takes a moment, not a quarter of a minute.
 - **Slowing down to cool off.** Under a long, heavy game on a laptop, the processor tile may say it
   is slowing down to cool off. If it appears while the PC is idle and cool, that is a bug.
 - **Not shared.** On a PC with no dedicated graphics card or no thermal zone, the tiles say "not

@@ -42,7 +42,7 @@ Just want a check-up that changes nothing? Double-click **Safety scan only** ins
 - **Tells you first.** Every item explains what it does and its side effects, and **Preview** shows exactly what would change.
 - **Can be undone.** Changes go into a restore point, and clean-up only moves files to your Recycle Bin. The three exceptions say so before you confirm: removing an app, uninstalling a brand extra, and deleting a threat for good.
 - **Leaves your security alone.** Defender, SmartScreen, the firewall and Windows Update are never touched.
-- **Owns up when something goes wrong.** If a part of your PC can't be read, that part says so and the rest still works. One job runs at a time, only one copy of the app opens at once, and an error never takes the window down with it.
+- **Owns up when something goes wrong.** If a part of your PC can't be read, that part says so and the rest still works. If Undo can't put something back, it says how many and keeps the restore point so you can try again. One job runs at a time, only one copy of the app opens at once, and an error never takes the window down with it.
 - **Hides nothing.** Plain-text PowerShell you can read, plus three short C# blocks (the graphics driver's temperature, adding up folder sizes, and making the Start-menu shortcut) and two lines that give the app its own taskbar icon and a sharp window. No installer and no `.exe`: it runs from the folder you unzip, and only copies itself to Program Files if you ask for shortcuts or to start it when you sign in.
 
 ## What's inside
@@ -63,7 +63,7 @@ Every finding says who found it: **Microsoft Defender** (a real detection, named
 
 **Free up space** moves temp files, crash dumps, caches and old installers to the Recycle Bin. **Where your space went** then answers the bigger question: it adds up every folder on a drive (about ten seconds) and shows the biggest, so you can look inside them. Your own files can go to the Recycle Bin; Windows, installed programs and games are explained instead, with where to remove them properly. Nothing bigger than your Recycle Bin can hold is ever sent there, because Windows would delete it for good.
 
-**Undo** puts back every recorded change. **About** holds the policies, readable offline, and **Quietpane on this PC**: one button adds it to your Start menu and desktop with its own icon, so it is easy to find and pins to the taskbar properly, and a tick box starts it when you sign in, waiting on the taskbar and doing nothing until you click it. Both open Quietpane's own copy in `C:\Program Files\Quietpane`, so moving or deleting the folder you unzipped never breaks them. Opening a newer Quietpane brings that copy up to date, and an older one never replaces it.
+**Undo** puts back every recorded change, each with the value and type it had before. **About** holds the policies, readable offline, and **Quietpane on this PC**: one button adds it to your Start menu and desktop with its own icon, so it is easy to find and pins to the taskbar properly, and a tick box starts it when you sign in, waiting on the taskbar and doing nothing until you click it. Both open Quietpane's own copy in `C:\Program Files\Quietpane`, so moving or deleting the folder you unzipped never breaks them. Opening a newer Quietpane brings that copy up to date, and an older one never replaces it.
 
 ## What it deliberately doesn't do
 
@@ -143,7 +143,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
   ```powershell
   Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
   ```
-  An elevated window says "Administrator:" in its title bar. 153 checks run there; the one left over only runs on a PC without Defender.
+  An elevated window says "Administrator:" in its title bar. 162 checks run there; the one left over only runs on a PC without Defender.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what still needs a person, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files.
 - **Contribute:** the lists in [`src/catalog/`](src/catalog) are plain data, so adding a setting, app, folder, brand or startup note needs no code. Describe side effects honestly, and test with **Preview** first. The reasons behind a few design choices are in [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md).
 

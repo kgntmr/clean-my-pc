@@ -13,7 +13,7 @@
             '-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
 
     (all on one line). An elevated window says "Administrator:" in its title bar and starts in
-    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated with -Live: 153 checks run.
+    C:\WINDOWS\system32; an ordinary one starts in your own user folder. Elevated with -Live: 162 checks run.
 
     No real malware is ever used. The only live test writes the EICAR string - the harmless standard file
     the antivirus industry publishes so people can check their protection works - into a temporary folder,
@@ -780,6 +780,118 @@ Test-Case 'the whole state comes back in one pass, and the shared lookups are le
     $s = Get-QpState
     $keysOk = @('Privacy', 'Vendors', 'Apps', 'Startup', 'Devices', 'Cleanup', 'Restore', 'Problems' | Where-Object { -not $s.ContainsKey($_) }).Count -eq 0
     $keysOk -and $null -eq (& (Get-Module Quietpane) { $script:StateCache })
+}
+Test-Case 'asking Task Scheduler directly lists exactly the tasks Get-ScheduledTask lists' {
+    # Names and whether each is switched off; "running" or "ready" can change between the two reads.
+    $fast = @(foreach ($kv in (Get-QpTasksByPath).GetEnumerator()) { foreach ($t in $kv.Value) { '{0}{1}|{2}' -f $t.TaskPath, $t.TaskName, ($t.State -eq 'Disabled') } }) | Sort-Object
+    $slow = @(Get-ScheduledTask | ForEach-Object { '{0}{1}|{2}' -f $_.TaskPath, $_.TaskName, ("$($_.State)" -eq 'Disabled') }) | Sort-Object
+    $fast.Count -gt 0 -and (($fast -join "`n") -eq ($slow -join "`n"))
+}
+Test-Case 'every task line in the catalogs finds the same tasks all three ways' {
+    $mod = Get-Module Quietpane
+    $lines = @((Get-QpCatalog privacy).Items | ForEach-Object { $_.Actions }) + @((Get-QpCatalog vendors).Vendors | ForEach-Object { $_.Items } | ForEach-Object { $_.Actions })
+    $differ = @(foreach ($a in @($lines | Where-Object { $_ -and $_.Type -eq 'Task' })) {
+        $slow = (@(Get-ScheduledTask -TaskPath $a.Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like $a.Name } | ForEach-Object { "$($_.TaskPath)$($_.TaskName)" }) | Sort-Object) -join ';'
+        $fast = (@(Get-QpTasksMatching -Path $a.Path -Name $a.Name | ForEach-Object { "$($_.TaskPath)$($_.TaskName)" }) | Sort-Object) -join ';'
+        $shared = (@(& $mod { param($x) Start-QpStateCache; try { Get-QpTasksMatching -Path $x.Path -Name $x.Name } finally { Stop-QpStateCache } } $a | ForEach-Object { "$($_.TaskPath)$($_.TaskName)" }) | Sort-Object) -join ';'
+        if ($slow -ne $fast -or $slow -ne $shared) { "$($a.Path)$($a.Name)" }
+    })
+    $differ.Count -eq 0
+}
+Test-Case 'a task folder ending in * covers every folder under it, as Get-ScheduledTask reads it' {
+    # This used to find nothing while the window read the PC, so the item always said "not on this PC".
+    $found = @(& (Get-Module Quietpane) {
+        Start-QpStateCache
+        try {
+            $list = New-Object System.Collections.ArrayList
+            [void]$list.Add([pscustomobject]@{ TaskPath = '\SoftLanding\S-1-5-21-1\'; TaskName = 'SoftLandingCreativeManagementTask'; State = 'Ready' })
+            $script:StateCache.Tasks = @{ '\SoftLanding\S-1-5-21-1\' = $list; '\Other\' = (New-Object System.Collections.ArrayList) }
+            Get-QpTasksMatching -Path '\SoftLanding\*' -Name '*'
+        } finally { Stop-QpStateCache }
+    })
+    $found.Count -eq 1 -and $found[0].TaskName -eq 'SoftLandingCreativeManagementTask'
+}
+Test-Case 'registry values are read exactly as stored, with their type, however the path is written' {
+    $k = 'HKCU:\Software\QuietpaneTest-Reg'
+    New-Item -Path $k -Force | Out-Null
+    try {
+        Set-ItemProperty -Path $k -Name 'D' -Value 7 -Type DWord
+        Set-ItemProperty -Path $k -Name 'S' -Value '1' -Type String
+        Set-ItemProperty -Path $k -Name 'E' -Value '%TEMP%\x' -Type ExpandString
+        Set-ItemProperty -Path $k -Name 'B' -Value ([byte[]](1, 2, 3)) -Type Binary
+        Set-ItemProperty -Path $k -Name 'M' -Value @('a', 'b') -Type MultiString
+        $dw = Get-QpRegValue -Path $k -Name 'D'; $txt = Get-QpRegValue -Path $k -Name 'S'; $exp = Get-QpRegValue -Path $k -Name 'E'
+        $bin = Get-QpRegValue -Path $k -Name 'B'; $multi = Get-QpRegValue -Path $k -Name 'M'
+        $long = Get-QpRegValue -Path 'Registry::HKEY_CURRENT_USER\Software\QuietpaneTest-Reg' -Name 'D'
+        $dw.Exists -and $dw.Value -eq 7 -and $dw.Kind -eq 'DWord' -and $txt.Value -eq '1' -and $txt.Kind -eq 'String' -and
+        $exp.Value -eq '%TEMP%\x' -and $exp.Kind -eq 'ExpandString' -and (@($bin.Value) -join ',') -eq '1,2,3' -and $bin.Kind -eq 'Binary' -and
+        (@($multi.Value) -join ',') -eq 'a,b' -and $multi.Kind -eq 'MultiString' -and $long.Exists -and $long.Value -eq 7 -and
+        -not (Get-QpRegValue -Path $k -Name 'Missing').Exists -and -not (Get-QpRegValue -Path "$k\NoSuchKey" -Name 'D').Exists
+    } finally { Remove-Item -Path $k -Recurse -Force -ErrorAction SilentlyContinue }
+}
+Test-Case 'the installed-programs list is the same as reading it the slow way' {
+    $new = @(& (Get-Module Quietpane) { $script:InstalledPrograms = $null; Get-QpInstalledPrograms } | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Name, $_.Uninstall, $_.Quiet, $_.Key }) | Sort-Object
+    $old = @(foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*') {
+        Get-ItemProperty -Path $k -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and -not $_.SystemComponent } |
+            ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.DisplayName, $(if ($_.QuietUninstallString) { $_.QuietUninstallString } else { $_.UninstallString }), [bool]$_.QuietUninstallString, $_.PSChildName }
+    }) | Sort-Object
+    $new.Count -gt 0 -and (($new -join "`n") -eq ($old -join "`n"))
+}
+
+Section 'Undo tells the truth'
+Test-Case 'Undo puts a setting back with its old type, not just its old value' {
+    # Text stays text: a setting that was "1" as text comes back as text, even though the change wrote a number.
+    $k = 'HKCU:\Software\QuietpaneTest-UndoKind'
+    New-Item -Path $k -Force | Out-Null
+    Set-ItemProperty -Path $k -Name 'V' -Value '1' -Type String
+    $rp = $null
+    try {
+        $rp = & (Get-Module Quietpane) { param($key)
+            Start-QpSession 'undo-kind-test'
+            $p = $script:Session.Path
+            try { Invoke-QpRegAction -Action @{ Type = 'Reg'; Path = $key; Name = 'V'; Value = 0; Kind = 'DWord' } } finally { Stop-QpSession }
+            $p
+        } $k
+        $changed = Get-QpRegValue -Path $k -Name 'V'
+        $r = @(Invoke-QpUndo -Path $rp)[-1]
+        $back = Get-QpRegValue -Path $k -Name 'V'
+        $changed.Kind -eq 'DWord' -and $changed.Value -eq 0 -and $back.Kind -eq 'String' -and $back.Value -eq '1' -and
+        $r.Failed -eq 0 -and (Test-Path (Join-Path $rp 'undone.txt'))
+    } finally {
+        Remove-Item -Path $k -Recurse -Force -ErrorAction SilentlyContinue
+        if ($rp -and (Test-Path $rp)) { Remove-Item -LiteralPath $rp -Recurse -Force }   # the test's own restore point
+    }
+}
+Test-Case 'an Undo that cannot put everything back says so, and stays in the list to try again' {
+    $rp = Join-Path $env:ProgramData ('Quietpane\restore\{0}-undo-fail-test' -f (Get-QpStamp))
+    New-Item -ItemType Directory -Force -Path $rp | Out-Null
+    try {
+        @{ Name = 'undo-fail-test'; Started = (Get-Date).ToString('s'); Entries = @(@{ Type = 'Task'; Path = '\QuietpaneNoSuchFolder\'; Name = 'NoSuchTask' }) } |
+            ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $rp 'state.json') -Encoding UTF8
+        $r = @(Invoke-QpUndo -Path $rp)[-1]
+        $r.Failed -eq 1 -and $r.Restored -eq 0 -and -not (Test-Path (Join-Path $rp 'undone.txt'))
+    } finally { Remove-Item -LiteralPath $rp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+Test-Case 'restore points are dated on the ordinary calendar, whatever the PC''s language' {
+    # Thai Windows counts years from 543 BC, so its own date format would name a restore point "2569...".
+    $was = [Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        [Threading.Thread]::CurrentThread.CurrentCulture = New-Object Globalization.CultureInfo 'th-TH'
+        $when = New-Object DateTime 2026, 9, 22, 10, 30, 0
+        $ours = Get-QpStamp 'yyyyMMdd-HHmmss' $when
+        $local = $when.ToString('yyyyMMdd-HHmmss')
+    } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $was }
+    $ours -eq '20260922-103000' -and $local -ne $ours
+}
+Test-Case 'an uninstall command is split safely, and only Windows Installer''s install switch becomes remove' {
+    $inno = Split-QpUninstallCommand '"C:\Program Files\Brand\unins000.exe" /SILENT'
+    $msiI = Split-QpUninstallCommand 'MsiExec.exe /I{12345678-1234-1234-1234-123456789012}'
+    $msiX = Split-QpUninstallCommand 'MsiExec.exe /X{12345678-1234-1234-1234-123456789012} /qn'
+    $other = Split-QpUninstallCommand 'C:\Brand\uninstall.exe /INSTALLDIR=C:\Brand'
+    $inno.Program -eq 'C:\Program Files\Brand\unins000.exe' -and $inno.Arguments -eq '/SILENT' -and
+    $msiI.Program -eq 'MsiExec.exe' -and $msiI.Arguments -eq '/X{12345678-1234-1234-1234-123456789012} /passive /norestart' -and
+    $msiX.Arguments -eq '/X{12345678-1234-1234-1234-123456789012} /qn' -and
+    $other.Program -eq 'C:\Brand\uninstall.exe' -and $other.Arguments -eq '/INSTALLDIR=C:\Brand'
 }
 Test-Case 'catalogs are read once and remembered' {
     [object]::ReferenceEquals((Get-QpCatalog privacy), (Get-QpCatalog privacy))

@@ -1047,13 +1047,16 @@ function Start-Work {
     [void]$ps.AddScript($wrapper.ToString()).AddArgument($Work.ToString()).AddArgument($Params)
     $script:Job = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); OnDone = $OnDone }
     Set-Busy $true $StatusText
+    Set-TimerQuick
 }
 
 # ------------------------------------------------------------------ live readings
 # A small reader of its own, separate from Start-Work, so the Home tiles never block a button. It only
 # reads while Home is on screen and the window isn't minimised; the rest of the time it sleeps. That
 # also matters on gaming laptops: asking the graphics card how it is doing shouldn't keep it awake.
-$script:Live = [hashtable]::Synchronized(@{ Reading = $null; Seq = 0; Active = $false; Stop = $false; Health = $null; HealthSeq = 0; Net = $null; NetSeq = 0; NetActive = $false })
+$script:Live = [hashtable]::Synchronized(@{ Reading = $null; Seq = 0; Active = $false; Stop = $false; Health = $null; HealthSeq = 0; Net = $null; NetSeq = 0; NetActive = $false
+    Wake = New-Object System.Threading.AutoResetEvent $false })   # rings the reader awake the moment it is needed
+$script:LiveWasActive = $false
 $script:NetSeqShown = 0
 $script:LiveSeqShown = 0
 $script:HealthSeqShown = 0
@@ -1096,7 +1099,8 @@ function Start-LiveSampler {
                 }
                 for ($i = 0; $i -lt 10 -and -not $Live.Stop; $i++) { Start-Sleep -Milliseconds 200 }
             } else {
-                Start-Sleep -Milliseconds 400
+                # Nothing to read: sleep until the window rings, rather than checking in every moment.
+                [void]$Live.Wake.WaitOne(5000)
             }
         }
     }.ToString())
@@ -1106,6 +1110,7 @@ function Start-LiveSampler {
 function Stop-LiveSampler {
     if (-not $script:LiveJob) { return }
     $script:Live.Stop = $true
+    try { [void]$script:Live.Wake.Set() } catch { }   # wake it, so it notices straight away
     $job = $script:LiveJob
     $script:LiveJob = $null
     try { [void]$job.Handle.AsyncWaitHandle.WaitOne(1500) } catch { }
@@ -1114,6 +1119,9 @@ function Stop-LiveSampler {
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(150)
+# The clock only runs quickly while there is something to watch - a job, the Health readings or the
+# internet list. Otherwise it slows right down, so a Quietpane that is just sitting there costs nothing.
+function Set-TimerQuick { if ($timer.Interval.TotalMilliseconds -ne 150) { $timer.Interval = [TimeSpan]::FromMilliseconds(150) } }
 $timer.Add_Tick({
     $line = $null
     $got = $false
@@ -1123,6 +1131,9 @@ $timer.Add_Tick({
     if ($script:Job -and $script:SpaceRunning) { Update-SpaceProgress }
     $script:Live.Active = ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') -and ($window.WindowState -ne 'Minimized')
     $script:Live.NetActive = ([string]$ui.Tabs.SelectedItem.Tag -eq 'privacy') -and $script:NetSection.Expander.IsExpanded -and ($window.WindowState -ne 'Minimized')
+    $liveNow = $script:Live.Active -or $script:Live.NetActive
+    if ($liveNow -and -not $script:LiveWasActive) { [void]$script:Live.Wake.Set() }
+    $script:LiveWasActive = $liveNow
     if ($script:Live.NetSeq -ne $script:NetSeqShown) {
         $script:NetSeqShown = $script:Live.NetSeq
         try { Update-NetList $script:Live.Net } catch { }   # a reading must never be able to break the window
@@ -1149,6 +1160,8 @@ $timer.Add_Tick({
         Set-Busy $false 'All done - nothing running.'
         if ($job.OnDone) { & $job.OnDone $script:Sync.Result }
     }
+    $wanted = if ($script:Job -or $script:Live.Active -or $script:Live.NetActive) { 150 } elseif ($window.WindowState -eq 'Minimized') { 2000 } else { 750 }
+    if ($timer.Interval.TotalMilliseconds -ne $wanted) { $timer.Interval = [TimeSpan]::FromMilliseconds($wanted) }
 })
 
 # ------------------------------------------------------------------ refresh state from the PC
@@ -2601,15 +2614,30 @@ $btnUndoAll.Add_Click({
     if ([System.Windows.MessageBox]::Show('Put everything back exactly as it was before you pressed "Quiet my PC now"?', 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
     $ui.LogBox.AppendText([Environment]::NewLine)
     Start-Work -StatusText 'Putting everything back...' -Params @{ Path = $script:LastRestorePoint } -Work { param($Path) Invoke-QpUndo -Path $Path } -OnDone {
-        $script:ResultTitle.Text = 'Everything is back as it was'
-        $script:ResultText.Text = "All settings were restored. Files are still in your Recycle Bin, and removed apps can be reinstalled from the Microsoft Store.`nRestart your PC to finish."
-        $script:LastRestorePoint = $null
-        $btnUndoAll.Visibility = 'Collapsed'
-        $script:MeterSpace.Delta.Visibility = 'Collapsed'
-        $script:MeterMemory.Delta.Visibility = 'Collapsed'
+        param($result)
+        $r = Get-UndoResult $result
+        if ($r.Failed) {
+            # Say so, and keep the button: whatever didn't come back can be tried again.
+            $script:ResultTitle.Text = 'Most things are back - a few are not'
+            $script:ResultText.Text = "$($r.Failed) change(s) could not be put back; everything else is as it was. Press Undo everything to try those again, or see Show details for what Windows said."
+        } else {
+            $script:ResultTitle.Text = 'Everything is back as it was'
+            $script:ResultText.Text = "All settings were restored. Files are still in your Recycle Bin, and removed apps can be reinstalled from the Microsoft Store.`nRestart your PC to finish."
+            $script:LastRestorePoint = $null
+            $btnUndoAll.Visibility = 'Collapsed'
+            $script:MeterSpace.Delta.Visibility = 'Collapsed'
+            $script:MeterMemory.Delta.Visibility = 'Collapsed'
+        }
         Update-StateAfterChange
     }
 })
+
+function Get-UndoResult($Result) {
+    # What Invoke-QpUndo reported; anything unexpected counts as "couldn't tell", never as success.
+    $r = @($Result) | Where-Object { $_ -and $_.PSObject.Properties['Failed'] } | Select-Object -Last 1
+    if ($r) { return $r }
+    return [pscustomobject]@{ Restored = 0; Failed = 1; Readable = $false }
+}
 
 $btnShowDetails.Add_Click({ Set-LogVisible $true })
 $ui.LinkDetails.Add_Click({ Set-LogVisible (-not $script:LogVisible) })
@@ -2622,12 +2650,19 @@ $btnUndo.Add_Click({
     if ([System.Windows.MessageBox]::Show("Undo all changes from:`n$($sel.Content)?", 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true
-    Start-Work -StatusText 'Undoing...' -Params @{ Path = [string]$sel.Tag } -Work { param($Path) Invoke-QpUndo -Path $Path } -OnDone { Update-StateAfterChange }
+    Start-Work -StatusText 'Undoing...' -Params @{ Path = [string]$sel.Tag } -Work { param($Path) Invoke-QpUndo -Path $Path } -OnDone {
+        param($result)
+        $r = Get-UndoResult $result
+        Update-StateAfterChange
+        if ($r.Failed) {
+            [void][System.Windows.MessageBox]::Show("$($r.Failed) change(s) could not be put back; everything else is as it was.`n`nThe restore point stays in the list, so you can try again. The details below say what Windows said.", 'Quietpane')
+        }
+    }
 })
 
 $ui.Tabs.Add_SelectionChanged({
     param($s, $e)
-    if ($e.OriginalSource -eq $ui.Tabs) { Update-Buttons }
+    if ($e.OriginalSource -eq $ui.Tabs) { Update-Buttons; Set-TimerQuick }
 })
 
 $window.Add_Closing({
@@ -2714,18 +2749,23 @@ function Start-FirstShow {
     if ($script:FirstShown) { return }
     $script:FirstShown = $true
     if (-not (Show-Welcome)) { $window.Close(); return }
-    $ui.LogBox.AppendText(('Quietpane {0} - Developed by KomodoWorks.com. Started {1}. Administrator: {2}. This app makes no network connections.' -f $info.Version, (Get-Date -Format 'yyyy-MM-dd HH:mm'), (Test-IsAdmin)) + [Environment]::NewLine)
-    # Shortcuts and the sign-in start always open Quietpane's own copy: keep that copy current, and
-    # point back any shortcut that still opens a folder that may have moved. Does nothing if you have neither.
-    try { [void](Sync-QpInstall) } catch { $ui.LogBox.AppendText("Could not check the shortcuts: $($_.Exception.Message)" + [Environment]::NewLine) }
-    Update-State
+    $ui.LogBox.AppendText(('Quietpane {0} - Developed by KomodoWorks.com. Started {1}. Administrator: {2}. This app makes no network connections.' -f $info.Version, (Get-QpStamp 'yyyy-MM-dd HH:mm'), (Test-IsAdmin)) + [Environment]::NewLine)
+    if (-not $timer.IsEnabled) { $timer.Start() }
+    # In the background, with the first read of the PC: shortcuts and the sign-in start always open
+    # Quietpane's own copy, so keep that copy current and point back any shortcut that still opens a
+    # folder that may have moved (it does nothing if you have neither). Then the About tab's button and
+    # tick box are filled in, once that is settled.
+    Start-Work -StatusText 'Reading the current state of this PC...' -Work {
+        try { [void](Sync-QpInstall) } catch { Write-QpLog "Could not check the shortcuts: $($_.Exception.Message)" 'WARN' }
+        Get-QpState
+    } -OnDone { param($s) Update-FromState $s; Update-PlaceControls }
     Start-LiveSampler
-    Update-PlaceControls
 }
 $window.Add_ContentRendered({ Start-FirstShow })
 # Opened minimised at sign-in, Windows never sends ContentRendered - so start the first time it is opened.
-$window.Add_StateChanged({ if ($window.WindowState -ne 'Minimized') { Start-FirstShow } })
-$timer.Start()
+$window.Add_StateChanged({ if ($window.WindowState -ne 'Minimized') { Start-FirstShow }; Set-TimerQuick })
+# Opened minimised at sign-in, even the clock waits until Quietpane is first opened.
+if (-not $Minimized) { $timer.Start() }
 [void]$window.ShowDialog()
 Stop-LiveSampler   # in case the window went away without Closing firing
 if ($script:RemoveCopyOnClose) { try { [void](Start-QpCopyRemoval) } catch { } }

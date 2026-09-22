@@ -19,7 +19,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.11.0'
+$script:AppVersion  = '1.11.1'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -131,16 +131,75 @@ $script:StateCache = $null
 function Start-QpStateCache { $script:StateCache = @{} }
 function Stop-QpStateCache { $script:StateCache = $null }
 
+# Task Scheduler, asked directly. Get-ScheduledTask goes through WMI and takes about a second even for
+# one task; asking Task Scheduler itself gives the same answers in a few milliseconds. Only reading
+# goes this way - changes still use the ScheduledTasks cmdlets.
+$script:TaskService = $null
+$script:TaskStates = @{ 0 = 'Unknown'; 1 = 'Disabled'; 2 = 'Queued'; 3 = 'Ready'; 4 = 'Running' }
+function Get-QpTaskService {
+    if (-not $script:TaskService) {
+        $svc = New-Object -ComObject Schedule.Service
+        $svc.Connect()
+        $script:TaskService = $svc
+    }
+    return $script:TaskService
+}
+
 function Get-QpTasksByPath {
-    # Every scheduled task in one query (about a second), rather than one query per folder (a second each).
+    # Every scheduled task in one pass, grouped by folder the way Get-ScheduledTask names them ("\Microsoft\Windows\X\").
     if ($script:StateCache -and $script:StateCache.ContainsKey('Tasks')) { return $script:StateCache.Tasks }
     $byPath = @{}
-    foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue)) {
-        if (-not $byPath.ContainsKey($t.TaskPath)) { $byPath[$t.TaskPath] = New-Object System.Collections.ArrayList }
-        [void]$byPath[$t.TaskPath].Add($t)
+    try {
+        $folders = New-Object System.Collections.Stack
+        $folders.Push((Get-QpTaskService).GetFolder('\'))
+        while ($folders.Count) {
+            $f = $folders.Pop()
+            $path = if ($f.Path -eq '\') { '\' } else { $f.Path + '\' }
+            # A folder this account may not read is skipped, as Get-ScheduledTask skips it.
+            $tasks = @(); try { $tasks = @($f.GetTasks(1)) } catch { }     # 1: hidden tasks too
+            foreach ($t in $tasks) {
+                if (-not $byPath.ContainsKey($path)) { $byPath[$path] = New-Object System.Collections.ArrayList }
+                [void]$byPath[$path].Add([pscustomobject]@{ TaskPath = $path; TaskName = [string]$t.Name; State = $script:TaskStates[[int]$t.State] })
+            }
+            $subs = @(); try { $subs = @($f.GetFolders(0)) } catch { }
+            foreach ($s in $subs) { $folders.Push($s) }
+        }
+    } catch {
+        # Task Scheduler can't be asked directly here, so take the slower way round.
+        $byPath = @{}
+        foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+            if (-not $byPath.ContainsKey($t.TaskPath)) { $byPath[$t.TaskPath] = New-Object System.Collections.ArrayList }
+            [void]$byPath[$t.TaskPath].Add([pscustomobject]@{ TaskPath = $t.TaskPath; TaskName = $t.TaskName; State = [string]$t.State })
+        }
     }
     if ($script:StateCache) { $script:StateCache.Tasks = $byPath }
     return $byPath
+}
+
+function Get-QpTasksMatching {
+    <#
+        The scheduled tasks one catalog line means: a folder - which may end in * for "every folder under
+        it", as Get-ScheduledTask understands it - and a task name, which may use wildcards too. While the
+        window reads the PC it uses the shared list; otherwise it asks Task Scheduler for just that folder.
+    #>
+    param([string]$Path, [string]$Name)
+    $wild = [Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Path)
+    if ($script:StateCache -or $wild) {
+        $byPath = Get-QpTasksByPath
+        $keys = if ($wild) { @($byPath.Keys | Where-Object { $_ -like $Path }) } else { @($Path) }
+        return @(foreach ($k in $keys) { foreach ($t in @($byPath[$k])) { if ($t -and $t.TaskName -like $Name) { $t } } })
+    }
+    try {
+        $folder = (Get-QpTaskService).GetFolder($(if ($Path -eq '\') { '\' } else { $Path.TrimEnd('\') }))
+        return @(foreach ($t in @($folder.GetTasks(1))) {
+            if ([string]$t.Name -like $Name) { [pscustomobject]@{ TaskPath = $Path; TaskName = [string]$t.Name; State = $script:TaskStates[[int]$t.State] } }
+        })
+    } catch {
+        $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }
+        if ($ex.HResult -in -2147024894, -2147024893) { return @() }   # no such folder on this PC
+        return @(Get-ScheduledTask -TaskPath $Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like $Name } |
+            ForEach-Object { [pscustomobject]@{ TaskPath = $_.TaskPath; TaskName = $_.TaskName; State = [string]$_.State } })
+    }
 }
 
 function Get-QpAppxPackages {
@@ -220,14 +279,51 @@ function Move-QpToRecycleBin {
     }
 }
 
+$script:RegHives = @{
+    'HKLM' = 'LocalMachine'; 'HKEY_LOCAL_MACHINE' = 'LocalMachine'; 'HKCU' = 'CurrentUser'; 'HKEY_CURRENT_USER' = 'CurrentUser'
+    'HKU' = 'Users'; 'HKEY_USERS' = 'Users'; 'HKCR' = 'ClassesRoot'; 'HKEY_CLASSES_ROOT' = 'ClassesRoot'
+}
+$script:RegMissing = New-Object object   # stands in for "no such value", which a real value can never be
+
 function Get-QpRegValue {
+    <#
+        One registry value: whether it exists, its value exactly as stored (%TEMP% stays %TEMP%), and its
+        type, so Undo can put back precisely what was there. Read through .NET, which is many times
+        quicker than Get-ItemProperty over a hundred settings; anything that isn't a plain registry path
+        still goes through Get-ItemProperty.
+    #>
     param([string]$Path, [string]$Name)
+    if ($Path -match '^(?:Microsoft\.PowerShell\.Core\\)?(?:Registry::)?(HKLM|HKCU|HKU|HKCR|HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_USERS|HKEY_CLASSES_ROOT):?\\?(.*)$') {
+        $hive = $script:RegHives[$matches[1].ToUpperInvariant()]
+        $sub = $matches[2].TrimEnd('\')
+        $key = $null
+        try {
+            $key = ([Microsoft.Win32.Registry]::$hive).OpenSubKey($sub, $false)
+            if (-not $key) { return @{ Exists = $false; Value = $null; Kind = $null } }
+            $valueName = if ($Name -eq '(default)') { '' } else { $Name }
+            $v = $key.GetValue($valueName, $script:RegMissing, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ([object]::ReferenceEquals($v, $script:RegMissing)) { return @{ Exists = $false; Value = $null; Kind = $null } }
+            return @{ Exists = $true; Value = $v; Kind = [string]$key.GetValueKind($valueName) }
+        } catch {
+            return @{ Exists = $false; Value = $null; Kind = $null }
+        } finally { if ($key) { $key.Close() } }
+    }
     try {
         $p = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
-        return @{ Exists = $true; Value = $p.$Name }
+        return @{ Exists = $true; Value = $p.$Name; Kind = $null }
     } catch {
-        return @{ Exists = $false; Value = $null }
+        return @{ Exists = $false; Value = $null; Kind = $null }
     }
+}
+
+function Get-QpStamp {
+    <#
+        The date and time as a name for a folder or a log, always on the ordinary (Gregorian) calendar.
+        Get-Date -Format follows the PC's own calendar, which on some Windows languages would date a
+        restore point in another century.
+    #>
+    param([string]$Format = 'yyyyMMdd-HHmmss', [datetime]$When = (Get-Date))
+    return $When.ToString($Format, [Globalization.CultureInfo]::InvariantCulture)
 }
 
 #endregion
@@ -275,7 +371,7 @@ function Add-QpTotals {
             SpaceFreedBytes  = $t.SpaceFreedBytes + [Math]::Max(0, $SpaceBytes)
             MemoryFreedBytes = $t.MemoryFreedBytes + [Math]::Max(0, $MemoryBytes)
             Runs             = $t.Runs + [int]([bool]$CountRun)
-            LastRun          = (Get-Date).ToString('yyyy-MM-dd HH:mm')
+            LastRun          = Get-QpStamp 'yyyy-MM-dd HH:mm'
         }
         if (-not (Test-Path $script:DataRoot)) { New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null }
         $new | ConvertTo-Json | Set-Content -Path (Join-Path $script:DataRoot 'totals.json') -Encoding UTF8
@@ -829,7 +925,7 @@ function Invoke-QpPutBack {
 
 function Start-QpSession {
     param([string]$Name)
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $stamp = Get-QpStamp
     $path = Join-Path $script:DataRoot "restore\$stamp-$Name"
     New-Item -ItemType Directory -Path $path -Force | Out-Null
     $script:Session = @{ Name = $Name; Path = $path; Started = (Get-Date).ToString('s'); Entries = New-Object System.Collections.ArrayList }
@@ -886,17 +982,23 @@ function Get-QpRestorePoints {
 }
 
 function Invoke-QpUndo {
+    <#
+        Puts back every change in one restore point, newest first. Returns how many changes came back and
+        how many didn't. The restore point is only marked as undone when every change came back, so
+        anything that failed can simply be tried again - putting a setting back twice does no harm.
+    #>
     param([Parameter(Mandatory)][string]$Path)
     $stateFile = Join-Path $Path 'state.json'
-    if (-not (Test-Path $stateFile)) { Write-QpLog "No state.json in $Path" 'ERROR'; return }
+    if (-not (Test-Path $stateFile)) { Write-QpLog "No state.json in $Path" 'ERROR'; return [pscustomobject]@{ Restored = 0; Failed = 1; Readable = $false } }
     try { $state = Get-Content $stateFile -Raw | ConvertFrom-Json }
     catch {
         Write-QpLog "That restore point cannot be read, so nothing was undone from it. Its own folder is still at $Path." 'ERROR'
-        return
+        return [pscustomobject]@{ Restored = 0; Failed = 1; Readable = $false }
     }
-    $entries = @($state.Entries)
+    $entries = @($state.Entries | Where-Object { $_ })
     [array]::Reverse($entries)
     Write-QpLog "Undoing $($entries.Count) change(s) from $(Split-Path $Path -Leaf)" 'STEP'
+    $failed = 0
     foreach ($e in $entries) {
         try {
             switch ($e.Type) {
@@ -904,7 +1006,8 @@ function Invoke-QpUndo {
                     try { Set-Service -Name $e.Name -StartupType $e.StartType -ErrorAction Stop }
                     catch {
                         $map = @{ Disabled = 'disabled'; Manual = 'demand'; Automatic = 'auto' }
-                        & sc.exe config $e.Name start= $map[[string]$e.StartType] | Out-Null
+                        $out = & sc.exe config $e.Name start= $map[[string]$e.StartType] 2>&1
+                        if ($LASTEXITCODE -ne 0) { throw "Windows refused ($(($out | Out-String).Trim()))" }
                     }
                     if ($e.WasRunning) { Start-Service -Name $e.Name -ErrorAction SilentlyContinue }
                     Write-QpLog "Service $($e.Name) restored to $($e.StartType)" 'OK'
@@ -954,11 +1057,17 @@ function Invoke-QpUndo {
                 default { Write-QpLog "Unknown undo entry type: $($e.Type)" 'WARN' }
             }
         } catch {
+            $failed++
             Write-QpLog "Could not undo $($e.Type) $($e.Name)$($e.Path): $($_.Exception.Message)" 'WARN'
         }
     }
-    Set-Content -Path (Join-Path $Path 'undone.txt') -Value (Get-Date).ToString('s')
-    Write-QpLog 'Undo finished. Restart the PC to make sure everything is back in effect.' 'OK'
+    if ($failed) {
+        Write-QpLog ("{0} of {1} change(s) could not be put back. The rest are back as they were. This restore point stays in the Undo list, so you can try again." -f $failed, $entries.Count) 'WARN'
+    } else {
+        Set-Content -Path (Join-Path $Path 'undone.txt') -Value (Get-Date).ToString('s')
+        Write-QpLog 'Undo finished. Restart the PC to make sure everything is back in effect.' 'OK'
+    }
+    [pscustomobject]@{ Restored = $entries.Count - $failed; Failed = $failed; Readable = $true }
 }
 
 #endregion
@@ -988,7 +1097,8 @@ function Invoke-QpServiceAction {
 
 function Invoke-QpTaskAction {
     param($Action, [switch]$Preview)
-    $tasks = @(Get-ScheduledTask -TaskPath $Action.Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like $Action.Name })
+    # Found the quick way; switched off with Disable-ScheduledTask, as always.
+    $tasks = @(Get-QpTasksMatching -Path $Action.Path -Name $Action.Name)
     if ($tasks.Count -eq 0) { Write-QpLog "Task $($Action.Path)$($Action.Name) is not on this PC - skipped" 'SKIP'; return }
     foreach ($t in $tasks) {
         $id = "$($t.TaskPath)$($t.TaskName)"
@@ -1015,7 +1125,9 @@ function Invoke-QpRegAction {
         Write-QpLog "Would set $label : $from -> $($Action.Value)" 'PREVIEW'
         return
     }
-    Add-QpUndo @{ Type = 'Reg'; Path = $Action.Path; Name = $Action.Name; Existed = $cur.Exists; OldValue = $cur.Value; Kind = $kind }
+    # Undo puts back the old value with its OLD type: text stays text, even where the new value is a number.
+    $oldKind = if ($cur.Exists -and $cur.Kind -in 'String', 'ExpandString', 'Binary', 'DWord', 'MultiString', 'QWord') { $cur.Kind } else { $kind }
+    Add-QpUndo @{ Type = 'Reg'; Path = $Action.Path; Name = $Action.Name; Existed = $cur.Exists; OldValue = $cur.Value; Kind = $oldKind }
     try {
         if (-not (Test-Path -Path $Action.Path)) { New-Item -Path $Action.Path -Force | Out-Null }
         Set-ItemProperty -Path $Action.Path -Name $Action.Name -Value $Action.Value -Type $kind -ErrorAction Stop
@@ -1084,11 +1196,7 @@ function Test-QpActionApplied {
             return ([string]$svc.StartType -eq [string]$Action.StartType)
         }
         'Task' {
-            $tasks = if ($script:StateCache) {
-                @((Get-QpTasksByPath)[$Action.Path] | Where-Object { $_ -and $_.TaskName -like $Action.Name })
-            } else {
-                @(Get-ScheduledTask -TaskPath $Action.Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like $Action.Name })
-            }
+            $tasks = @(Get-QpTasksMatching -Path $Action.Path -Name $Action.Name)
             if ($tasks.Count -eq 0) { return $null }
             return (@($tasks | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0)
         }
@@ -2152,8 +2260,33 @@ function Remove-QpShortcuts {
 }
 
 function Get-QpSignInTask {
+    <#
+        Quietpane's sign-in task, or nothing. Asked of Task Scheduler directly: the window checks this as
+        it opens, and Get-ScheduledTask would hold it up for a second each time.
+    #>
     param([string]$Name = $script:SignInTaskName)
-    try { return (Get-ScheduledTask -TaskPath '\' -TaskName $Name -ErrorAction Stop) } catch { return $null }
+    try { $t = (Get-QpTaskService).GetFolder('\').GetTask($Name) }
+    catch {
+        # Not there (0x80070002, "file not found") - or Task Scheduler can't be asked directly, in which
+        # case ask the slower way. The code, not the message: messages are translated.
+        $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }
+        if ($ex.HResult -eq -2147024894) { return $null }
+        try {
+            $s = Get-ScheduledTask -TaskPath '\' -TaskName $Name -ErrorAction Stop
+            return [pscustomobject]@{
+                TaskPath = $s.TaskPath; TaskName = $s.TaskName; State = [string]$s.State
+                Actions = @(foreach ($a in @($s.Actions)) { [pscustomobject]@{ Execute = [string]$a.Execute; Arguments = [string]$a.Arguments } })
+                Principal = [pscustomobject]@{ RunLevel = [string]$s.Principal.RunLevel }
+            }
+        } catch { return $null }
+    }
+    $def = $t.Definition
+    [pscustomobject]@{
+        TaskPath = '\'; TaskName = [string]$t.Name; State = $script:TaskStates[[int]$t.State]
+        # Type 0 is "start a program", the only kind Quietpane makes.
+        Actions = @(foreach ($a in @($def.Actions)) { if ([int]$a.Type -eq 0) { [pscustomobject]@{ Execute = [string]$a.Path; Arguments = [string]$a.Arguments } } })
+        Principal = [pscustomobject]@{ RunLevel = $(if ([int]$def.Principal.RunLevel -eq 1) { 'Highest' } else { 'Limited' }) }
+    }
 }
 
 function Test-QpSignInStart {
@@ -2564,22 +2697,38 @@ function Test-QpVendorPresent {
 function Get-QpInstalledPrograms {
     # Ordinary installed programs (not Store apps), from the places Windows lists them.
     if ($script:InstalledPrograms) { return $script:InstalledPrograms }
-    $keys = @(
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
-        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    # Read straight from the registry: a few hundred keys through Get-ItemProperty is the slow part otherwise.
+    # (commas, not new lines: arrays on separate lines would run together into one list)
+    $sources = @(
+        @([Microsoft.Win32.Registry]::LocalMachine, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'),
+        @([Microsoft.Win32.Registry]::LocalMachine, 'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'),
+        @([Microsoft.Win32.Registry]::CurrentUser, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
     )
     $script:InstalledPrograms = @(
-        foreach ($k in $keys) {
-            Get-ItemProperty -Path $k -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and -not $_.SystemComponent } | ForEach-Object {
-                [pscustomobject]@{
-                    Name      = [string]$_.DisplayName
-                    Publisher = [string]$_.Publisher
-                    Uninstall = [string]$(if ($_.QuietUninstallString) { $_.QuietUninstallString } else { $_.UninstallString })
-                    Quiet     = [bool]$_.QuietUninstallString
-                    Key       = $_.PSChildName
+        foreach ($s in $sources) {
+            $root = $null
+            try {
+                $root = $s[0].OpenSubKey($s[1], $false)
+                if (-not $root) { continue }
+                foreach ($name in $root.GetSubKeyNames()) {
+                    $k = $null
+                    try {
+                        $k = $root.OpenSubKey($name, $false)
+                        if (-not $k) { continue }
+                        $display = [string]$k.GetValue('DisplayName')
+                        $system = $k.GetValue('SystemComponent')   # parts of Windows or of another program: not listed
+                        if (-not $display -or ($system -and "$system" -ne '0')) { continue }
+                        $quiet = [string]$k.GetValue('QuietUninstallString')
+                        [pscustomobject]@{
+                            Name      = $display
+                            Publisher = [string]$k.GetValue('Publisher')
+                            Uninstall = $(if ($quiet) { $quiet } else { [string]$k.GetValue('UninstallString') })
+                            Quiet     = [bool]$quiet
+                            Key       = $name
+                        }
+                    } catch { } finally { if ($k) { $k.Close() } }
                 }
-            }
+            } catch { } finally { if ($root) { $root.Close() } }
         }
     )
     return $script:InstalledPrograms
@@ -2649,6 +2798,24 @@ function Invoke-QpVendor {
     }
 }
 
+function Split-QpUninstallCommand {
+    <#
+        A program's uninstall command, split into the program and what it is given. For Windows
+        Installer packages, "install" (/I{product}) becomes "remove" (/X{product}), and it runs with a
+        progress bar and no surprise restart. Nothing else in the command is touched.
+    #>
+    param([string]$Command)
+    $cmd = $Command.Trim()
+    if ($cmd -match '^"([^"]+)"\s*(.*)$') { $exe = $matches[1]; $argText = $matches[2] }
+    elseif ($cmd -match '^(\S+\.exe)\s*(.*)$') { $exe = $matches[1]; $argText = $matches[2] }
+    else { $exe = $cmd; $argText = '' }
+    if ($exe -match '(?i)(^|\\)msiexec(\.exe)?$') {
+        $argText = $argText -replace '(?i)/I(\s*\{)', '/X$1'
+        if ($argText -notmatch '(?i)/qn|/quiet|/passive') { $argText = ($argText + ' /passive /norestart').Trim() }
+    }
+    [pscustomobject]@{ Program = $exe; Arguments = $argText.Trim() }
+}
+
 function Invoke-QpVendorUninstall {
     <#
         Runs the program's own uninstaller. The window always asks first, one program at a time.
@@ -2661,12 +2828,8 @@ function Invoke-QpVendorUninstall {
     foreach ($t in $targets) {
         Write-QpLog "Removing $($t.Name) using its own uninstaller (this cannot be undone)" 'STEP'
         try {
-            $cmd = $t.Uninstall.Trim()
-            if ($cmd -match '^"([^"]+)"\s*(.*)$') { $exe = $matches[1]; $args = $matches[2] }
-            elseif ($cmd -match '^(\S+\.exe)\s*(.*)$') { $exe = $matches[1]; $args = $matches[2] }
-            else { $exe = $cmd; $args = '' }
-            if ($exe -match '(?i)msiexec') { $args = ($args -replace '(?i)/I', '/X'); if ($args -notmatch '(?i)/qn|/quiet|/passive') { $args += ' /passive /norestart' } }
-            $p = if ($args) { Start-Process -FilePath $exe -ArgumentList $args -PassThru -Wait -ErrorAction Stop } else { Start-Process -FilePath $exe -PassThru -Wait -ErrorAction Stop }
+            $run = Split-QpUninstallCommand $t.Uninstall
+            $p = if ($run.Arguments) { Start-Process -FilePath $run.Program -ArgumentList $run.Arguments -PassThru -Wait -ErrorAction Stop } else { Start-Process -FilePath $run.Program -PassThru -Wait -ErrorAction Stop }
             Write-QpLog "$($t.Name): uninstaller finished (exit code $($p.ExitCode))" 'OK'
         } catch {
             Write-QpLog "$($t.Name) could not be removed automatically: $($_.Exception.Message). You can remove it from Settings > Apps." 'WARN'
@@ -3094,7 +3257,7 @@ function Invoke-QpQuarantine {
     } catch {
         return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'The quarantine folder is locked to administrators, and Quietpane is not running as one. Start it with "Start Quietpane", which asks Windows for permission.' }
     }
-    $id = '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $Finding.Id
+    $id = '{0}-{1}' -f (Get-QpStamp), $Finding.Id
     $dir = Join-Path $root $id
     try {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -3164,8 +3327,9 @@ function Restore-QpQuarantineItem {
         $meta = Get-Content (Join-Path $item.Folder 'meta.json') -Raw | ConvertFrom-Json
         try {
             $f = Get-Item -LiteralPath $dest -Force
-            $f.CreationTime = [datetime]::Parse($meta.CreationTime)
-            $f.LastWriteTime = [datetime]::Parse($meta.LastWriteTime)
+            # Saved in the round-trip format; read back the same way whatever the PC's language and calendar.
+            $f.CreationTime = [datetime]::Parse($meta.CreationTime, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+            $f.LastWriteTime = [datetime]::Parse($meta.LastWriteTime, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
         } catch { }
         Remove-Item -LiteralPath $item.Folder -Recurse -Force -ErrorAction SilentlyContinue
         Write-QpLog "Restored $($item.FileName) to $dest" 'OK'
@@ -3362,7 +3526,7 @@ function Invoke-QpAudit {
         Read-only health, privacy and malware check. Writes an HTML report and returns a summary.
         Nothing on the PC is changed.
     #>
-    param([string]$OutFile = (Join-Path ([Environment]::GetFolderPath('Desktop')) ("Quietpane-Report-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmm'))))
+    param([string]$OutFile = (Join-Path ([Environment]::GetFolderPath('Desktop')) ("Quietpane-Report-{0}.html" -f (Get-QpStamp 'yyyyMMdd-HHmm'))))
 
     $findings = New-Object System.Collections.ArrayList
     $isAdmin = Test-QpAdmin
@@ -3512,7 +3676,7 @@ function Invoke-QpAudit {
             $taskFile = Join-Path $env:WINDIR ("System32\Tasks\" + $t.TaskPath.TrimStart('\') + $t.TaskName)
             if (Test-Path $taskFile) {
                 $created = (Get-Item $taskFile -Force).CreationTime
-                $detail += "`nTask created: $($created.ToString('yyyy-MM-dd HH:mm:ss'))"
+                $detail += "`nTask created: $(Get-QpStamp 'yyyy-MM-dd HH:mm:ss' $created)"
                 $near = Get-NearbyFolders $created
                 if ($near.Count) { $detail += "`nFolders created within 3 minutes of this task (likely source):`n  " + ($near -join "`n  ") }
             } elseif (-not $isAdmin) { $detail += "`n(Run as administrator to see when it was created and what was installed at the same time.)" }
@@ -3708,7 +3872,7 @@ function Invoke-QpAudit {
         if (-not $mp.RealTimeProtectionEnabled) { Add-Finding 'Security' 'High' 'Defender real-time protection is OFF' 'Turn it back on in Windows Security unless another antivirus is installed.' }
         $age = ((Get-Date) - $mp.AntivirusSignatureLastUpdated).Days
         if ($age -gt 7) { Add-Finding 'Security' 'Medium' "Defender virus definitions are $age days old" 'Run Windows Update or open Windows Security > Protection updates.' }
-        $lastFull = if ($mp.FullScanEndTime) { $mp.FullScanEndTime.ToString('yyyy-MM-dd') } else { 'never' }
+        $lastFull = if ($mp.FullScanEndTime) { Get-QpStamp 'yyyy-MM-dd' $mp.FullScanEndTime } else { 'never' }
         Add-Finding 'Security' 'Info' 'Microsoft Defender status' ("Real-time protection: {0}`nDefinitions updated: {1:yyyy-MM-dd}`nLast full scan: {2}" -f $mp.RealTimeProtectionEnabled, $mp.AntivirusSignatureLastUpdated, $lastFull)
     }
     if ($isAdmin) {
@@ -3799,7 +3963,7 @@ function Invoke-QpAudit {
         if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         Set-Content -Path $OutFile -Value $html -Encoding UTF8 -ErrorAction Stop
     } catch {
-        $OutFile = Join-Path $env:TEMP ("Quietpane-Report-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmm'))
+        $OutFile = Join-Path $env:TEMP ("Quietpane-Report-{0}.html" -f (Get-QpStamp 'yyyyMMdd-HHmm'))
         Set-Content -Path $OutFile -Value $html -Encoding UTF8
         Write-QpLog "Could not save the report to the chosen location - saved to $OutFile instead" 'WARN'
     }
@@ -3897,7 +4061,7 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
     [void]$sb.Append(('<div><h1>Quietpane &ndash; scan report</h1><p class="by">Developed by <a href="{0}" rel="noopener noreferrer">KomodoWorks.com</a></p></div></div></header><main><div class="wrap">' -f $brandUrl))
     $adminNote = if (-not $IsAdmin) { ' &middot; run as administrator for the full scan' } else { '' }
     $lookedAt = if ($Scanned -gt 0) { ' &middot; {0:N0} things looked at' -f $Scanned } else { '' }
-    [void]$sb.Append(('<p class="meta">{0} &middot; version {1} &middot; read-only scan, nothing was changed{2}{3}</p>' -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $script:AppVersion, $lookedAt, $adminNote))
+    [void]$sb.Append(('<p class="meta">{0} &middot; version {1} &middot; read-only scan, nothing was changed{2}{3}</p>' -f (Get-QpStamp 'yyyy-MM-dd HH:mm'), $script:AppVersion, $lookedAt, $adminNote))
     # Severity doughnut plus a written legend: the chart never carries meaning through colour alone.
     $colours = @{ Critical = '#7b1d1d'; High = '#a83232'; Medium = '#9a6700'; Low = '#8a8578'; Info = '#117a68' }
     $meaning = @{ Critical = 'act now'; High = 'act on it'; Medium = 'worth a look'; Low = 'minor'; Info = 'just so you know' }
@@ -3950,7 +4114,8 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Install-QpCopy, Remove-QpCopy, Start-QpCopyRemoval, Get-QpAppVersion, Compare-QpVersion, Test-QpCopyMatches, Sync-QpInstall,
     Get-QpSignInTask, Test-QpSignInStart, Enable-QpSignInStart, Disable-QpSignInStart, Test-QpOwnSignInTask, New-QpSignInTask, Get-QpSignInAction,
     Get-QpConnections, Get-QpAddressLabel, Test-QpPrivateAddress,
-    Get-QpVendorStatus, Invoke-QpVendor, Invoke-QpVendorUninstall,
+    Get-QpVendorStatus, Invoke-QpVendor, Invoke-QpVendorUninstall, Split-QpUninstallCommand,
+    Get-QpRegValue, Get-QpTasksByPath, Get-QpTasksMatching, Get-QpStamp,
     Get-QpDefenderState, Get-QpDefenderFindings, Invoke-QpThreatScan, Invoke-QpRemediate, Get-QpAllowList, Resolve-QpThreatInfo, New-QpFinding,
     New-QpDonutSvg, New-QpReportHtml, Get-QpFileHash,
     Invoke-QpQuarantine, Get-QpQuarantineItems, Restore-QpQuarantineItem, Remove-QpQuarantineItem, Test-QpProtectedPath, Test-QpFindingStillTrue,
