@@ -47,6 +47,30 @@ Just want a check-up that changes nothing? Double-click **Safety scan only** ins
 - **Works for everyone.** Everything can be done with a keyboard alone, with a clear outline showing where you are; every control has a name screen readers such as Narrator can say, and the status line is read out as it changes. All text meets the WCAG AA contrast standard, and the automated tests fail if a control ever loses its name or a colour gets too faint to read.
 - **Hides nothing.** Plain-text PowerShell you can read, plus three short C# blocks (the graphics driver's temperature, adding up folder sizes, and making the Start-menu shortcut) and two lines that give the app its own taskbar icon and a sharp window. No installer and no `.exe`: it runs from the folder you unzip, and only copies itself to Program Files if you ask for shortcuts or to start it when you sign in.
 
+## A look around
+
+<table>
+  <tr>
+    <td width="33%" align="center">
+      <a href="docs/screenshot-health.png"><img src="docs/screenshot-health.png" alt="The Health tab: processor, graphics, memory and video memory, each with its load and temperature, plus battery and drive cards"></a><br>
+      <b>Health</b><br>
+      How hard it is working and how warm it is, live while you watch.
+    </td>
+    <td width="33%" align="center">
+      <a href="docs/screenshot-privacy.png"><img src="docs/screenshot-privacy.png" alt="The Privacy tab: browser add-ons listed with what each one is allowed to read, then camera and microphone use, then the settings you can switch off"></a><br>
+      <b>Privacy</b><br>
+      Every browser add-on and what it may read, then 32 settings to switch off.
+    </td>
+    <td width="33%" align="center">
+      <a href="docs/screenshot-space.png"><img src="docs/screenshot-space.png" alt="The Free up space tab: Worth clearing first, with old installers, forgotten downloads and the Recycle Bin, each with its size"></a><br>
+      <b>Free up space</b><br>
+      The easy room first, then where the rest of your disk went.
+    </td>
+  </tr>
+</table>
+
+<sub>Real screens from a real PC. The figures under <b>Worth clearing first</b> are made-up examples, because the PC these were taken on had nothing old left to clear.</sub>
+
 ## What's inside
 
 **Home.** Cards show what could be better, and **Quiet my PC now** applies the recommended items that aren't done yet, all in one restore point, so **Undo everything** really does undo everything. It never uninstalls a program on its own. If a Windows update switches things back on, Home says what came back and offers to switch exactly those off again - and if you like, Quietpane can check for that as you sign in and put a small badge on its taskbar icon, so you don't have to remember to look. Only things that are really on again count: a setting your PC no longer has, or a brand app you uninstalled, is never reported as "back".
