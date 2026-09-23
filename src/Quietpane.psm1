@@ -19,7 +19,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.13.0'
+$script:AppVersion  = '1.14.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -115,7 +115,7 @@ function Test-QpAdmin {
 $script:CatalogCache = @{}
 function Get-QpCatalog {
     <# A catalog file, parsed once and remembered. It is read again only if the file itself changes. #>
-    param([ValidateSet('privacy', 'apps', 'cleanup', 'vendors', 'threats', 'startup', 'network')][string]$Name)
+    param([ValidateSet('privacy', 'apps', 'cleanup', 'vendors', 'threats', 'startup', 'network', 'extensions')][string]$Name)
     $path = Join-Path $script:CatalogRoot "$Name.psd1"
     $stamp = (Get-Item -LiteralPath $path).LastWriteTimeUtc.Ticks
     $hit = $script:CatalogCache[$Name]
@@ -1039,6 +1039,16 @@ function Invoke-QpUndo {
                     }
                     Write-QpLog "$(if ($e.Label) { $e.Label } else { $e.Name }) will start when you sign in again" 'OK'
                 }
+                'ExtBlock' {
+                    # Take the policy line away again, and the list itself if Quietpane made it.
+                    Remove-ItemProperty -Path $e.Path -Name $e.Name -ErrorAction SilentlyContinue
+                    if ($e.KeyCreated) {
+                        $left = $null
+                        try { $left = Get-Item -Path $e.Path -ErrorAction Stop } catch { }
+                        if ($left -and $left.ValueCount -eq 0 -and $left.SubKeyCount -eq 0) { Remove-Item -Path $e.Path -Force -ErrorAction SilentlyContinue }
+                    }
+                    Write-QpLog "$($e.Browser) can load $($e.Label) again the next time you open it" 'OK'
+                }
                 'Env' {
                     [Environment]::SetEnvironmentVariable($e.Name, $e.OldValue, 'Machine')
                     Write-QpLog "Environment variable $($e.Name) restored" 'OK'
@@ -1842,6 +1852,395 @@ function Invoke-QpDeviceAccess {
         }
     }
     if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-QpSession }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- browser add-ons
+
+<#
+    Add-ons are where most adware lives now, and the browser never says plainly what each one is allowed
+    to read. Quietpane reads three of the browser's own files: the folder the add-on was unpacked into,
+    its manifest.json (which lists what it may do) and the browser's settings file (which says whether it
+    is on and where it came from). Nothing is looked up online, and none of those files is written to.
+
+    Switching one off is done the way a workplace does it: a policy under this user's own settings that
+    tells the browser not to load that add-on. Editing the browser's own settings file would be tampering
+    - the browser signs that file and puts back what it expects - so Quietpane leaves it alone. The
+    browser then says an administrator blocked the add-on; on this PC that administrator is you, and Undo
+    takes the policy away again.
+#>
+
+# Where each browser keeps its profiles, and where it reads its policies from. The three with a policy
+# are the ones that could be checked: Microsoft documents Edge's and Chrome's, and Brave's own program
+# file names its key. Vivaldi and Opera are listed so their add-ons can be seen, with no switch, because
+# their policy keys could not be verified here - better to say so than to write a setting into the
+# registry and hope.
+$script:BrowserFamily = @(
+    @{ Key = 'edge';    Name = 'Edge';     Data = 'Microsoft\Edge\User Data';              Roaming = $false; Policy = 'SOFTWARE\Policies\Microsoft\Edge' },
+    @{ Key = 'chrome';  Name = 'Chrome';   Data = 'Google\Chrome\User Data';               Roaming = $false; Policy = 'SOFTWARE\Policies\Google\Chrome' },
+    @{ Key = 'brave';   Name = 'Brave';    Data = 'BraveSoftware\Brave-Browser\User Data'; Roaming = $false; Policy = 'SOFTWARE\Policies\BraveSoftware\Brave' },
+    @{ Key = 'vivaldi'; Name = 'Vivaldi';  Data = 'Vivaldi\User Data';                     Roaming = $false; Policy = '' },
+    @{ Key = 'opera';   Name = 'Opera';    Data = 'Opera Software\Opera Stable';           Roaming = $true;  Policy = '' },
+    @{ Key = 'operagx'; Name = 'Opera GX'; Data = 'Opera Software\Opera GX Stable';        Roaming = $true;  Policy = '' }
+)
+
+# How the browser records where an add-on came from (Chromium calls it the install location).
+$script:ExtensionSource = @{
+    1  = 'You added it yourself'
+    2  = 'Another program on this PC put it there'
+    3  = 'Another program on this PC put it there'
+    4  = 'Loaded from a folder, in developer mode'
+    5  = 'Part of the browser itself'
+    6  = 'It came with the browser'
+    7  = 'Set by a policy on this PC'
+    8  = 'Started from the command line'
+    9  = 'Set by a policy on this PC'
+    10 = 'Part of the browser itself'
+}
+
+function ConvertFrom-QpChromeTime {
+    <# Chromium counts microseconds since 1601, where Windows counts ten-millionths of a second. #>
+    param($Value)
+    try {
+        $v = [int64]$Value
+        if ($v -le 0) { return $null }
+        return [datetime]::FromFileTimeUtc($v * 10).ToLocalTime()
+    } catch { return $null }
+}
+
+function Get-QpExtensionReach {
+    <#
+        What an add-on may do, in plain words: how far it reaches into the sites you visit, and anything
+        else worth knowing. A permission Quietpane has no plain words for is counted but never guessed at.
+    #>
+    param([string[]]$Permissions)
+    $cat = Get-QpCatalog extensions
+    $quiet = @{}
+    foreach ($q in @($cat.Quiet)) { $quiet[[string]$q] = $true }
+    $known = @{}
+    foreach ($p in @($cat.Permissions)) { $known[[string]$p.Name] = $p }
+    $everywhere = @{}
+    foreach ($e in @($cat.Everywhere)) { $everywhere[[string]$e] = $true }
+
+    $all = $false
+    $sites = New-Object System.Collections.ArrayList
+    $can = New-Object System.Collections.ArrayList
+    $other = 0
+    foreach ($name in @($Permissions | Where-Object { $_ -is [string] -and $_ } | Select-Object -Unique)) {
+        if ($everywhere.ContainsKey($name)) { $all = $true; continue }
+        if ($name -match '://|^\*|/' ) {
+            # A site pattern, like https://*.example.com/*. The browser's own pages (edge://settings and
+            # the like) are not sites you visit, so they are left out rather than listed as one.
+            if ($name -match '^(https?|wss?|ftp|\*)://([^/]+)') {
+                $where = $matches[2] -replace '^\*\.', '' -replace ':\d+$', ''
+                if ($where -eq '*' -or -not $where) { $all = $true; continue }
+                if ($sites -notcontains $where) { [void]$sites.Add($where) }
+            }
+            continue
+        }
+        if ($quiet.ContainsKey($name) -or $name -match 'Private$') { continue }
+        $hit = $known[$name]
+        if ($hit) {
+            if ($can -notcontains $hit.Plain) { [void]$can.Add([string]$hit.Plain) }
+        } else { $other++ }
+    }
+    # Worst first, and inside a level in the order the catalog is written.
+    $order = @{ 'Everything' = 0; 'Watching' = 1; 'Ordinary' = 2 }
+    $rank = @{}
+    $i = 0
+    foreach ($p in @($cat.Permissions)) { $rank[[string]$p.Plain] = ($order[[string]$p.Level] * 100) + $i; $i++ }
+    $ranked = @($can | Sort-Object { $rank[[string]$_] })
+    $level = if ($all) { 'Everything' } elseif ($ranked.Count -and $rank[[string]$ranked[0]] -lt 100) { 'Everything' } elseif ($ranked.Count -and $rank[[string]$ranked[0]] -lt 200) { 'Watching' } elseif ($sites.Count) { 'Watching' } else { 'Ordinary' }
+    [pscustomobject]@{
+        Everywhere = $all
+        Sites      = @($sites | Sort-Object)
+        Can        = $ranked
+        Unnamed    = $other
+        Level      = $level
+    }
+}
+
+function Format-QpExtensionUse {
+    <# One line about an add-on: how far it reaches, whether it is on, and when it arrived. #>
+    param($Extension)
+    if (-not $Extension) { return '' }
+    $r = $Extension.Reach
+    $bits = @()
+    if ($r.Everywhere) { $bits += 'Reads and changes everything on every site you visit' }
+    elseif (@($r.Sites).Count -eq 0) { $bits += 'Cannot read the pages you visit' }
+    elseif (@($r.Sites).Count -le 2) { $bits += 'Only works on ' + (@($r.Sites) -join ' and ') }
+    else { $bits += 'Only works on {0} sites, {1} among them' -f @($r.Sites).Count, ((@($r.Sites) | Select-Object -First 2) -join ' and ') }
+    if (@($r.Can).Count) { $bits[0] = $bits[0] + '. It ' + $r.Can[0] }
+    $line = $bits[0] + '.'
+    if ($Extension.Blocked) { $line += ' Switched off by a policy on this PC.' }
+    elseif (-not $Extension.On) { $line += ' Switched off in the browser at the moment.' }
+    if ($Extension.Added) { $line += ' Added ' + (Format-QpWhen $Extension.Added) + '.' }
+    return $line
+}
+
+function Get-QpExtensionBlocks {
+    <# The add-ons a policy on this PC already tells a browser not to load, and where that policy is. #>
+    param([string]$Policy)
+    $out = @{}
+    if (-not $Policy) { return $out }
+    foreach ($hive in 'HKCU', 'HKLM') {
+        foreach ($listName in 'ExtensionInstallBlocklist', 'ExtensionInstallBlacklist') {
+            $key = '{0}:\{1}\{2}' -f $hive, $Policy, $listName
+            $k = $null
+            try { $k = Get-Item -Path $key -ErrorAction Stop } catch { continue }
+            foreach ($name in @($k.GetValueNames())) {
+                $id = [string]$k.GetValue($name)
+                if (-not $id) { continue }
+                $id = $id.ToLowerInvariant()
+                if (-not $out.ContainsKey($id)) { $out[$id] = [pscustomobject]@{ Key = $key; Name = $name; Mine = ($hive -eq 'HKCU') } }
+            }
+        }
+    }
+    return $out
+}
+
+function Get-QpExtensionSlot {
+    <# The blocklist is numbered 1, 2, 3...; this finds the first number nobody is using. #>
+    param([string]$Key)
+    $used = @{}
+    try {
+        $k = Get-Item -Path $Key -ErrorAction Stop
+        foreach ($n in @($k.GetValueNames())) { $used[$n] = $true }
+    } catch { }
+    for ($i = 1; $i -lt 10000; $i++) { if (-not $used.ContainsKey("$i")) { return "$i" } }
+    return '1'
+}
+
+function Resolve-QpExtensionName {
+    <# An add-on written for several languages keeps its name in a message file; this reads it. #>
+    param([string]$Name, [string]$Folder)
+    if (-not $Name) { return '' }
+    if ($Name -notlike '__MSG_*') { return $Name }
+    $key = $Name.Trim('_')
+    if ($key -like 'MSG_*') { $key = $key.Substring(4) }
+    foreach ($loc in 'en', 'en_US', 'en_GB') {
+        $mf = Join-Path $Folder "_locales\$loc\messages.json"
+        if (-not (Test-Path -LiteralPath $mf)) { continue }
+        try {
+            $msgs = Get-Content -LiteralPath $mf -Raw | ConvertFrom-Json
+            $hit = $msgs.PSObject.Properties | Where-Object { $_.Name -ieq $key } | Select-Object -First 1
+            if ($hit) { return [string]$hit.Value.message }
+        } catch { }
+    }
+    return $Name
+}
+
+function Get-QpChromiumExtensions {
+    <#
+        The add-ons in one Chromium profile (Edge, Chrome, Brave, Vivaldi, Opera), read from the browser's
+        own settings file and each add-on's manifest. Read-only.
+    #>
+    param([string]$ProfilePath, [hashtable]$Family, [hashtable]$Blocks = @{}, [string]$ProfileLabel = '')
+    $extRoot = Join-Path $ProfilePath 'Extensions'
+    $folders = @{}
+    foreach ($d in @(Get-ChildItem -LiteralPath $extRoot -Directory -ErrorAction SilentlyContinue)) { $folders[$d.Name] = $d }
+    $settings = @{}
+    foreach ($file in 'Secure Preferences', 'Preferences') {
+        # These files run to tens of thousands of lines. The second one is only opened when the first
+        # did not account for every add-on on disk, which saves a second on every read.
+        $missing = @($folders.Keys | Where-Object { -not $settings.ContainsKey($_) }).Count
+        if ($file -eq 'Preferences' -and $settings.Count -and -not $missing) { break }
+        $p = Join-Path $ProfilePath $file
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        try {
+            $js = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
+            if ($js.extensions.settings) {
+                foreach ($s in $js.extensions.settings.PSObject.Properties) { if (-not $settings.ContainsKey($s.Name)) { $settings[$s.Name] = $s.Value } }
+            }
+        } catch { }
+    }
+    $ids = @(@($settings.Keys) + @($folders.Keys) | Select-Object -Unique)
+    foreach ($id in $ids) {
+        $rec = $settings[$id]
+        $dir = $folders[$id]
+        # The newest version folder is the one the browser loads.
+        $versionDir = $null
+        if ($dir) { $versionDir = @(Get-ChildItem -LiteralPath $dir.FullName -Directory -ErrorAction SilentlyContinue | Sort-Object Name) | Select-Object -Last 1 }
+        $manifest = $null
+        if ($versionDir) {
+            $mf = Join-Path $versionDir.FullName 'manifest.json'
+            if (Test-Path -LiteralPath $mf) { try { $manifest = Get-Content -LiteralPath $mf -Raw | ConvertFrom-Json } catch { } }
+        }
+        if (-not $manifest -and $rec) { $manifest = $rec.manifest }
+        # An id with no manifest anywhere is a note the browser keeps about something that is not installed.
+        if (-not $manifest) { continue }
+        $folder = if ($versionDir) { $versionDir.FullName } else { '' }
+        $name = Resolve-QpExtensionName -Name ([string]$manifest.name) -Folder $folder
+        if (-not $name) { $name = $id }
+        $location = 0
+        if ($rec -and $null -ne $rec.location) { try { $location = [int]$rec.location } catch { } }
+        $builtIn = $location -in 5, 10
+        $byPolicy = $location -in 7, 9
+        # Chromium writes "off" either as a state of 0 or as a reason for switching it off - newer
+        # versions keep those reasons as a list. When it records neither, which is how the parts of the
+        # browser itself are written, the add-on is loaded.
+        $on = $true
+        if ($rec) {
+            if ($null -ne $rec.state) { try { $on = ([int]$rec.state -eq 1) } catch { } }
+            elseif ($null -ne $rec.disable_reasons) {
+                $why = @(@($rec.disable_reasons) | Where-Object { $_ -and "$_" -ne '0' })
+                if ($why.Count) { $on = $false }
+            }
+        }
+        $perms = @()
+        foreach ($set in $manifest.permissions, $manifest.host_permissions) { $perms += @($set | Where-Object { $_ -is [string] }) }
+        foreach ($cs in @($manifest.content_scripts)) { $perms += @($cs.matches | Where-Object { $_ -is [string] }) }
+        if ($rec -and $rec.active_permissions) {
+            foreach ($set in $rec.active_permissions.api, $rec.active_permissions.explicit_host, $rec.active_permissions.scriptable_host) {
+                $perms += @($set | Where-Object { $_ -is [string] })
+            }
+        }
+        $added = $null
+        if ($rec) { $added = ConvertFrom-QpChromeTime $rec.first_install_time }
+        if (-not $added -and $versionDir) { try { $added = $versionDir.CreationTime } catch { } }
+        $block = $Blocks[$id.ToLowerInvariant()]
+        [pscustomobject]@{
+            Id          = '{0}|{1}|{2}' -f $Family.Key, (Split-Path $ProfilePath -Leaf), $id
+            ExtId       = $id
+            Browser     = [string]$Family.Name
+            BrowserKey  = [string]$Family.Key
+            Profile     = $ProfileLabel
+            Name        = $name
+            Version     = [string]$manifest.version
+            On          = ($on -and -not $block)
+            BuiltIn     = $builtIn
+            Locked      = $byPolicy
+            Blocked     = [bool]$block
+            BlockedByMe = [bool]($block -and $block.Mine)
+            Source      = $(if ($script:ExtensionSource.ContainsKey($location)) { $script:ExtensionSource[$location] } else { 'Where it came from is not recorded' })
+            Reach       = (Get-QpExtensionReach -Permissions $perms)
+            Added       = $added
+            Folder      = $folder
+            PolicyRoot  = $(if ($Family.Policy) { 'HKCU:\' + $Family.Policy } else { '' })
+        }
+    }
+}
+
+function Get-QpFirefoxAddons {
+    <#
+        Firefox keeps its add-ons in a list of its own. Quietpane reads it so they are on the list too;
+        it cannot switch a Firefox add-on off, and says so rather than pretending.
+    #>
+    param([string]$Root = (Join-Path $env:APPDATA 'Mozilla\Firefox\Profiles'))
+    if (-not (Test-Path -LiteralPath $Root)) { return }
+    foreach ($prof in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
+        $file = Join-Path $prof.FullName 'extensions.json'
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+        $js = $null
+        try { $js = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { continue }
+        foreach ($a in @($js.addons)) {
+            if ([string]$a.type -ne 'extension') { continue }
+            $loc = [string]$a.location
+            $builtIn = $loc -like 'app-*'
+            $perms = @()
+            if ($a.userPermissions) { $perms += @($a.userPermissions.permissions) + @($a.userPermissions.origins) }
+            $added = $null
+            try { if ($a.installDate) { $added = [datetime]::new(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc).AddMilliseconds([double]$a.installDate).ToLocalTime() } } catch { }
+            $name = [string]$a.defaultLocale.name
+            if (-not $name) { $name = [string]$a.id }
+            [pscustomobject]@{
+                Id          = 'firefox|{0}|{1}' -f $prof.Name, $a.id
+                ExtId       = [string]$a.id
+                Browser     = 'Firefox'
+                BrowserKey  = 'firefox'
+                Profile     = ''
+                Name        = $name
+                Version     = [string]$a.version
+                On          = [bool]$a.active
+                BuiltIn     = $builtIn
+                Locked      = $false
+                Blocked     = $false
+                BlockedByMe = $false
+                Source      = $(if ($builtIn) { 'Part of the browser itself' } elseif ($loc -like 'winreg*') { 'Another program on this PC put it there' } else { 'You added it yourself' })
+                Reach       = (Get-QpExtensionReach -Permissions $perms)
+                Added       = $added
+                Folder      = [string]$a.path
+                PolicyRoot  = ''
+            }
+        }
+    }
+}
+
+function Get-QpBrowserExtensions {
+    <#
+        Every add-on in every browser on this PC, with what it may do and where it came from. Read-only.
+        The roots can be pointed somewhere else for testing.
+    #>
+    param($Families = $script:BrowserFamily, [string]$LocalRoot = $env:LOCALAPPDATA, [string]$RoamingRoot = $env:APPDATA, [switch]$NoFirefox)
+    $out = New-Object System.Collections.ArrayList
+    foreach ($fam in @($Families)) {
+        $base = Join-Path $(if ($fam.Roaming) { $RoamingRoot } else { $LocalRoot }) $fam.Data
+        if (-not (Test-Path -LiteralPath $base)) { continue }
+        $blocks = Get-QpExtensionBlocks -Policy ([string]$fam.Policy)
+        # Most browsers keep one folder per profile; Opera's profile is the folder itself.
+        $profs = @(Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' })
+        if (-not $profs.Count -and (Test-Path -LiteralPath (Join-Path $base 'Preferences'))) { $profs = @(Get-Item -LiteralPath $base) }
+        $many = $profs.Count -gt 1
+        foreach ($p in $profs) {
+            $label = ''
+            if ($many) {
+                $label = $p.Name
+                try {
+                    $pj = Get-Content -LiteralPath (Join-Path $p.FullName 'Preferences') -Raw -ErrorAction Stop | ConvertFrom-Json
+                    if ($pj.profile.name) { $label = [string]$pj.profile.name }
+                } catch { }
+            }
+            foreach ($e in @(Get-QpChromiumExtensions -ProfilePath $p.FullName -Family $fam -Blocks $blocks -ProfileLabel $label)) { [void]$out.Add($e) }
+        }
+    }
+    if (-not $NoFirefox) { foreach ($e in @(Get-QpFirefoxAddons)) { [void]$out.Add($e) } }
+    # The ones that reach furthest first, then the ones still switched on, then by name.
+    $order = @{ 'Everything' = 0; 'Watching' = 1; 'Ordinary' = 2 }
+    @($out | Sort-Object @{ Expression = { $order[[string]$_.Reach.Level] } }, @{ Expression = { -not $_.On }; }, Name)
+}
+
+function Invoke-QpExtension {
+    <#
+        Tells the chosen browsers not to load the add-ons you ticked. It is a policy under your own
+        settings, the same one a workplace would use, so the browser says an administrator blocked it -
+        that administrator is you, and Undo takes the policy away again. The browser's own files are
+        never touched. Add-ons that are part of the browser, or that a policy already controls, are
+        refused with a reason.
+    #>
+    param([string[]]$Ids, [switch]$Preview, $Extensions)
+    $Ids = @($Ids | Where-Object { $_ })
+    if (-not $Ids.Count) { Write-QpLog 'Nothing selected.' 'WARN'; return }
+    $list = if ($null -ne $Extensions) { @($Extensions) } else { @(Get-QpBrowserExtensions) }
+    $own = $false
+    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' }
+    foreach ($id in $Ids) {
+        $e = @($list | Where-Object { $_.Id -eq $id }) | Select-Object -First 1
+        if (-not $e) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; continue }
+        if ($e.BuiltIn) { Write-QpLog "$($e.Name) is part of $($e.Browser) itself, so it stays." 'WARN'; continue }
+        if ($e.Locked) { Write-QpLog "$($e.Name) is set by a policy on this PC, so it stays as it is." 'WARN'; continue }
+        if (-not $e.PolicyRoot) { Write-QpLog "Quietpane cannot switch $($e.Browser) add-ons off. Remove $($e.Name) in $($e.Browser) itself, under its add-ons page." 'WARN'; continue }
+        if ($e.Blocked) { Write-QpLog "$($e.Browser) is already told not to load $($e.Name)" 'OK'; continue }
+        if ($Preview) { Write-QpLog "Would stop $($e.Browser) loading $($e.Name)" 'PREVIEW'; continue }
+        # The restore point is opened at the first real change, so refusals never leave an empty one in Undo.
+        if (-not $script:Session) { Start-QpSession 'browser-add-ons'; $own = $true }
+        try {
+            $key = Join-Path $e.PolicyRoot 'ExtensionInstallBlocklist'
+            $made = -not (Test-Path -Path $key)
+            if ($made) { New-Item -Path $key -Force | Out-Null }
+            $slot = Get-QpExtensionSlot -Key $key
+            Add-QpUndo @{ Type = 'ExtBlock'; Path = $key; Name = $slot; KeyCreated = $made; Label = $e.Name; Browser = $e.Browser }
+            Set-ItemProperty -Path $key -Name $slot -Value $e.ExtId -Type String -ErrorAction Stop
+            Write-QpLog "$($e.Browser) will not load $($e.Name) any more. It says an administrator blocked it, which is you; Undo puts it back and it works again." 'OK'
+        } catch {
+            Write-QpLog "Could not switch off $($e.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
+        }
+    }
+    if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' }
+    elseif ($own) {
+        Write-QpLog 'The browser picks this up on its own; close it and open it again if you want to see it straight away.' 'INFO'
+        Stop-QpSession
+    }
 }
 
 #endregion
@@ -3046,6 +3445,7 @@ function Get-QpState {
                 [pscustomobject]@{ Times = $times; Record = $record; Costs = @(Get-QpSignInCost -Items $startup -Record $record -Times $times) }
             } $null
             Devices  = Read-Part 'camera, microphone and location use' { @(Get-QpDeviceUse) } @()
+            Addons   = Read-Part 'your browser add-ons' { @(Get-QpBrowserExtensions) } @()
             Cleanup  = Read-Part 'what can be cleaned up' { @(Get-QpCleanupTargets) } @()
             Restore  = Read-Part 'the restore points' { @(Get-QpRestorePoints) } @()
             Problems = @($problems)
@@ -4028,46 +4428,35 @@ function Invoke-QpAudit {
     if (Test-QpCancelled) { return (New-Stopped) }
     Write-Step 9 'Checking browser add-ons and notifications'
     Write-QpLog 'Checking browser extensions and notification permissions...' 'INFO'
+    # The same reading the Privacy tab shows, so the report and the window never disagree.
+    $addons = @()
+    try { $addons = @(Get-QpBrowserExtensions) } catch { Write-QpLog "Could not read the browser add-ons: $($_.Exception.Message)" 'WARN' }
+    $scanned += $addons.Count
+    $ownParts = @($addons | Where-Object { $_.BuiltIn })
+    foreach ($e in @($addons | Where-Object { -not $_.BuiltIn })) {
+        $sev = if ($e.On -and $e.Reach.Everywhere) { 'Medium' } else { 'Info' }
+        $detail = @((Format-QpExtensionUse $e), "$($e.Source).")
+        if (@($e.Reach.Can).Count) { $detail += 'It ' + ((@($e.Reach.Can)) -join ', and ') + '.' }
+        if ($sev -eq 'Medium') { $detail += 'An add-on that reads every site can see anything you type or read in the browser. Keep it only if you meant to have it.' }
+        $detail += 'You can see and switch off add-ons on the Privacy tab.'
+        if (@($e.Reach.Sites).Count) { $detail += 'Sites: ' + (@($e.Reach.Sites) -join ', ') }
+        $detail += "ID: $($e.ExtId)"
+        if ($e.Folder) { $detail += $e.Folder }
+        Add-Finding 'Browsers' $sev ('{0} add-on: {1}' -f $e.Browser, $e.Name) ($detail -join "`n")
+    }
+    if ($ownParts.Count) {
+        Add-Finding 'Browsers' 'Info' ("{0} add-on(s) that are part of the browsers themselves" -f $ownParts.Count) `
+            ((@($ownParts | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Browser }) -join "`n") + "`nThese came with the browser - its PDF viewer, its store and the like - and did not come from you or from another program.")
+    }
     $browsers = @{ 'Chrome' = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'; 'Edge' = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'; 'Brave' = Join-Path $env:LOCALAPPDATA 'BraveSoftware\Brave-Browser\User Data' }
     foreach ($b in $browsers.Keys) {
         $root = $browsers[$b]
         if (-not (Test-Path $root)) { continue }
         foreach ($prof in @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' })) {
-            # The browser's own records say which extensions it installed itself (built-in or default ones).
-            $extInfo = @{}
+            # Which websites the browser lets send notifications: a favourite trick of adware.
             $pj = $null
-            foreach ($pf in 'Secure Preferences', 'Preferences') {
-                $pp = Join-Path $prof.FullName $pf
-                if (-not (Test-Path $pp)) { continue }
-                try {
-                    $js = Get-Content $pp -Raw | ConvertFrom-Json
-                    if ($pf -eq 'Preferences') { $pj = $js }
-                    if ($js.extensions.settings) { foreach ($es in $js.extensions.settings.PSObject.Properties) { if (-not $extInfo.ContainsKey($es.Name)) { $extInfo[$es.Name] = $es.Value } } }
-                } catch { }
-            }
-            foreach ($ext in @(Get-ChildItem (Join-Path $prof.FullName 'Extensions') -Directory -ErrorAction SilentlyContinue)) {
-                $scanned++
-                $manifest = Get-ChildItem $ext.FullName -Recurse -Depth 1 -Filter manifest.json -ErrorAction SilentlyContinue | Select-Object -First 1
-                if (-not $manifest) { continue }
-                try { $j = Get-Content $manifest.FullName -Raw | ConvertFrom-Json } catch { continue }
-                $name = [string]$j.name
-                if ($name -like '__MSG_*') {
-                    $key = $name.Trim('_').Substring(4)
-                    foreach ($loc in 'en', 'en_US', 'en_GB') {
-                        $mf = Join-Path $manifest.DirectoryName "_locales\$loc\messages.json"
-                        if (Test-Path $mf) { try { $msgs = Get-Content $mf -Raw | ConvertFrom-Json; $hit = $msgs.PSObject.Properties | Where-Object { $_.Name -ieq $key } | Select-Object -First 1; if ($hit) { $name = $hit.Value.message; break } } catch { } }
-                    }
-                }
-                $perms = @($j.permissions) + @($j.host_permissions) | Where-Object { $_ -is [string] }
-                $broad = @($perms | Where-Object { $_ -in '<all_urls>', '*://*/*', 'http://*/*', 'https://*/*' }).Count -gt 0
-                # location 5 / 10 = part of the browser; was_installed_by_default = the browser installed it on its own
-                $info = $extInfo[$ext.Name]
-                $builtIn = $info -and ($info.was_installed_by_default -eq $true -or [int]$info.location -in 5, 10)
-                $sev = if (-not $builtIn -and $broad -and ($perms -contains 'webRequest' -or $perms -contains 'scripting' -or $perms -contains 'tabs')) { 'Medium' } else { 'Info' }
-                $note = if ($builtIn) { "`n$b installed this itself - it didn't come from you or another program." } elseif ($sev -eq 'Medium') { "`nCan read and change every website you visit - keep it only if you trust it." } else { '' }
-                $title = if ($builtIn) { "$b extension: $name (installed by $b itself)" } else { "$b extension: $name" }
-                Add-Finding 'Browsers' $sev $title ("Profile: {0}`nID: {1}`nPermissions: {2}{3}" -f $prof.Name, $ext.Name, ($perms -join ', '), $note)
-            }
+            $pp = Join-Path $prof.FullName 'Preferences'
+            if (Test-Path $pp) { try { $pj = Get-Content $pp -Raw | ConvertFrom-Json } catch { } }
             if ($pj) {
                 try {
                     $n = $pj.profile.content_settings.exceptions.notifications
@@ -4326,6 +4715,8 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpStartupItems, Invoke-QpStartup, Set-QpStartupApproved, Get-QpStartupAdvice,
     Get-QpSignInTime, Get-QpBootRecord, Get-QpSignInCost, Format-QpSignInCost,
     Get-QpDeviceUse, Invoke-QpDeviceAccess, Format-QpWhen,
+    Get-QpBrowserExtensions, Get-QpChromiumExtensions, Get-QpFirefoxAddons, Get-QpExtensionReach, Format-QpExtensionUse,
+    Get-QpExtensionBlocks, Get-QpExtensionSlot, Invoke-QpExtension, ConvertFrom-QpChromeTime,
     Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpRecycleBinLimit, Move-QpToRecycleBin,
     Get-QpSpaceUse, Get-QpSpaceAdvice, Invoke-QpSpaceRecycle, Get-QpInstallPlaces,
     Get-QpShortcutPaths, Test-QpShortcuts, New-QpShortcuts, Remove-QpShortcuts, Initialize-QpShortcut, Get-QpOwnShortcuts,

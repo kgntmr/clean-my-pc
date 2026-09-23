@@ -114,6 +114,14 @@ These need eyes, not assertions:
   that isn't running says so rather than guessing. With a recent full restart, the "Windows timed your
   last restart at N seconds" line appears with its date; point at it for the breakdown. Compare a
   couple of the figures with Task Manager > Startup apps and Details - they should agree.
+- **Browser add-ons.** Privacy > Your browser add-ons. The list matches `edge://extensions` and
+  `brave://extensions` (and Chrome's, and Firefox's Add-ons page) name for name, with the same on/off
+  state, and the ones that "read and change everything on every site you visit" are at the top. Install
+  a harmless add-on from the store, press F5, and it appears saying where it came from. Tick it, Apply,
+  and the browser shows it greyed out as blocked by an administrator, with "managed by your
+  organisation" in the menu; Undo, and it works again within a minute. A Firefox add-on has no tick box
+  and says to switch it off in Firefox itself. Nothing in the browser's own folder changes: compare the
+  dates on `Secure Preferences` before and after.
 - **Short on screen, full underneath.** On Privacy, each setting is one line and one short note. Point
   at one (or Tab to it) and the full explanation appears; Narrator reads the same words. Nothing that
   warns about a side effect is hidden: "Turn off printing" still says "only if you never print".

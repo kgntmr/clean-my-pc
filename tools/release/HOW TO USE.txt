@@ -24,9 +24,12 @@ Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
 ALSO IN THE APP
    Health     How hard your PC is working, how warm it is, which programs
               are busiest, and how the battery and drive are holding up.
-   Privacy    See which apps used your camera, microphone and location,
-              and when - and switch them off. Also what is talking to
-              the internet right now, and where to.
+   Privacy    Every browser add-on you have, and what each one is allowed
+              to read - "reads and changes everything on every site you
+              visit" - with a tick box to switch off the ones you don't
+              want. Also which apps used your camera, microphone and
+              location, and when, and what is talking to the internet
+              right now.
    Apps       Choose what starts when you sign in - and see what each one
               is costing you, heaviest first.
    Free up    "Where your space went" shows the biggest folders and files,

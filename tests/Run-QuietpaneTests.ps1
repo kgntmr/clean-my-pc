@@ -596,6 +596,178 @@ Test-Case 'reading the real record never throws, and covers all three' {
 }
 Remove-Item -Path 'HKCU:\Software\QuietpaneTest' -Recurse -Force -ErrorAction SilentlyContinue
 
+Section 'Your browser add-ons'
+# A browser of our own making, in Temp: real files in the real shape, so nothing here touches the
+# browsers you actually use. The policy it reads is under HKCU:\Software\QuietpaneTest.
+$addonRoot = Join-Path $env:TEMP 'QuietpaneTestBrowser'
+$addonProfile = Join-Path $addonRoot 'Fake\User Data\Default'
+$addonFamily = @{ Key = 'test'; Name = 'TestBrowser'; Data = 'Fake\User Data'; Roaming = $false; Policy = 'Software\QuietpaneTest\Policies\TestBrowser' }
+$addonPolicy = 'HKCU:\Software\QuietpaneTest\Policies\TestBrowser'
+$addonBlockList = Join-Path $addonPolicy 'ExtensionInstallBlocklist'
+$addonIds = @{ Coupon = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; Docs = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+               Part = 'cccccccccccccccccccccccccccccccc'; Work = 'dddddddddddddddddddddddddddddddd'
+               Many = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' }
+$addonInstalled = [datetime]'2024-03-01 12:00'
+
+function New-TestAddonFiles([string]$Id, $Manifest, $Messages) {
+    $dir = Join-Path $addonProfile "Extensions\$Id\1.0_0"
+    [void][IO.Directory]::CreateDirectory($dir)
+    [IO.File]::WriteAllText((Join-Path $dir 'manifest.json'), ($Manifest | ConvertTo-Json -Depth 8))
+    if ($Messages) {
+        $loc = Join-Path $dir '_locales\en'
+        [void][IO.Directory]::CreateDirectory($loc)
+        [IO.File]::WriteAllText((Join-Path $loc 'messages.json'), ($Messages | ConvertTo-Json -Depth 8))
+    }
+}
+function Reset-AddonTestArea {
+    if (Test-Path -LiteralPath $addonRoot) { [IO.Directory]::Delete($addonRoot, $true) }
+    [void][IO.Directory]::CreateDirectory($addonProfile)
+    Remove-Item -Path $addonPolicy -Recurse -Force -ErrorAction SilentlyContinue
+    New-TestAddonFiles $addonIds.Coupon @{ name = 'Coupon Saver'; version = '1.0'; permissions = @('webRequest', 'history', 'storage', 'somethingNew'); host_permissions = @('<all_urls>') } $null
+    New-TestAddonFiles $addonIds.Docs @{ name = 'Docs Helper'; version = '1.0'; permissions = @('storage'); host_permissions = @('https://docs.google.com/*', 'edge://settings/*') } $null
+    New-TestAddonFiles $addonIds.Part @{ name = 'PDF Viewer'; version = '1.0'; permissions = @('tabs') } $null
+    New-TestAddonFiles $addonIds.Work @{ name = 'Work Add-on'; version = '1.0'; host_permissions = @('<all_urls>') } $null
+    New-TestAddonFiles $addonIds.Many @{ name = '__MSG_extName__'; version = '1.0'; permissions = @('cookies') } @{ extName = @{ message = 'Page Translator' } }
+    # The browser's own settings file: where each add-on came from, and whether it is switched on.
+    $chromeTime = "$([int64]($addonInstalled.ToFileTimeUtc() / 10))"
+    $settings = [ordered]@{}
+    $settings[$addonIds.Coupon] = @{ location = 3; state = 1; first_install_time = $chromeTime }
+    $settings[$addonIds.Docs]   = @{ location = 1; disable_reasons = @(134217728); first_install_time = $chromeTime }
+    $settings[$addonIds.Part]   = @{ location = 5; state = 1 }
+    $settings[$addonIds.Work]   = @{ location = 9; state = 1 }
+    $settings[$addonIds.Many]   = @{ location = 1; state = 0 }
+    # An id the browser remembers but never installed: no manifest, no folder, so it must not be listed.
+    $settings['ffffffffffffffffffffffffffffffff'] = @{ state = 0 }
+    $json = @{ extensions = @{ settings = $settings } } | ConvertTo-Json -Depth 10
+    [IO.File]::WriteAllText((Join-Path $addonProfile 'Secure Preferences'), $json)
+}
+function Get-TestAddons { @(Get-QpBrowserExtensions -Families @($addonFamily) -LocalRoot $addonRoot -NoFirefox) }
+function Get-TestAddon([string]$Name) { @(Get-TestAddons | Where-Object { $_.Name -eq $Name })[0] }
+function Get-NewestAddonRestorePoint([datetime]$Since) {
+    Get-ChildItem (Join-Path $env:ProgramData 'Quietpane\restore') -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like '*-browser-add-ons' -and $_.CreationTime -ge $Since } | Sort-Object CreationTime -Descending | Select-Object -First 1
+}
+
+Test-Case 'what an add-on may do turns into plain words, and anything unknown is counted, not guessed' {
+    $r = Get-QpExtensionReach -Permissions @('<all_urls>', 'webRequest', 'history', 'storage', 'somethingNew')
+    $r.Everywhere -and $r.Level -eq 'Everything' -and $r.Unnamed -eq 1 -and
+    $r.Can[0] -eq 'can watch every request your browser makes' -and $r.Can -contains 'can read your browsing history'
+}
+Test-Case 'the sites it can reach are read from its manifest, and the browser''s own pages are not sites' {
+    $r = Get-QpExtensionReach -Permissions @('https://docs.google.com/*', 'https://*.drive.google.com/*', 'edge://settings/*', 'chrome://resources/')
+    (@($r.Sites) -join ',') -eq 'docs.google.com,drive.google.com' -and -not $r.Everywhere
+}
+Test-Case 'one line says how far it reaches, whether it is on, and when it arrived' {
+    Reset-AddonTestArea
+    $coupon = Format-QpExtensionUse (Get-TestAddon 'Coupon Saver')
+    $docs = Format-QpExtensionUse (Get-TestAddon 'Docs Helper')
+    $coupon -match '^Reads and changes everything on every site you visit\. It can watch every request your browser makes\. Added ' -and
+    $docs -match '^Only works on docs\.google\.com\. Switched off in the browser at the moment\. Added '
+}
+Test-Case 'the browser''s own install date is read the way the browser writes it' {
+    $back = ConvertFrom-QpChromeTime "$([int64]($addonInstalled.ToFileTimeUtc() / 10))"
+    $null -ne $back -and [math]::Abs(($back - $addonInstalled).TotalSeconds) -lt 1
+}
+Test-Case 'every add-on in a profile is read, with where it came from' {
+    Reset-AddonTestArea
+    $all = Get-TestAddons
+    $by = @{}; foreach ($a in $all) { $by[$a.Name] = $a }
+    # Six entries are recorded, but one was never installed, so five are real.
+    $all.Count -eq 5 -and $by['Coupon Saver'].Source -eq 'Another program on this PC put it there' -and
+    $by['Coupon Saver'].On -and $by['PDF Viewer'].BuiltIn -and $by['Work Add-on'].Locked -and
+    $by['Coupon Saver'].Browser -eq 'TestBrowser' -and $by['Coupon Saver'].ExtId -eq $addonIds.Coupon
+}
+Test-Case 'an add-on the browser has switched off says so, however the browser wrote it down' {
+    Reset-AddonTestArea
+    # One is off by a plain state of 0, the other by a list of reasons, which is how newer browsers write it.
+    -not (Get-TestAddon 'Page Translator').On -and -not (Get-TestAddon 'Docs Helper').On -and (Get-TestAddon 'Coupon Saver').On
+}
+Test-Case 'a name written for several languages is read from the add-on''s own message file' {
+    Reset-AddonTestArea
+    $null -ne (Get-TestAddon 'Page Translator')
+}
+Test-Case 'preview changes nothing' {
+    Reset-AddonTestArea
+    Invoke-QpExtension -Ids "test|Default|$($addonIds.Coupon)" -Extensions (Get-TestAddons) -Preview | Out-Null
+    -not (Test-Path -Path $addonBlockList)
+}
+Test-Case 'the browser''s own parts, and anything a policy controls, are refused - with no empty restore point' {
+    Reset-AddonTestArea
+    $since = (Get-Date).AddSeconds(-1)
+    Invoke-QpExtension -Ids "test|Default|$($addonIds.Part)", "test|Default|$($addonIds.Work)" -Extensions (Get-TestAddons) | Out-Null
+    -not (Test-Path -Path $addonBlockList) -and $null -eq (Get-NewestAddonRestorePoint $since)
+}
+Test-Case 'switching one off writes the policy the browser reads, and Undo takes it away again' {
+    Reset-AddonTestArea
+    $since = (Get-Date).AddSeconds(-2)
+    Invoke-QpExtension -Ids "test|Default|$($addonIds.Coupon)" -Extensions (Get-TestAddons) | Out-Null
+    $written = (Get-QpRegValue -Path $addonBlockList -Name '1').Value -eq $addonIds.Coupon
+    $seen = (Get-TestAddon 'Coupon Saver').Blocked -and -not (Get-TestAddon 'Coupon Saver').On
+    $rp = Get-NewestAddonRestorePoint $since
+    if (-not $rp) { return $false }
+    Invoke-QpUndo -Path $rp.FullName | Out-Null
+    # The list Quietpane made goes with it, so the browser is left exactly as it was.
+    $gone = -not (Test-Path -Path $addonBlockList)
+    Remove-Item -LiteralPath $rp.FullName -Recurse -Force   # the test's own restore point, not the user's
+    $written -and $seen -and $gone
+}
+Test-Case 'a blocklist that is already there keeps its entries' {
+    Reset-AddonTestArea
+    New-Item -Path $addonBlockList -Force | Out-Null
+    Set-ItemProperty -Path $addonBlockList -Name '1' -Value 'someoneelseextensionidhere00000a' -Type String
+    Set-ItemProperty -Path $addonBlockList -Name '2' -Value 'someoneelseextensionidhere00000b' -Type String
+    $since = (Get-Date).AddSeconds(-2)
+    Invoke-QpExtension -Ids "test|Default|$($addonIds.Coupon)" -Extensions (Get-TestAddons) | Out-Null
+    $slot = (Get-QpRegValue -Path $addonBlockList -Name '3').Value -eq $addonIds.Coupon
+    $kept = (Get-QpRegValue -Path $addonBlockList -Name '1').Value -eq 'someoneelseextensionidhere00000a'
+    $rp = Get-NewestAddonRestorePoint $since
+    if (-not $rp) { return $false }
+    Invoke-QpUndo -Path $rp.FullName | Out-Null
+    $stillThere = (Get-QpRegValue -Path $addonBlockList -Name '2').Value -eq 'someoneelseextensionidhere00000b'
+    $undone = -not (Get-QpRegValue -Path $addonBlockList -Name '3').Exists
+    Remove-Item -LiteralPath $rp.FullName -Recurse -Force
+    Remove-Item -Path $addonPolicy -Recurse -Force -ErrorAction SilentlyContinue
+    $slot -and $kept -and $stillThere -and $undone
+}
+Test-Case 'one that is already blocked is left alone rather than listed twice' {
+    Reset-AddonTestArea
+    New-Item -Path $addonBlockList -Force | Out-Null
+    Set-ItemProperty -Path $addonBlockList -Name '1' -Value $addonIds.Coupon -Type String
+    $since = (Get-Date).AddSeconds(-1)
+    Invoke-QpExtension -Ids "test|Default|$($addonIds.Coupon)" -Extensions (Get-TestAddons) | Out-Null
+    $one = @((Get-Item -Path $addonBlockList).GetValueNames()).Count -eq 1
+    $none = $null -eq (Get-NewestAddonRestorePoint $since)
+    Remove-Item -Path $addonPolicy -Recurse -Force -ErrorAction SilentlyContinue
+    $one -and $none
+}
+Test-Case 'Firefox add-ons are read too, and Quietpane says it cannot switch those off' {
+    $dir = Join-Path $addonRoot 'FirefoxProfiles\test.default'
+    [void][IO.Directory]::CreateDirectory($dir)
+    $addons = @{ addons = @(
+        @{ id = 'toolbar@example.com'; type = 'extension'; version = '2.0'; active = $true; location = 'app-profile'
+           installDate = 1709294400000; defaultLocale = @{ name = 'Old Toolbar' }
+           userPermissions = @{ permissions = @('history'); origins = @('<all_urls>') } },
+        @{ id = 'builtin@mozilla.org'; type = 'extension'; version = '1.0'; active = $true; location = 'app-system-defaults'
+           defaultLocale = @{ name = 'Firefox Built-in' }; userPermissions = $null },
+        @{ id = 'theme@example.com'; type = 'theme'; version = '1.0'; active = $true; location = 'app-profile'; defaultLocale = @{ name = 'A Theme' } }
+    ) }
+    [IO.File]::WriteAllText((Join-Path $dir 'extensions.json'), ($addons | ConvertTo-Json -Depth 10))
+    $ff = @(Get-QpFirefoxAddons -Root (Join-Path $addonRoot 'FirefoxProfiles'))
+    $old = @($ff | Where-Object { $_.Name -eq 'Old Toolbar' })[0]
+    # Themes are not add-ons that can read your browsing, so they are not listed.
+    $ff.Count -eq 2 -and $old.Reach.Everywhere -and $old.PolicyRoot -eq '' -and $old.Browser -eq 'Firefox' -and
+    @($ff | Where-Object { $_.Name -eq 'Firefox Built-in' })[0].BuiltIn
+}
+Test-Case 'reading the real browsers on this PC never throws' {
+    $real = @(Get-QpBrowserExtensions)
+    # Every one has to carry the same shape, whatever browser it came from.
+    $shapeOk = $true
+    foreach ($e in $real) { if ($null -eq $e.Name -or $null -eq $e.Reach -or $null -eq $e.Browser) { $shapeOk = $false } }
+    $shapeOk
+}
+if (Test-Path -LiteralPath $addonRoot) { [IO.Directory]::Delete($addonRoot, $true) }
+Remove-Item -Path 'HKCU:\Software\QuietpaneTest' -Recurse -Force -ErrorAction SilentlyContinue
+
 Section 'Live readings on Home'
 Test-Case 'heat is always put into words, not left to colour' {
     (Get-QpHeatWord 40).Word -eq 'cool' -and (Get-QpHeatWord 60).Word -eq 'comfortable' -and (Get-QpHeatWord 75).Word -eq 'warm' -and
@@ -798,7 +970,7 @@ Test-Case 'the shared lookups give exactly the same answers as asking one by one
 }
 Test-Case 'the whole state comes back in one pass, and the shared lookups are let go afterwards' {
     $s = Get-QpState
-    $keysOk = @('Privacy', 'Vendors', 'Apps', 'Startup', 'Devices', 'Cleanup', 'Restore', 'Problems' | Where-Object { -not $s.ContainsKey($_) }).Count -eq 0
+    $keysOk = @('Privacy', 'Vendors', 'Apps', 'Startup', 'Devices', 'Addons', 'Cleanup', 'Restore', 'Problems' | Where-Object { -not $s.ContainsKey($_) }).Count -eq 0
     $keysOk -and $null -eq (& (Get-Module Quietpane) { $script:StateCache })
 }
 Test-Case 'asking Task Scheduler directly lists exactly the tasks Get-ScheduledTask lists' {
@@ -1278,6 +1450,10 @@ Test-Case 'every privacy setting has a plain title and a short line, with the fu
     $items.Count -eq 32 -and @($items | Where-Object { -not $_.Short }).Count -eq 0 -and
     @($items | Where-Object { -not $_.Description }).Count -eq 0 -and
     $longTitles.Count -eq 0 -and $longShorts.Count -eq 0 -and $jargon.Count -eq 0
+}
+Test-Case 'the add-ons that see the most come first, and the browser''s own parts stay out of the way' {
+    # Four add-ons drawn into the real window: two that read every site, one that does not, one Firefox.
+    $cardsOut -match 'add-ons: Coupon Helper,Old Toolbar,Docs Offline; reads every site: True; count: True; parts summed up: True; firefox: True'
 }
 Test-Case 'files found by Quietpane''s own checks can be quarantined or removed, whatever their level' {
     # A Medium file, a Low file and two files listed on one card: four in all. A setting gets no buttons.

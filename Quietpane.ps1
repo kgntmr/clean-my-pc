@@ -436,7 +436,7 @@ function Set-MoreInfo($Element, [string]$Text) {
 }
 
 $script:Options = @{}
-foreach ($k in 'privacy', 'devices', 'vendors', 'apps', 'startup', 'cleanup') { $script:Options[$k] = New-Object System.Collections.ArrayList }
+foreach ($k in 'privacy', 'devices', 'extensions', 'vendors', 'apps', 'startup', 'cleanup') { $script:Options[$k] = New-Object System.Collections.ArrayList }
 
 function Add-Option {
     <#
@@ -779,6 +779,17 @@ function New-Section([string]$Header) {
     return [pscustomobject]@{ Expander = $ex; Content = $sp }
 }
 $privacyPanel = New-TabPage 'Privacy' 'privacy' ('What your PC shares, and the tracking and ads you can switch off. Security and Windows Update are never touched.')
+
+# Add-ons see more of your browsing than anything else on this PC, so they come first.
+$script:AddonSection = New-Section 'Your browser add-ons'
+$script:AddonSection.Expander.IsExpanded = $true
+$addonIntro = New-Text 'What each one is allowed to read. Tick any you don''t want.' 12.5 'Normal' '#4B5B5C' '0,2,0,2'
+Set-MoreInfo $addonIntro 'Read from the browser''s own files: the add-on''s manifest says what it may do, and the browser''s settings say whether it is on. Switching one off is a policy under your own settings telling the browser not to load it - the browser then says an administrator blocked it, which is you, and Undo takes that away again. The browser picks it up on its own; close it and open it again to see it straight away.'
+[void]$script:AddonSection.Content.Children.Add($addonIntro)
+$script:AddonList = New-Object System.Windows.Controls.StackPanel
+[void]$script:AddonList.Children.Add((New-Text 'Looking at your browsers...' 13 'Normal' '#4B5B5C'))
+[void]$script:AddonSection.Content.Children.Add($script:AddonList)
+[void]$privacyPanel.Children.Add($script:AddonSection.Expander)
 
 $script:DeviceSection = New-Section 'Who used your camera, microphone and location'
 [void]$script:DeviceSection.Content.Children.Add((New-Text 'Tick an app to switch it off - the same switch as in Settings.' 12.5 'Normal' '#4B5B5C' '0,2,0,2'))
@@ -1338,6 +1349,7 @@ function Update-FromState($state) {
     Show-Part 'the brand extras' { Update-VendorTab @($state.Vendors) }
     Show-Part 'what starts at sign-in' { Update-StartupList @($state.Startup | Where-Object { $_ }) $state.SignIn }
     Show-Part 'camera, microphone and location use' { Update-DeviceList @($state.Devices | Where-Object { $_ }) }
+    Show-Part 'your browser add-ons' { Update-AddonList @($state.Addons | Where-Object { $_ }) }
     if (@($state.Problems).Count) {
         $ui.Status.Text = 'Some of this PC could not be read: ' + (@($state.Problems) -join ', ') + '. The rest is up to date.'
     }
@@ -1371,10 +1383,10 @@ function Update-FromState($state) {
         Update-CameBack $drift
     }
     if ($script:FirstLoad) {
-        foreach ($k in 'privacy', 'devices', 'vendors', 'apps', 'startup', 'cleanup') { Select-Recommended $k }
+        foreach ($k in 'privacy', 'devices', 'extensions', 'vendors', 'apps', 'startup', 'cleanup') { Select-Recommended $k }
         $script:FirstLoad = $false
     } else {
-        foreach ($k in 'devices', 'apps', 'startup', 'cleanup', 'vendors') { Select-Recommended $k }
+        foreach ($k in 'devices', 'extensions', 'apps', 'startup', 'cleanup', 'vendors') { Select-Recommended $k }
         foreach ($o in $script:Options['privacy']) { if ($o.Status -in 'Applied', 'NotApplicable') { $o.CheckBox.IsChecked = $false } }
     }
 }
@@ -1523,6 +1535,63 @@ function Update-StartupList($items, $signIn) {
     # Something important switched off by someone else: say so kindly, and leave the choice with them.
     foreach ($k in @($kept | Where-Object { -not $_.On })) {
         [void]$script:StartupList.Children.Add((New-Text ('{0} is switched off at sign-in. {1} If that wasn''t on purpose, turn it back on in Task Manager > Startup apps.' -f $k.Name, $k.KeepWhy) 12.5 'Normal' '#9A6700' '0,6,0,0'))
+    }
+}
+
+function Update-AddonList($addons) {
+    <#
+        One line per add-on, the ones that see the most first: what it may read, whether it is on, and
+        when it arrived. The browser's own parts are summed up in a line instead of filling the list.
+    #>
+    $script:AddonList.Children.Clear()
+    $script:Options['extensions'].Clear()
+    $all = @($addons | Where-Object { $_ })
+    # The ones that see the most, first, whatever order they arrived in.
+    $rank = @{ 'Everything' = 0; 'Watching' = 1; 'Ordinary' = 2 }
+    $yours = @($all | Where-Object { -not $_.BuiltIn } |
+        Sort-Object @{ Expression = { $rank[[string]$_.Reach.Level] } }, @{ Expression = { -not $_.On } }, Name)
+    $parts = @($all | Where-Object { $_.BuiltIn })
+    $wide = @($yours | Where-Object { $_.On -and $_.Reach.Everywhere })
+    $sum = if (-not $yours.Count) { 'none of your own' }
+           elseif ($wide.Count -eq 1) { '{0}, 1 reads every site' -f $yours.Count }
+           elseif ($wide.Count) { '{0}, {1} read every site' -f $yours.Count, $wide.Count }
+           else { '{0}, none reads every site' -f $yours.Count }
+    $script:AddonSection.Expander.Header = New-Text ("Your browser add-ons   ($sum)") 14.5 'SemiBold' $(if ($wide.Count) { '#9A6700' } else { '#117A68' }) '0' 'Fraunces, Georgia'
+    if (-not $all.Count) {
+        [void]$script:AddonList.Children.Add((New-Text 'No browser that Quietpane knows about is installed here.' 13 'Normal' '#4B5B5C' '0,6,0,0'))
+        return
+    }
+    if (-not $yours.Count) {
+        [void]$script:AddonList.Children.Add((New-Text 'You have no add-ons of your own - only the parts your browsers came with.' 13 'SemiBold' '#117A68' '0,6,0,0'))
+    }
+    foreach ($e in $yours) {
+        $where = if ($e.Profile) { '{0}, {1}' -f $e.Browser, $e.Profile } else { $e.Browser }
+        $title = '{0}   ({1})' -f $e.Name, $where
+        $more = @("$($e.Source).")
+        if (@($e.Reach.Can).Count -gt 1) { $more += 'It also ' + ((@($e.Reach.Can) | Select-Object -Skip 1) -join ', and ') + '.' }
+        if (@($e.Reach.Sites).Count) { $more += 'Sites: ' + (@($e.Reach.Sites) -join ', ') + '.' }
+        if ($e.Reach.Unnamed) { $more += '{0} other permission(s) Quietpane has no plain words for.' -f $e.Reach.Unnamed }
+        if ($e.PolicyRoot) { $more += 'Ticking it tells the browser not to load it. The browser will say an administrator blocked it, which is you, and Undo takes that away.' }
+        $more += "Id: $($e.ExtId)."
+        Add-Option -Panel $script:AddonList -Key 'extensions' -Id $e.Id -Title $title -Recommended $false `
+            -Short (Format-QpExtensionUse $e) -Description ($more -join ' ')
+        $opt = $script:Options['extensions'][$script:Options['extensions'].Count - 1]
+        if ($e.Blocked) {
+            Set-OptionStatus $opt 'NotApplicable'
+            $opt.Label.Text = "$title   [switched off already]"
+        } elseif ($e.Locked) {
+            Set-OptionStatus $opt 'NotApplicable'
+            $opt.Label.Text = "$title   [a policy on this PC decides]"
+        } elseif (-not $e.PolicyRoot) {
+            Set-OptionStatus $opt 'NotApplicable'
+            $opt.Label.Text = "$title   [switch this off in $($e.Browser) itself]"
+        }
+    }
+    if ($parts.Count) {
+        $names = @($parts | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Browser })
+        $t = New-Text ('{0} more are part of the browsers themselves, like their PDF viewer and their store.' -f $parts.Count) 12.5 'Normal' '#66706F' '0,12,0,0'
+        Set-MoreInfo $t ($names -join "`n")
+        [void]$script:AddonList.Children.Add($t)
     }
 }
 
@@ -2258,12 +2327,18 @@ function Invoke-Selected([bool]$Preview) {
     $ids = Get-SelectedIds $key
     # The Apps tab holds two lists: startup items and apps to remove. One Apply does both.
     $startupIds = if ($key -eq 'apps') { @(Get-SelectedIds 'startup') } else { @() }
-    # Likewise the Privacy tab: the settings, and the apps allowed to use the camera, microphone or location.
+    # Likewise the Privacy tab: the settings, the apps allowed to use the camera, microphone or location,
+    # and the browser add-ons.
     $deviceIds = if ($key -eq 'privacy') { @(Get-SelectedIds 'devices') } else { @() }
-    if ($ids.Count -eq 0 -and $startupIds.Count -eq 0 -and $deviceIds.Count -eq 0) { [void][System.Windows.MessageBox]::Show('Pick at least one thing first.', 'Quietpane'); return }
+    $addonIds = if ($key -eq 'privacy') { @(Get-SelectedIds 'extensions') } else { @() }
+    if ($ids.Count -eq 0 -and $startupIds.Count -eq 0 -and $deviceIds.Count -eq 0 -and $addonIds.Count -eq 0) { [void][System.Windows.MessageBox]::Show('Pick at least one thing first.', 'Quietpane'); return }
     if (-not $Preview) {
         $msg = switch ($key) {
-            'privacy' { "Go ahead with the $($ids.Count + $deviceIds.Count) ticked item(s)?`n`nA restore point is saved first, so you can undo this from the Undo tab." }
+            'privacy' {
+                $line = "Go ahead with the $($ids.Count + $deviceIds.Count + $addonIds.Count) ticked item(s)?`n`nA restore point is saved first, so you can undo this from the Undo tab."
+                if ($addonIds.Count) { $line += "`n`nFor the $($addonIds.Count) add-on(s): the browser will say an administrator blocked them. That administrator is you, and Undo puts them back." }
+                $line
+            }
             'apps'    {
                 $parts = @()
                 if ($startupIds.Count) { $parts += "stop $($startupIds.Count) thing(s) starting when you sign in - they still open when you start them, and Undo turns them back on" }
@@ -2281,12 +2356,13 @@ function Invoke-Selected([bool]$Preview) {
     $verb = if ($Preview) { 'Previewing' } else { 'Applying' }
     switch ($key) {
         'privacy' {
-            Start-Work -StatusText "$verb privacy changes..." -Params @{ Ids = $ids; Devices = $deviceIds; Preview = $Preview } -OnDone $after -Work {
-                param($Ids, $Devices, $Preview)
+            Start-Work -StatusText "$verb privacy changes..." -Params @{ Ids = $ids; Devices = $deviceIds; Addons = $addonIds; Preview = $Preview } -OnDone $after -Work {
+                param($Ids, $Devices, $Addons, $Preview)
                 # An empty list arrives as $null, and @($null).Count is 1 - so count real entries only.
-                $Ids = @($Ids | Where-Object { $_ }); $Devices = @($Devices | Where-Object { $_ })
+                $Ids = @($Ids | Where-Object { $_ }); $Devices = @($Devices | Where-Object { $_ }); $Addons = @($Addons | Where-Object { $_ })
                 if ($Ids.Count) { Invoke-QpPrivacy -Ids $Ids -Preview:$Preview }
                 if ($Devices.Count) { Invoke-QpDeviceAccess -Ids $Devices -Preview:$Preview }
+                if ($Addons.Count) { Invoke-QpExtension -Ids $Addons -Preview:$Preview }
             }
         }
         'vendors' { Start-Work -StatusText "$verb brand and hardware changes..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-QpVendor -Ids $Ids -Preview:$Preview } }
@@ -2310,7 +2386,7 @@ function Get-TabOptionKeys {
     # The Apps and Privacy tabs carry two lists; every other tab carries one.
     $tag = [string]$ui.Tabs.SelectedItem.Tag
     if ($tag -eq 'apps') { return @('startup', 'apps') }
-    if ($tag -eq 'privacy') { return @('devices', 'privacy') }
+    if ($tag -eq 'privacy') { return @('extensions', 'devices', 'privacy') }
     return @($tag)
 }
 $ui.BtnRecommended.Add_Click({ foreach ($k in Get-TabOptionKeys) { Select-Recommended $k } })
@@ -3050,6 +3126,41 @@ function Test-SignInCosts {
     $script:Options['startup'].Clear()
     return $result
 }
+function New-TestAddon($Name, $Browser, $On, $BuiltIn, $Perms, $Policy, $Blocked = $false) {
+    [pscustomobject]@{
+        Id = "$Browser|Default|$Name"; ExtId = 'abcdefghijklmnopabcdefghijklmnop'; Browser = $Browser; BrowserKey = $Browser.ToLower()
+        Profile = ''; Name = $Name; Version = '1.0'; On = $On; BuiltIn = $BuiltIn; Locked = $false; Blocked = $Blocked; BlockedByMe = $Blocked
+        Source = 'You added it yourself'; Reach = (Get-QpExtensionReach -Permissions $Perms); Added = (Get-Date).AddDays(-400)
+        Folder = ''; PolicyRoot = $Policy
+    }
+}
+function Test-AddonList {
+    <#
+        Four add-ons: one that reads every site, one that only works on two, one that is part of the
+        browser, and a Firefox one Quietpane cannot switch off. The widest reach must come first, the
+        browser's own parts must not fill the list, and Firefox must say where to do it instead.
+    #>
+    $addons = @(
+        (New-TestAddon 'Docs Offline' 'Edge' $false $false @('https://docs.google.com/*', 'https://drive.google.com/*') 'HKCU:\SOFTWARE\Policies\Microsoft\Edge'),
+        (New-TestAddon 'Coupon Helper' 'Edge' $true $false @('<all_urls>', 'webRequest', 'history', 'storage') 'HKCU:\SOFTWARE\Policies\Microsoft\Edge'),
+        (New-TestAddon 'Edge PDF Viewer' 'Edge' $true $true @('tabs') 'HKCU:\SOFTWARE\Policies\Microsoft\Edge'),
+        (New-TestAddon 'Old Toolbar' 'Firefox' $true $false @('<all_urls>') '')
+    )
+    Update-AddonList $addons
+    $order = @($script:Options['extensions'] | ForEach-Object { ($_.Title -split '   ')[0] }) -join ','
+    $text = @()
+    foreach ($child in $script:AddonList.Children) {
+        if ($child -is [System.Windows.Controls.TextBlock]) { $text += $child.Text }
+        elseif ($child -is [System.Windows.Controls.CheckBox] -and $child.Content -is [System.Windows.Controls.TextBlock]) { $text += $child.Content.Text }
+    }
+    $all = ($text -join ' | ') + ' | ' + [string]$script:AddonSection.Expander.Header.Text
+    $result = '{0}; reads every site: {1}; count: {2}; parts summed up: {3}; firefox: {4}' -f $order,
+        [bool]($all -match 'Reads and changes everything on every site you visit'), [bool]($all -match '3, 2 read every site'),
+        [bool]($all -match '1 more are part of the browsers themselves'), [bool]($all -match 'switch this off in Firefox itself')
+    $script:AddonList.Children.Clear()
+    $script:Options['extensions'].Clear()
+    return $result
+}
 function Test-Badge {
     # The taskbar badge draws and clears again.
     Update-TaskbarBadge ([pscustomobject]@{ Count = 3 })
@@ -3063,7 +3174,7 @@ if ($SelfTest) {
     # a part that could not be read, rather than leaving a blank tab behind.
     if ($env:QP_EMPTYSTATE) {
         Update-FromState @{
-            Privacy = @{}; Vendors = @(); Apps = @(); Startup = @(); Devices = @(); Cleanup = @(); Restore = @()
+            Privacy = @{}; Vendors = @(); Apps = @(); Startup = @(); Devices = @(); Addons = @(); Cleanup = @(); Restore = @()
             Problems = @('the brand extras')
         }
         Update-NetList $null
@@ -3114,6 +3225,7 @@ if ($SelfTest) {
     $cards = Test-FindingCards
     '{0} tabs, {1} privacy items, logo loaded: {2}, icon sizes: {3}, unnamed controls: {4} {5}, badge: {6}, finding quarantine buttons: {7} (unnamed {8}), window built OK' -f $ui.Tabs.Items.Count, $script:Options['privacy'].Count, [bool]$logo, $iconSizes, $unnamed.Count, ($unnamed -join ','), $(if (Test-Badge) { 'OK' } else { 'failed' }), $cards.Quarantine, $cards.Unnamed
     'sign-in costs: ' + (Test-SignInCosts)
+    'add-ons: ' + (Test-AddonList)
     return
 }
 
