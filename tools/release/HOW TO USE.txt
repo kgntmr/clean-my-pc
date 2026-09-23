@@ -32,8 +32,11 @@ ALSO IN THE APP
               right now.
    Apps       Choose what starts when you sign in - and see what each one
               is costing you, heaviest first.
-   Free up    "Where your space went" shows the biggest folders and files,
-    space     so you can see where your disk went.
+   Free up    "Worth clearing first" finds the easy room: installers you
+    space     have already used, downloads from years ago, big files you
+              have not changed in ages. One button sends them to the
+              Recycle Bin. Under it, "Where your space went" shows the
+              biggest folders and files, so you can see where it all went.
    About      One button puts Quietpane in your Start menu and on your
               desktop, and a tick box starts it when you sign in. Both
               keep working even if you move or delete this folder.

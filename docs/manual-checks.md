@@ -114,6 +114,12 @@ These need eyes, not assertions:
   that isn't running says so rather than guessing. With a recent full restart, the "Windows timed your
   last restart at N seconds" line appears with its date; point at it for the breakdown. Compare a
   couple of the figures with Task Manager > Startup apps and Details - they should agree.
+- **Worth clearing first.** Free up space > Look. The suggestions appear above the folder list, the ones
+  you can act on first. Check a couple by hand: an installer it names really is in Downloads, and its
+  date matches File Explorer's "Date modified". "Show me which" lists them; "Move N to the Recycle Bin"
+  asks first, then moves exactly those, the drive is added up again, and the Undo tab has one new
+  restore point with the right number of changes. Everything moved is in the Recycle Bin and restores
+  to where it was. Your previous Windows and the Recycle Bin are named with their size and no button.
 - **Browser add-ons.** Privacy > Your browser add-ons. The list matches `edge://extensions` and
   `brave://extensions` (and Chrome's, and Firefox's Add-ons page) name for name, with the same on/off
   state, and the ones that "read and change everything on every site you visit" are at the top. Install

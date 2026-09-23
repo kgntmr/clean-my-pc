@@ -1191,6 +1191,137 @@ Test-Case 'a real drive comes back with its own figures' {
 }
 if (Test-Path $spaceTest) { Remove-Item -LiteralPath $spaceTest -Recurse -Force }
 
+Section 'The room worth clearing first'
+# A pretend user folder with files of known ages, and a pretend scan result, so the suggestions can be
+# checked without touching anything real. It sits in your own folder, because Temp is inside AppData,
+# which Quietpane refuses to move from.
+$winRoot = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'QuietpaneWinsTest'
+$winDownloads = Join-Path $winRoot 'Downloads'
+$winDesktop = Join-Path $winRoot 'Desktop'
+$winNow = [datetime]'2026-09-23 12:00'
+function Set-TestAged([string]$Path, [int]$Bytes, [datetime]$When) {
+    $fs = [IO.File]::Create($Path); $fs.SetLength($Bytes); $fs.Close()
+    (Get-Item -LiteralPath $Path).LastWriteTime = $When
+}
+function Reset-WinsTestArea {
+    if (Test-Path $winRoot) { Remove-Item -LiteralPath $winRoot -Recurse -Force }
+    foreach ($d in $winDownloads, $winDesktop) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+    Set-TestAged (Join-Path $winDownloads 'setup_thing.exe') 2000 $winNow.AddDays(-200)   # an installer
+    Set-TestAged (Join-Path $winDownloads 'office.msi') 1000 $winNow.AddDays(-700)        # an older installer
+    Set-TestAged (Join-Path $winDownloads 'photos.zip') 5000 $winNow.AddDays(-500)        # an old download
+    Set-TestAged (Join-Path $winDownloads 'notes.pdf') 100 $winNow.AddDays(-30)           # recent: left alone
+    Set-TestAged (Join-Path $winDownloads 'last-year.txt') 300 $winNow.AddDays(-200)      # old, but not a year old
+    Set-TestAged (Join-Path $winDesktop 'driver.exe') 700 $winNow.AddDays(-400)           # an installer on the desktop
+    Set-TestAged (Join-Path $winDesktop 'shopping.txt') 50 $winNow.AddDays(-900)          # the desktop is not Downloads
+}
+function New-TestNode($Name, $Path, $Size, $When, $IsFile, $Children) {
+    [pscustomobject]@{ Name = $Name; Path = $Path; Size = [int64]$Size; Modified = $When; IsFile = $IsFile; Children = @($Children) }
+}
+function New-TestSpace($Children, $BinLimit = [int64]10GB) {
+    [pscustomobject]@{
+        Root = ($env:SystemDrive + '\'); Installed = @(); BinLimit = [int64]$BinLimit
+        Tree = (New-TestNode 'C:\' 'C:\' 0 $winNow $false $Children)
+    }
+}
+function Get-TestWins($Space, $Cleanup = @()) {
+    @(Get-QpEasyWins -Space $Space -Cleanup $Cleanup -Now $winNow -UserDir $winRoot)
+}
+function Get-TestWin($Wins, [string]$Id) { @($Wins | Where-Object { $_.Id -eq $Id })[0] }
+
+Test-Case 'old files are found by the date on the file, and links are never followed' {
+    Reset-WinsTestArea
+    New-Item -ItemType Junction -Path (Join-Path $winRoot 'link') -Target $winDownloads -ErrorAction Stop | Out-Null
+    $all = Get-QpOldFiles -Roots @($winRoot) -Before $winNow.AddDays(-100)
+    $installers = Get-QpOldFiles -Roots @($winDownloads) -Before $winNow.AddDays(-100) -Extensions @('.exe', '.msi')
+    $big = Get-QpOldFiles -Roots @($winDownloads) -Before $winNow.AddDays(-100) -MinSize 4000
+    # 6 old files in all; notes.pdf is too recent, and the junction must not double any of them.
+    $all.Files.Count -eq 6 -and -not $all.Truncated -and
+    (@($installers.Files | ForEach-Object { $_.Name }) -join ',') -eq 'setup_thing.exe,office.msi' -and
+    $big.Files.Count -eq 1 -and $big.Files[0].Name -eq 'photos.zip'
+}
+Test-Case 'installers are one suggestion and forgotten downloads another, with the desktop left out of the downloads' {
+    Reset-WinsTestArea
+    $wins = Get-TestWins (New-TestSpace @())
+    $inst = Get-TestWin $wins 'installers'
+    $old = Get-TestWin $wins 'downloads'
+    $inst -and $old -and $inst.Count -eq 3 -and $inst.Bytes -eq 3700 -and $inst.CanRecycle -and
+    $inst.Short -match '^3 of them, the newest from ' -and
+    # Only photos.zip: the .pdf is recent, last-year.txt is not a year old, and shopping.txt is on the desktop.
+    $old.Count -eq 1 -and $old.Items[0].Name -eq 'photos.zip'
+}
+Test-Case 'a big file nobody has changed in years is offered, and one that is part of a program is not' {
+    Reset-WinsTestArea
+    $mine = Join-Path $winRoot 'holiday.mov'
+    Set-TestAged $mine 500 $winNow.AddYears(-3)
+    $game = Join-Path $winRoot 'game.pak'
+    Set-TestAged $game 500 $winNow.AddYears(-3)
+    $space = New-TestSpace @(
+        (New-TestNode 'holiday.mov' $mine 400MB $winNow.AddYears(-3) $true @()),
+        (New-TestNode 'game.pak' $game 400MB $winNow.AddYears(-3) $true @()),
+        (New-TestNode 'recent.mov' $mine 400MB $winNow.AddMonths(-2) $true @()),
+        (New-TestNode 'gone.mov' (Join-Path $winRoot 'not-there.mov') 400MB $winNow.AddYears(-3) $true @())
+    )
+    $space.Installed = @([pscustomobject]@{ Path = $game; Name = 'A Game' })
+    $win = Get-TestWin (Get-TestWins $space) 'bigold'
+    # Only the one that is old, big, still there, and yours to move.
+    $win -and $win.Count -eq 1 -and $win.Items[0].Name -eq 'holiday.mov' -and $win.CanRecycle
+}
+Test-Case 'nothing bigger than the Recycle Bin can hold is ever offered' {
+    Reset-WinsTestArea
+    $mine = Join-Path $winRoot 'huge.mov'
+    Set-TestAged $mine 500 $winNow.AddYears(-3)
+    $space = New-TestSpace @((New-TestNode 'huge.mov' $mine 400MB $winNow.AddYears(-3) $true @())) ([int64]100MB)
+    $tight = Get-TestWins $space
+    # With the bin switched off altogether, they become things to look at rather than things to move.
+    $offSpace = New-TestSpace @() ([int64]0)
+    $off = Get-TestWin (Get-TestWins $offSpace) 'installers'
+    $null -eq (Get-TestWin $tight 'bigold') -and $off -and -not $off.CanRecycle -and $off.Advice -match 'switched off'
+}
+Test-Case 'what only Windows can clear is explained, never touched' {
+    Reset-WinsTestArea
+    $space = New-TestSpace @(
+        (New-TestNode 'Windows.old' 'C:\Windows.old' 12GB $winNow.AddDays(-5) $false @()),
+        (New-TestNode '$Recycle.Bin' 'C:\$Recycle.Bin' 800MB $winNow $false @())
+    )
+    $cleanup = @([pscustomobject]@{ Id = 'wu.download'; Title = 'Windows Update download cache'; SizeBytes = [int64]2GB })
+    $wins = Get-TestWins $space $cleanup
+    $old = Get-TestWin $wins 'windows.old'
+    $bin = Get-TestWin $wins 'recyclebin'
+    $wu = Get-TestWin $wins 'wu.download'
+    $old -and -not $old.CanRecycle -and $old.Count -eq 0 -and $old.Advice -match 'Settings > System > Storage' -and
+    $bin -and -not $bin.CanRecycle -and $bin.Advice -match 'Empty Recycle Bin' -and
+    $wu -and -not $wu.CanRecycle -and $wu.Advice -match 'Apply' -and $wu.Bytes -eq 2GB
+}
+Test-Case 'the ones you can act on come first, biggest first' {
+    Reset-WinsTestArea
+    $space = New-TestSpace @((New-TestNode 'Windows.old' 'C:\Windows.old' 12GB $winNow.AddDays(-5) $false @()))
+    $order = @(Get-TestWins $space | ForEach-Object { $_.Id }) -join ','
+    # Windows.old is by far the biggest, and still comes last: it is not yours to move.
+    $order -eq 'downloads,installers,windows.old'
+}
+Test-Case 'preview changes nothing at all' {
+    Reset-WinsTestArea
+    $win = Get-TestWin (Get-TestWins (New-TestSpace @())) 'installers'
+    $r = Invoke-QpEasyWin -Win $win -Preview
+    $r.Moved -eq 0 -and @(Get-ChildItem $winDownloads -File).Count -eq 5 -and (Test-Path (Join-Path $winDesktop 'driver.exe'))
+}
+Test-Case 'moving a suggestion sends every file to the Recycle Bin, in one restore point' {
+    Reset-WinsTestArea
+    $since = (Get-Date).AddSeconds(-2)
+    $win = Get-TestWin (Get-TestWins (New-TestSpace @())) 'installers'
+    $r = Invoke-QpEasyWin -Win $win
+    $gone = -not (Test-Path (Join-Path $winDownloads 'setup_thing.exe')) -and -not (Test-Path (Join-Path $winDesktop 'driver.exe'))
+    $kept = Test-Path (Join-Path $winDownloads 'photos.zip')
+    $rp = Get-ChildItem (Join-Path $env:ProgramData 'Quietpane\restore') -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like '*-space-tidy' -and $_.CreationTime -ge $since } | Sort-Object CreationTime -Descending | Select-Object -First 1
+    if (-not $rp) { return $false }
+    $entries = @((Get-Content (Join-Path $rp.FullName 'state.json') -Raw | ConvertFrom-Json).Entries)
+    Remove-Item -LiteralPath $rp.FullName -Recurse -Force   # the test's own restore point, not the user's
+    # The three files are in the Recycle Bin by design: that is where the app puts them.
+    $r.Moved -eq 3 -and $r.Failed -eq 0 -and $r.Bytes -eq 3700 -and $gone -and $kept -and $entries.Count -eq 3
+}
+if (Test-Path $winRoot) { Remove-Item -LiteralPath $winRoot -Recurse -Force }
+
 Section 'What''s talking to the internet'
 Test-Case 'your own network is told apart from the internet' {
     (Test-QpPrivateAddress '192.168.1.5') -and (Test-QpPrivateAddress '10.0.0.3') -and (Test-QpPrivateAddress '172.20.1.1') -and
@@ -1450,6 +1581,9 @@ Test-Case 'every privacy setting has a plain title and a short line, with the fu
     $items.Count -eq 32 -and @($items | Where-Object { -not $_.Short }).Count -eq 0 -and
     @($items | Where-Object { -not $_.Description }).Count -eq 0 -and
     $longTitles.Count -eq 0 -and $longShorts.Count -eq 0 -and $jargon.Count -eq 0
+}
+Test-Case 'the easy wins show what they mean, and what only Windows can clear says where to go' {
+    $cardsOut -match 'easy wins: rows: 2; move button: True; size: True; windows only: True; stopped looking: True; files hidden: True'
 }
 Test-Case 'the add-ons that see the most come first, and the browser''s own parts stay out of the way' {
     # Four add-ons drawn into the real window: two that read every site, one that does not, one Firefox.

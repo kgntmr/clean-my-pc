@@ -897,8 +897,13 @@ $script:SpaceFilesHead = New-Text 'Your biggest files' 14 'SemiBold' '#0F1B1C' '
 $script:SpaceFilesNote = New-Text 'Only files that are yours to move.' 12.5 'Normal' '#4B5B5C' '0,0,0,4'
 Set-MoreInfo $script:SpaceFilesNote 'Big game and program files are in the folders above, each with where to remove it properly.'
 $script:SpaceFiles = New-Object System.Windows.Controls.StackPanel
-foreach ($e in $script:SpaceStatus, $script:SpaceCrumb, $script:SpaceBanner, $script:SpaceRows, $script:SpaceFilesHead, $script:SpaceFilesNote, $script:SpaceFiles) { [void]$script:SpaceSection.Content.Children.Add($e) }
-foreach ($e in $script:SpaceCrumb, $script:SpaceBanner, $script:SpaceFilesHead, $script:SpaceFilesNote) { $e.Visibility = 'Collapsed' }
+# The easy wins, above the folder list: the room most people can clear without thinking about it.
+$script:SpaceWinsHead = New-Text 'Worth clearing first' 14 'SemiBold' '#0F1B1C' '0,16,0,0'
+$script:SpaceWinsNote = New-Text 'Go by the date on the file, not by when it was last opened.' 12.5 'Normal' '#4B5B5C' '0,0,0,2'
+Set-MoreInfo $script:SpaceWinsNote 'Windows does note when a file was last opened, but anything that reads it updates that too - your antivirus, Windows Search, a backup - so on most PCs every file looks as though it was opened this morning. Quietpane goes by the date written on the file instead.'
+$script:SpaceWins = New-Object System.Windows.Controls.StackPanel
+foreach ($e in $script:SpaceStatus, $script:SpaceWinsHead, $script:SpaceWinsNote, $script:SpaceWins, $script:SpaceCrumb, $script:SpaceBanner, $script:SpaceRows, $script:SpaceFilesHead, $script:SpaceFilesNote, $script:SpaceFiles) { [void]$script:SpaceSection.Content.Children.Add($e) }
+foreach ($e in $script:SpaceWinsHead, $script:SpaceWinsNote, $script:SpaceCrumb, $script:SpaceBanner, $script:SpaceFilesHead, $script:SpaceFilesNote) { $e.Visibility = 'Collapsed' }
 [void]$cleanupPanel.Children.Add($script:SpaceSection.Expander)
 
 # 6. Undo
@@ -1846,6 +1851,100 @@ function Show-SpaceLevel {
     }
 }
 
+function Show-SpaceWins {
+    <#
+        The easy wins, biggest first: the ones that are yours to move carry a button, and the ones only
+        Windows can clear say where to do it. Each row can show exactly which files it means.
+    #>
+    $script:SpaceWins.Children.Clear()
+    $wins = @($script:SpaceResult.Wins | Where-Object { $_ })
+    $script:SpaceWinsHead.Visibility = 'Visible'
+    $script:SpaceWinsNote.Visibility = 'Visible'
+    if (-not $wins.Count) {
+        [void]$script:SpaceWins.Children.Add((New-Text 'Nothing obvious to clear - no old installers, no forgotten downloads.' 12.5 'Normal' '#117A68' '0,6,0,0'))
+        return
+    }
+    foreach ($w in $wins) {
+        $card = New-Object System.Windows.Controls.Border
+        $card.Background = Get-Brush '#FAF6EC'
+        $card.BorderBrush = Get-Brush '#E6DFCC'
+        $card.BorderThickness = Get-Thick '1'
+        $card.Padding = Get-Thick '12,10'
+        $card.Margin = Get-Thick '0,8,0,0'
+        $sp = New-Object System.Windows.Controls.StackPanel
+
+        $top = New-Object System.Windows.Controls.Grid
+        foreach ($width in '*', '110') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromString($width); [void]$top.ColumnDefinitions.Add($c) }
+        $name = New-Text $w.Title 13.5 'SemiBold' '#0F1B1C' '0'
+        [void]$top.Children.Add($name)
+        $size = New-Text (Format-QpBytes $w.Bytes) 14 'SemiBold' '#117A68' '0'
+        $size.TextAlignment = 'Right'
+        [System.Windows.Controls.Grid]::SetColumn($size, 1)
+        [void]$top.Children.Add($size)
+        [void]$sp.Children.Add($top)
+
+        $short = New-Text $w.Short 12.5 'Normal' '#4B5B5C' '0,3,0,0'
+        Set-MoreInfo $short $w.Why
+        [void]$sp.Children.Add($short)
+        if ($w.Truncated) { [void]$sp.Children.Add((New-Text 'There may be more - Quietpane stopped looking after 20 seconds.' 11.5 'Normal' '#9A6700' '0,3,0,0')) }
+
+        if ($w.CanRecycle -and $w.Count -gt 0) {
+            $list = New-Object System.Windows.Controls.StackPanel
+            $list.Visibility = 'Collapsed'
+            $list.Margin = Get-Thick '0,6,0,0'
+            foreach ($i in @($w.Items | Select-Object -First 12)) {
+                $line = New-Text ('{0}   -   {1}, changed {2}' -f $i.Name, (Format-QpBytes $i.Bytes), (Format-QpWhen $i.When)) 12 'Normal' '#4B5B5C' '0,2,0,0'
+                $line.ToolTip = $i.Path
+                [void]$list.Children.Add($line)
+            }
+            if ($w.Count -gt 12) { [void]$list.Children.Add((New-Text ('and {0} more' -f ($w.Count - 12)) 12 'Normal' '#66706F' '0,2,0,0')) }
+
+            $buttons = New-Object System.Windows.Controls.StackPanel
+            $buttons.Orientation = 'Horizontal'
+            $buttons.Margin = Get-Thick '0,8,0,0'
+            $show = New-Button 'Show me which' '0,0,6,0'
+            $show.Tag = $list
+            $show.Add_Click({
+                $panel = $this.Tag
+                $panel.Visibility = if ($panel.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' }
+                $this.Content = if ($panel.Visibility -eq 'Visible') { 'Hide the list' } else { 'Show me which' }
+            })
+            [void]$buttons.Children.Add($show)
+            $move = New-Button ('Move {0} to the Recycle Bin' -f $w.Count) '0'
+            $move.Tag = $w
+            $move.Add_Click({ Move-SpaceWin $this.Tag })
+            [void]$buttons.Children.Add($move)
+            [void]$sp.Children.Add($buttons)
+            [void]$sp.Children.Add($list)
+        } elseif ($w.Advice) {
+            [void]$sp.Children.Add((New-Text $w.Advice 12.5 'Normal' '#9A6700' '0,6,0,0'))
+        }
+        $card.Child = $sp
+        [void]$script:SpaceWins.Children.Add($card)
+    }
+}
+
+function Move-SpaceWin($Win) {
+    <# Everything in one suggestion, to the Recycle Bin, in a single restore point. #>
+    if (Test-Busy) { return }
+    $msg = "Move {0} file(s) to the Recycle Bin?`n`n{1}`n{2} in all.`n`nThey stay in the bin until you empty it, so you can still put them back." -f $Win.Count, $Win.Title, (Format-QpBytes $Win.Bytes)
+    if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
+    $ui.LogBox.AppendText([Environment]::NewLine)
+    Set-LogVisible $true
+    Start-Work -StatusText "Moving $($Win.Title.ToLower()) to the Recycle Bin..." -Params @{ Win = $Win } -Work {
+        param($Win)
+        Invoke-QpEasyWin -Win $Win
+    } -OnDone {
+        param($r)
+        $r = @($r | Where-Object { $_ -and $_.PSObject.Properties['Moved'] })[-1]
+        if (-not $r) { return }
+        $script:SpaceMoved += [int64]$r.Bytes
+        try { Update-UndoList @(Get-QpRestorePoints) } catch { }
+        # Everything on screen was measured before that, so the drive is added up again.
+        if ($r.Moved -gt 0) { Start-SpaceScan -Keep } else { Set-SpaceStatus }
+    }
+}
+
 function Show-SpaceFiles {
     <# Your ten biggest files that are yours to move - not game or program files, which have their own way out. #>
     $script:SpaceFiles.Children.Clear()
@@ -1886,16 +1985,28 @@ function Update-SpaceProgress {
 }
 
 function Start-SpaceScan {
+    # -Keep carries the "moved to the Recycle Bin" total over a fresh look, after a tidy-up.
+    param([switch]$Keep)
     if (Test-Busy) { return }
     $root = if ($script:SpaceDrive.SelectedItem) { [string]$script:SpaceDrive.SelectedItem } else { $env:SystemDrive + '\' }
     $script:SpaceRunning = $true
     $script:SpaceStarted = Get-Date
-    $script:SpaceMoved = [int64]0
+    if (-not $Keep) { $script:SpaceMoved = [int64]0 }
     $script:SpaceAdviceCache = @{}
     $btnSpaceStop.Visibility = 'Visible'
     $btnSpaceStop.IsEnabled = $true
     $script:SpaceStatus.Text = 'Adding up folder sizes...'
-    Start-Work -StatusText 'Adding up folder sizes...' -Params @{ Root = $root } -Work { param($Root) Get-QpSpaceUse -Root $Root } -OnDone {
+    # The clean-up sizes are already measured on this tab, so they are handed over rather than measured again.
+    $cleanup = @()
+    if ($script:LastState -and $script:LastState.Cleanup) { $cleanup = @($script:LastState.Cleanup | Where-Object { $_ }) }
+    Start-Work -StatusText 'Adding up folder sizes...' -Params @{ Root = $root; Cleanup = $cleanup } -Work {
+        param($Root, $Cleanup)
+        $s = Get-QpSpaceUse -Root $Root
+        $wins = @()
+        if (-not $s.Cancelled) { $wins = @(Get-QpEasyWins -Space $s -Cleanup @($Cleanup | Where-Object { $_ })) }
+        $s | Add-Member -NotePropertyName Wins -NotePropertyValue $wins -Force
+        $s
+    } -OnDone {
         param($r)
         $r = @($r | Where-Object { $_ -and $_.PSObject.Properties['Tree'] })[-1]
         $script:SpaceRunning = $false
@@ -1907,6 +2018,7 @@ function Start-SpaceScan {
         $script:SpaceResult = $r
         $script:SpaceCurrent = $r.Tree
         Set-SpaceStatus
+        Show-SpaceWins
         Show-SpaceLevel
         Show-SpaceFiles
     }
@@ -3161,6 +3273,46 @@ function Test-AddonList {
     $script:Options['extensions'].Clear()
     return $result
 }
+function Test-SpaceWins {
+    <#
+        Three suggestions drawn into the real window: one to move, one only Windows can clear, and one
+        that had to stop looking. The ones you can act on get a button; the other says where to go.
+    #>
+    $before = $script:SpaceResult
+    $script:SpaceResult = [pscustomobject]@{ Wins = @(
+        [pscustomobject]@{ Id = 'installers'; Title = 'Installers you have already used'; Short = '3 of them, the newest from 7 March.'
+            Why = 'An installer is only needed once.'; Bytes = [int64]3670016; Count = 3; CanRecycle = $true; Advice = ''; Truncated = $true
+            Items = @(
+                [pscustomobject]@{ Path = 'C:\Users\Someone\Downloads\setup.exe'; Name = 'setup.exe'; Bytes = [int64]2097152; When = (Get-Date).AddDays(-200) },
+                [pscustomobject]@{ Path = 'C:\Users\Someone\Downloads\office.msi'; Name = 'office.msi'; Bytes = [int64]1048576; When = (Get-Date).AddDays(-700) },
+                [pscustomobject]@{ Path = 'C:\Users\Someone\Desktop\driver.exe'; Name = 'driver.exe'; Bytes = [int64]524288; When = (Get-Date).AddDays(-400) }
+            ) },
+        [pscustomobject]@{ Id = 'windows.old'; Title = 'Your previous version of Windows'; Short = 'Kept after a Windows upgrade so you could go back.'
+            Why = 'Windows removes this by itself.'; Bytes = [int64]12884901888; Count = 0; CanRecycle = $false; Truncated = $false
+            Advice = 'Remove it in Settings > System > Storage > Temporary files, which does it safely. Quietpane will not touch it.'; Items = @() }
+    ) }
+    Show-SpaceWins
+    $text = @()
+    $buttons = @()
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($script:SpaceWins)
+    while ($stack.Count) {
+        $el = $stack.Pop()
+        # Anything hidden is skipped, so this is what a person actually sees on the card.
+        if ($el -is [System.Windows.UIElement] -and $el.Visibility -ne 'Visible') { continue }
+        if ($el -is [System.Windows.Controls.TextBlock]) { $text += $el.Text }
+        if ($el -is [System.Windows.Controls.Button]) { $buttons += [string]$el.Content }
+        foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($el)) { if ($child -is [System.Windows.DependencyObject]) { $stack.Push($child) } }
+    }
+    $all = $text -join ' | '
+    $result = 'rows: {0}; move button: {1}; size: {2}; windows only: {3}; stopped looking: {4}; files hidden: {5}' -f
+        $script:SpaceWins.Children.Count, [bool]($buttons -contains 'Move 3 to the Recycle Bin'), [bool]($all -match '12\.00 GB'),
+        [bool]($all -match 'Settings > System > Storage'), [bool]($all -match 'stopped looking after 20 seconds'),
+        [bool]($all -notmatch 'setup\.exe')
+    $script:SpaceWins.Children.Clear()
+    $script:SpaceResult = $before
+    return $result
+}
 function Test-Badge {
     # The taskbar badge draws and clears again.
     Update-TaskbarBadge ([pscustomobject]@{ Count = 3 })
@@ -3226,6 +3378,7 @@ if ($SelfTest) {
     '{0} tabs, {1} privacy items, logo loaded: {2}, icon sizes: {3}, unnamed controls: {4} {5}, badge: {6}, finding quarantine buttons: {7} (unnamed {8}), window built OK' -f $ui.Tabs.Items.Count, $script:Options['privacy'].Count, [bool]$logo, $iconSizes, $unnamed.Count, ($unnamed -join ','), $(if (Test-Badge) { 'OK' } else { 'failed' }), $cards.Quarantine, $cards.Unnamed
     'sign-in costs: ' + (Test-SignInCosts)
     'add-ons: ' + (Test-AddonList)
+    'easy wins: ' + (Test-SpaceWins)
     return
 }
 

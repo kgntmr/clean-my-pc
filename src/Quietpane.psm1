@@ -19,7 +19,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.14.0'
+$script:AppVersion  = '1.15.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -3208,6 +3208,224 @@ function Invoke-QpSpaceRecycle {
     } finally { if ($own) { Stop-QpSession } }
 }
 
+# ---------------------------------------------------------------- the easy wins
+#
+# Seeing the biggest folders is only half the answer. These are the ones nearly everybody has and
+# nobody thinks of: installers for programs already installed, downloads from years ago, big files
+# left where they landed, and what Windows keeps after an update.
+#
+# Quietpane goes by the date written on the file, not by "last opened". Windows does record when a
+# file was last opened, but anything that reads it updates that too - antivirus, Windows Search, a
+# backup - so on most PCs every file looks as though it was opened this morning. Saying "you never
+# opened this" from that would be a guess dressed up as a fact.
+
+$script:InstallerExtensions = @('.exe', '.msi', '.msix', '.appx', '.appxbundle', '.msu', '.iso', '.img')
+
+function Get-QpOldFiles {
+    <#
+        Files under the given folders, older than a date and bigger than a size. Read-only: it reads
+        names, sizes and dates, never contents. Links are skipped, so nothing is counted twice, and
+        online-only OneDrive files are left out because they take no room here. It gives up politely
+        after MaxSeconds and says so, rather than holding the window.
+    #>
+    param(
+        [string[]]$Roots, [datetime]$Before, [int64]$MinSize = 0,
+        [string[]]$Extensions = @(), [string[]]$Exclude = @(), [int]$MaxSeconds = 20, [int]$MaxFiles = 200000
+    )
+    $out = New-Object System.Collections.ArrayList
+    $deadline = (Get-Date).AddSeconds($MaxSeconds)
+    $seen = 0
+    $truncated = $false
+    $wanted = @{}
+    foreach ($e in @($Extensions | Where-Object { $_ })) { $wanted[$e.ToLowerInvariant()] = $true }
+    $skip = @($Exclude | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') })
+    function Test-Skipped([string]$Path) {
+        foreach ($s in $skip) { if ($Path -eq $s -or $Path.StartsWith($s + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true } }
+        return $false
+    }
+    foreach ($root in @($Roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) })) {
+        $stack = New-Object System.Collections.Stack
+        $stack.Push((New-Object IO.DirectoryInfo $root))
+        while ($stack.Count) {
+            if ((Get-Date) -gt $deadline -or $seen -ge $MaxFiles) { $truncated = $true; break }
+            $dir = $stack.Pop()
+            $entries = $null
+            try { $entries = $dir.GetFileSystemInfos() } catch { continue }
+            foreach ($e in $entries) {
+                $a = [int]$e.Attributes
+                if ($a -band [int][IO.FileAttributes]::ReparsePoint) { continue }
+                if ($e -is [IO.DirectoryInfo]) {
+                    if (-not (Test-Skipped $e.FullName)) { $stack.Push($e) }
+                    continue
+                }
+                $seen++
+                # Offline, recall-on-open, recall-on-data: online-only, so no room is used here.
+                if ($a -band 0x441000) { continue }
+                if ($e.LastWriteTime -ge $Before) { continue }
+                if ([int64]$e.Length -lt $MinSize) { continue }
+                $ext = $e.Extension.ToLowerInvariant()
+                if ($wanted.Count -and -not $wanted.ContainsKey($ext)) { continue }
+                [void]$out.Add([pscustomobject]@{ Path = $e.FullName; Name = $e.Name; Bytes = [int64]$e.Length; When = $e.LastWriteTime; Ext = $ext })
+            }
+        }
+    }
+    [pscustomobject]@{ Files = @($out | Sort-Object Bytes -Descending); Truncated = $truncated; Looked = $seen }
+}
+
+function Get-QpEasyWins {
+    <#
+        The room worth clearing first, from a scan that has already been done: installers for programs
+        already installed, old downloads, big files nobody has changed in years, and what Windows keeps
+        after an update. Read-only. Anything that is not yours to move - a program, a game, another
+        account, OneDrive - is left out, by the same rules as the rest of this tab.
+    #>
+    param(
+        $Space, $Cleanup = $null, [datetime]$Now = (Get-Date),
+        [int]$InstallerDays = 90, [int]$DownloadDays = 365, [int]$OldYears = 2, [int64]$BigFile = 250MB,
+        [string]$UserDir = ([Environment]::GetFolderPath('UserProfile')), [int]$MaxSeconds = 20
+    )
+    if (-not $Space) { return @() }
+    $wins = New-Object System.Collections.ArrayList
+    $root = ([string]$Space.Root).TrimEnd('\')
+    $drive = if ($root.Length -ge 2) { $root.Substring(0, 2) } else { $env:SystemDrive }
+    $isSystem = $drive -eq "$env:SystemDrive".TrimEnd('\')
+    $cloud = @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial | Where-Object { $_ })
+    $onThisDrive = { param($p) $p -and $p.Length -ge 2 -and $p.Substring(0, 2).ToUpperInvariant() -eq $drive.ToUpperInvariant() }
+    $installed = @($Space.Installed)
+    # Anything bigger than the Recycle Bin can hold would be deleted for good, so it is never offered
+    # here; and with the bin switched off, these become things to look at rather than things to move.
+    $binLimit = [int64]$Space.BinLimit
+    $canMove = $binLimit -gt 0
+    $binOff = 'The Recycle Bin is switched off on this drive, so Quietpane will not move anything. Have a look yourself in File Explorer.'
+
+    function New-Win([string]$Id, [string]$Title, [string]$Short, [string]$Why, [int64]$Bytes, $Items, [bool]$CanRecycle, [string]$Advice = '', [bool]$Truncated = $false) {
+        [pscustomobject]@{
+            Id = $Id; Title = $Title; Short = $Short; Why = $Why; Bytes = $Bytes
+            Count = @($Items).Count; Items = @($Items); CanRecycle = $CanRecycle; Advice = $Advice; Truncated = $Truncated
+        }
+    }
+    function Add-Sizes($Items) { [int64](( @($Items) | Measure-Object -Property Bytes -Sum).Sum) }
+
+    # ---- your own folders: installers, and downloads from another year
+    $downloads = Join-Path $UserDir 'Downloads'
+    # Your Desktop can live somewhere else entirely (OneDrive moves it), so Windows is asked where it is.
+    $desktop = if ($UserDir -eq [Environment]::GetFolderPath('UserProfile')) { [Environment]::GetFolderPath('Desktop') } else { Join-Path $UserDir 'Desktop' }
+    $looked = @($downloads, $desktop | Where-Object { $_ -and (& $onThisDrive $_) } | Select-Object -Unique)
+    if ($looked.Count) {
+        $found = Get-QpOldFiles -Roots $looked -Before $Now.AddDays(-$InstallerDays) -Exclude $cloud -MaxSeconds $MaxSeconds
+        if ($canMove) { $found.Files = @($found.Files | Where-Object { $_.Bytes -le $binLimit }) }
+        $installers = @($found.Files | Where-Object { $script:InstallerExtensions -contains $_.Ext })
+        if ($installers.Count) {
+            $newest = @($installers | Sort-Object When -Descending)[0].When
+            [void]$wins.Add((New-Win 'installers' 'Installers you have already used' `
+                ('{0} of them, the newest from {1}. Removing an installer does not remove the program.' -f $installers.Count, (Format-QpWhen $newest $Now)) `
+                'An installer is only needed once. The program it installed stays exactly where it is.' `
+                (Add-Sizes $installers) $installers $canMove $(if ($canMove) { '' } else { $binOff }) $found.Truncated))
+        }
+        $old = @($found.Files |
+            Where-Object { $script:InstallerExtensions -notcontains $_.Ext -and $_.When -lt $Now.AddDays(-$DownloadDays) -and $_.Path.StartsWith($downloads + '\', [StringComparison]::OrdinalIgnoreCase) })
+        if ($old.Count) {
+            $newest = @($old | Sort-Object When -Descending)[0].When
+            [void]$wins.Add((New-Win 'downloads' 'Downloads from another year' `
+                ('{0} of them in your Downloads folder, and the newest is from {1}.' -f $old.Count, (Format-QpWhen $newest $Now)) `
+                'This goes by the date on the file, not by when it was last opened: anything that reads a file - your antivirus, Windows Search - updates "last opened" too.' `
+                (Add-Sizes $old) $old $canMove $(if ($canMove) { '' } else { $binOff }) $found.Truncated))
+        }
+    }
+
+    # ---- big files nobody has changed in years, from the scan that has already been done
+    $seenPaths = @{}
+    foreach ($w in $wins) { foreach ($i in $w.Items) { $seenPaths[$i.Path.ToLowerInvariant()] = $true } }
+    $cutoff = $Now.AddYears(-$OldYears)
+    $big = New-Object System.Collections.ArrayList
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($Space.Tree)
+    while ($stack.Count) {
+        $node = $stack.Pop()
+        foreach ($c in $node.Children) {
+            if (-not $c.IsFile) { $stack.Push($c); continue }
+            if ([int64]$c.Size -lt $BigFile -or $c.Modified -ge $cutoff) { continue }
+            if ($canMove -and [int64]$c.Size -gt $binLimit) { continue }
+            $path = [string]$c.Path
+            if ($seenPaths.ContainsKey($path.ToLowerInvariant())) { continue }
+            $skipIt = $false
+            foreach ($cl in $cloud) { if ($path.StartsWith($cl.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { $skipIt = $true } }
+            if ($skipIt) { continue }
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            if (-not (Get-QpSpaceAdvice -Path $path -Installed $installed).CanRecycle) { continue }
+            [void]$big.Add([pscustomobject]@{ Path = $path; Name = [string]$c.Name; Bytes = [int64]$c.Size; When = $c.Modified; Ext = ([IO.Path]::GetExtension($path)).ToLowerInvariant() })
+        }
+    }
+    if ($big.Count) {
+        $sorted = @($big | Sort-Object Bytes -Descending)
+        $newest = @($sorted | Sort-Object When -Descending)[0].When
+        [void]$wins.Add((New-Win 'bigold' 'Big files you have not changed in years' `
+            ('{0} of them, each over {1}, and the newest was last changed {2}.' -f $sorted.Count, (Format-QpBytes $BigFile), (Format-QpWhen $newest $Now)) `
+            'Only files that are yours to move: games, programs and other accounts are left out. This goes by the date on the file, not by when it was last opened.' `
+            (Add-Sizes $sorted) $sorted $canMove $(if ($canMove) { '' } else { $binOff })))
+    }
+
+    # ---- what Windows keeps after an update, and the bin itself
+    if ($isSystem) {
+        $wuItem = @($Cleanup | Where-Object { $_ -and $_.Id -eq 'wu.download' })[0]
+        if ($wuItem -and [int64]$wuItem.SizeBytes -gt 0) {
+            [void]$wins.Add((New-Win 'wu.download' 'Windows Update leftovers' `
+                'Update files Windows has already installed and kept.' `
+                'Windows keeps these in case it needs them again. It fetches them afresh if it ever does.' `
+                ([int64]$wuItem.SizeBytes) @() $false 'Tick "Windows Update download cache" in the list above, then Apply.'))
+        }
+        foreach ($c in $Space.Tree.Children) {
+            if ($c.IsFile) { continue }
+            if ($c.Name -eq 'Windows.old') {
+                [void]$wins.Add((New-Win 'windows.old' 'Your previous version of Windows' `
+                    'Kept after a Windows upgrade so you could go back.' `
+                    'Windows removes this by itself about ten days after an upgrade, and once it is gone you cannot go back to the old version.' `
+                    ([int64]$c.Size) @() $false 'Remove it in Settings > System > Storage > Temporary files, which does it safely. Quietpane will not touch it.'))
+            }
+        }
+    }
+    foreach ($c in $Space.Tree.Children) {
+        if (-not $c.IsFile -and $c.Name -like '$Recycle.Bin' -and [int64]$c.Size -gt 0) {
+            [void]$wins.Add((New-Win 'recyclebin' 'Your Recycle Bin' `
+                'Already deleted, still taking up room until the bin is emptied.' `
+                'Everything in here can still be put back, which is why Quietpane leaves the emptying to you.' `
+                ([int64]$c.Size) @() $false 'Right-click the Recycle Bin on your desktop and choose Empty Recycle Bin.'))
+        }
+    }
+
+    # The ones that are yours to move come first, biggest first; the ones that need Windows follow.
+    @($wins | Sort-Object @{ Expression = { -not $_.CanRecycle } }, @{ Expression = { $_.Bytes }; Descending = $true })
+}
+
+function Invoke-QpEasyWin {
+    <#
+        Moves everything in one suggestion to the Recycle Bin, in a single restore point. Each file is
+        checked again on its way out - still there, still yours to move, small enough for the bin - so a
+        list that has gone stale cannot take anything with it. Nothing is ever deleted for good.
+    #>
+    param([Parameter(Mandatory)]$Win, [switch]$Preview)
+    $items = @($Win.Items | Where-Object { $_ })
+    if (-not $items.Count) { Write-QpLog 'Nothing to move.' 'WARN'; return [pscustomobject]@{ Moved = 0; Bytes = [int64]0; Failed = 0 } }
+    if ($Preview) {
+        Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP'
+        foreach ($i in $items) { Write-QpLog ("Would move {0} ({1})" -f $i.Path, (Format-QpBytes $i.Bytes)) 'PREVIEW' }
+        Write-QpLog ('Preview finished. {0} file(s), {1}. Nothing was changed.' -f $items.Count, (Format-QpBytes (($items | Measure-Object -Property Bytes -Sum).Sum))) 'OK'
+        return [pscustomobject]@{ Moved = 0; Bytes = [int64]0; Failed = 0 }
+    }
+    $own = -not $script:Session
+    if ($own) { Start-QpSession 'space-tidy' }
+    $moved = 0; $failed = 0; $bytes = [int64]0
+    try {
+        foreach ($i in $items) {
+            $r = Invoke-QpSpaceRecycle -Path $i.Path -SizeBytes ([int64]$i.Bytes)
+            if ($r.Ok) { $moved++; $bytes += [int64]$i.Bytes } else { $failed++ }
+        }
+        if ($moved) { Write-QpLog ('{0}: {1} file(s) moved to the Recycle Bin, {2} in all. They stay there until you empty it.' -f $Win.Title, $moved, (Format-QpBytes $bytes)) 'OK' }
+        if ($failed) { Write-QpLog ('{0} file(s) stayed where they were - the lines above say why.' -f $failed) 'WARN' }
+    } finally { if ($own) { Stop-QpSession } }
+    [pscustomobject]@{ Moved = $moved; Bytes = $bytes; Failed = $failed }
+}
+
 #endregion
 
 #region ---------------------------------------------------------------- NVIDIA
@@ -4719,6 +4937,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpExtensionBlocks, Get-QpExtensionSlot, Invoke-QpExtension, ConvertFrom-QpChromeTime,
     Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpRecycleBinLimit, Move-QpToRecycleBin,
     Get-QpSpaceUse, Get-QpSpaceAdvice, Invoke-QpSpaceRecycle, Get-QpInstallPlaces,
+    Get-QpOldFiles, Get-QpEasyWins, Invoke-QpEasyWin,
     Get-QpShortcutPaths, Test-QpShortcuts, New-QpShortcuts, Remove-QpShortcuts, Initialize-QpShortcut, Get-QpOwnShortcuts,
     Install-QpCopy, Remove-QpCopy, Start-QpCopyRemoval, Get-QpAppVersion, Compare-QpVersion, Test-QpCopyMatches, Sync-QpInstall,
     Get-QpSignInTask, Test-QpSignInStart, Enable-QpSignInStart, Disable-QpSignInStart, Test-QpOwnSignInTask, New-QpSignInTask, Get-QpSignInAction,
